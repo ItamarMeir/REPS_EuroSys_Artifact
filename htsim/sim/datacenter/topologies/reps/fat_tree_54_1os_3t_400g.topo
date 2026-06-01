@@ -1,0 +1,29 @@
+# k=6 3-tier fat-tree: 54 hosts, 9 core paths, 1:1 oversubscription
+# k=6: 6 pods, 3 ToR + 3 Agg per pod, 9 Core switches, 3 hosts per ToR
+Nodes 54
+Tiers 3
+Podsize 9
+
+Tier 0
+Oversubscribed 1
+Downlink_speed_Gbps 400
+Radix_Down 3
+Radix_Up 3
+Downlink_Latency_ns 1000
+Switch_Latency_ns 0
+
+Tier 1
+Oversubscribed 1
+Downlink_speed_Gbps 400
+Radix_Down 3
+Radix_Up 3
+Downlink_Latency_ns 1000
+Switch_Latency_ns 0
+Bundle 1
+
+Tier 2
+Downlink_speed_Gbps 400
+Radix_Down 6
+Downlink_Latency_ns 1000
+Switch_Latency_ns 0
+Bundle 1

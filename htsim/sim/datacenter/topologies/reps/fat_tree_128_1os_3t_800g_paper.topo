@@ -1,0 +1,29 @@
+# Test 3-tier FatTree that is supposed to match	the default auto-generated topology
+# Paper-faithful copy: Downlink_Latency_ns 500 (0.5 µs/hop) matching arXiv:2509.07907v2
+Nodes 128
+Tiers 3
+Podsize 16
+
+Tier 0
+Oversubscribed 1
+Downlink_speed_Gbps 800
+Radix_Down 4
+Radix_Up 4
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+
+Tier 1
+Oversubscribed 1
+Downlink_speed_Gbps 800
+Radix_Down 4
+Radix_Up 4
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+Bundle 1
+
+Tier 2
+Downlink_speed_Gbps 800
+Radix_Down 8
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+Bundle 1

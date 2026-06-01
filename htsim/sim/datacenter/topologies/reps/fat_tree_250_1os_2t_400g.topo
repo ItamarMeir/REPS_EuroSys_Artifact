@@ -1,0 +1,18 @@
+# k=10 2-tier leaf-spine: 250 hosts, 25 spines (25 paths), 1:1 oversubscription
+# 10 ToRs x 25 hosts/ToR, each ToR fully-connected to all 25 spines.
+Nodes 250
+Tiers 2
+Podsize 250
+
+Tier 0
+Downlink_speed_Gbps 400
+Radix_Down 25
+Radix_Up 25
+Downlink_Latency_ns 1000
+Switch_Latency_ns 0
+
+Tier 1
+Downlink_speed_Gbps 400
+Radix_Down 10
+Downlink_Latency_ns 1000
+Switch_Latency_ns 0

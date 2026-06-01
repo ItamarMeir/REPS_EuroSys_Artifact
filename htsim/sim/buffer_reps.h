@@ -4,6 +4,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <cstdint>
+#include <vector>
 
 template <typename T> class CircularBufferREPS {
   private:
@@ -39,6 +40,12 @@ template <typename T> class CircularBufferREPS {
     int getSize() const;
     int getNumberFreshEntropies() const;
     bool containsEntropy(uint16_t ev);
+    // ===== ADDED (ev-health-counter) ====================================
+    // Returns the values of all currently-valid buffer slots (≤ repsBufferSize
+    // entries). Used by SF_COUNTER_EVHEALTH to iterate buffer contents in O(B)
+    // rather than scanning all _no_of_paths EVs with containsEntropy().
+    std::vector<T> getValidEntropies() const;
+    // ===== END ADDED (ev-health-counter) ================================
     int mostValidIdx() const;
     bool isEmpty() const;
     bool isFull() const;

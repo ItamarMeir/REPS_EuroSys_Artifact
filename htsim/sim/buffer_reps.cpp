@@ -247,6 +247,20 @@ template <typename T> void CircularBufferREPS<T>::print() {
     std::cout << std::endl;
 }
 
+// ===== ADDED (ev-health-counter) ============================================
+// getValidEntropies(): returns the values of all currently-valid buffer slots.
+// The result has at most repsBufferSize entries (typically ≤ 8). Used by
+// SF_COUNTER_EVHEALTH to count bad-EV slots in O(B) instead of O(_no_of_paths×B).
+template <typename T> std::vector<T> CircularBufferREPS<T>::getValidEntropies() const {
+    std::vector<T> out;
+    out.reserve(max_size);
+    for (int i = 0; i < max_size; i++) {
+        if (buffer[i].isValid) out.push_back(buffer[i].value);
+    }
+    return out;
+}
+// ===== END ADDED (ev-health-counter) ========================================
+
 // Prints the elements of the buffer
 template <typename T> bool CircularBufferREPS<T>::containsEntropy(uint16_t givenEntropy) {
     for (int i = 0; i < max_size; i++) {

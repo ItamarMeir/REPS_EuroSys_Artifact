@@ -14,6 +14,7 @@
 #include "clock.h"
 #include "uec.h"
 #include "compositequeue.h"
+#include "../statefulecnqueue.h"
 #include "topology.h"
 #include "connection_matrix.h"
 #include "pciemodel.h"
@@ -39,6 +40,42 @@ int DEFAULT_NODES = 128;
 // #define DEFAULT_CWND 50
 
 EventList& eventlist = EventList::getTheEventList();
+
+// State-Aware NSCC+REPS: dynamic link-failure event. Fires once at t_fail to
+// mark the targeted Agg<->Core pipes failed (both directions). If t_recover >
+// t_fail, reschedules itself to clear the failure at t_recover. Pure addition;
+// existing failure mechanisms (FAILURE_GENERATOR) are untouched.
+class LinkFailureEvent : public EventSource {
+public:
+    LinkFailureEvent(EventList& el, Pipe* up, Pipe* down,
+                     simtime_picosec t_fail, simtime_picosec t_recover)
+        : EventSource(el, "link_failure"),
+          _up(up), _down(down),
+          _t_fail(t_fail), _t_recover(t_recover), _state(0) {
+        eventlist().sourceIsPending(*this, _t_fail);
+    }
+    void doNextEvent() override {
+        if (_state == 0) {
+            if (_up)   _up->setFailed(true);
+            if (_down) _down->setFailed(true);
+            cout << "[link_failure] failed pipe at " << timeAsUs(eventlist().now())
+                 << " us" << endl;
+            _state = 1;
+            if (_t_recover > _t_fail) {
+                eventlist().sourceIsPending(*this, _t_recover);
+            }
+        } else {
+            if (_up)   _up->setFailed(false);
+            if (_down) _down->setFailed(false);
+            cout << "[link_failure] restored pipe at " << timeAsUs(eventlist().now())
+                 << " us" << endl;
+        }
+    }
+private:
+    Pipe *_up, *_down;
+    simtime_picosec _t_fail, _t_recover;
+    int _state;
+};
 
 void exit_error(char* progr) {
     cout << "Usage " << progr << " [-nodes N]\n\t[-conns C]\n\t[-cwnd cwnd_size]\n\t[-q queue_size]\n\t[-recv_oversub_cc] Use receiver-driven AIMD to reduce total window when trims are not last hop\n\t[-queue_type composite|random|lossless|lossless_input|]\n\t[-tm traffic_matrix_file]\n\t[-strat route_strategy (single,rand,perm,pull,ecmp,\n\tecmp_host path_count,ecmp_ar,ecmp_rr,\n\tecmp_host_ar ar_thresh)]\n\t[-log log_level]\n\t[-seed random_seed]\n\t[-end end_time_in_usec]\n\t[-mtu MTU]\n\t[-hop_latency x] per hop wire latency in us,default 1 \n\t[-disable_fd] disable fair decrease to get higher throught, \n\t[-target_q_delay x] target_queuing_delay in us, default is 6us \n\t[-switch_latency x] switching latency in us, default 0\n\t[-host_queue_type  swift|prio|fair_prio]\n\t[-logtime dt] sample time for sinklogger, etc" << endl;
@@ -83,6 +120,7 @@ int main(int argc, char **argv) {
     mem_b ecn_low = 0.2 * queuesize, ecn_high = 0.8 * queuesize;
 
     bool receiver_driven = true;
+    bool force_disable_tor_ecn = false;
 
     RouteStrategy route_strategy = NOT_SET;
     
@@ -115,8 +153,24 @@ int main(int argc, char **argv) {
     bool use_exp_avg_ecn = UecSrc::get_use_exp_avg_ecn();
     bool input_fail_on = false;
 
+    // State-Aware NSCC+REPS testbed knobs. All default to "off / first link" so
+    // omitting the flags leaves the simulation behavior unchanged. Units are
+    // microseconds, matching the rest of the htsim CLI (e.g., -end).
+    double fail_link_fail_us = 0.0;       // <= 0 means do not schedule a failure
+    double fail_link_recover_us = 0.0;    // <= fail_link_fail_us means no recovery
+    int    fail_link_bundle = 0;
+    // Multi-link failure: each entry is one (agg_id, core_id) pair. If empty
+    // when -fail_link_time is set, defaults to a single (0,0) link.
+    vector<pair<int,int>> fail_link_targets;
+
     string data_collection_dir = "";
     htsim::DataCollector& data_collector = htsim::DataCollector::get_instance();
+
+    // ===== ADDED (min-rto-flag) =====
+    // -1 = not requested; otherwise overrides auto-computed RTO floor (us).
+    // Re-applied after the auto-compute at main_uec.cpp:~L1018.
+    int min_rto_us_override = -1;
+    // ===== END ADDED =====
 
     while (i<argc) {
         if (!strcmp(argv[i], "-data_collection_config")) {
@@ -179,6 +233,23 @@ int main(int argc, char **argv) {
             FatTreeTopology::skip_asy = true;
         } else if (!strcmp(argv[i],"-mixed_lb_traffic")) {
             UecSrc::_mixed_lb_traffic = true;
+        } else if (!strcmp(argv[i],"-klb_k")) {
+            UecSrc::_klb_k_param = atoi(argv[i+1]);
+            printf("KLB/SKLB K=%d\n", UecSrc::_klb_k_param);
+            i++;
+        } else if (!strcmp(argv[i],"-klb_enable_fixes")) {
+            UecSrc::_klb_enable_fixes = true;
+            printf("KLB fixes enabled (EV cooldown + ECN hysteresis)\n");
+        } else if (!strcmp(argv[i],"-max_incumbents")) {
+            StatefulECNQueue::_max_incumbents_param = atoi(argv[i+1]);
+            printf("StatefulECNQueue max_incumbents=%d\n", StatefulECNQueue::_max_incumbents_param);
+            i++;
+        } else if (!strcmp(argv[i],"-idle_timeout_us")) {
+            StatefulECNQueue::_idle_timeout_ps_param = timeFromUs(atof(argv[i+1]));
+            printf("StatefulECNQueue idle_timeout=%.1fus\n", atof(argv[i+1]));
+            i++;
+        } else if (!strcmp(argv[i],"-disable_tor_ecn")) {
+            force_disable_tor_ecn = true;
         } else if (!strcmp(argv[i],"-mp_flows")) {
             UecSrc::_num_mp_flows = atoi(argv[i+1]);
             i++;
@@ -186,6 +257,11 @@ int main(int argc, char **argv) {
             UecSrc::_collect_data = true;
             CompositeQueue::_collect_data = true;
             _collect_data = true;
+        } else if (!strcmp(argv[i],"-log_ecn_timeseries")) {
+            CompositeQueue::_log_ecn_timeseries = true;
+        } else if (!strcmp(argv[i],"-ecn_bin_us")) {
+            CompositeQueue::_ecn_bin_ps = (simtime_picosec)atoll(argv[i+1]) * 1000000;
+            i++;
         } else if (!strcmp(argv[i],"-save_rtt")) {
             UecSrc::_save_rtt = true;
         } else if (!strcmp(argv[i],"-other_location")) {
@@ -212,6 +288,32 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "-down_ratio")) {
             FatTreeTopology::_failed_link_ratio = std::stod(argv[i + 1]);
             i++;
+        // ===== ADDED (min-rto-flag) =====
+        // Override the auto-computed RTO floor with an explicit value in microseconds.
+        // Paper 1 (REPS, arXiv:2407.21625) sec 4.1 sets RTO = 70 us.
+        // Must appear AFTER the -topo parsing so it survives the later auto-compute at
+        // main_uec.cpp:~L1018. We track the override and re-apply post auto-compute.
+        } else if (!strcmp(argv[i],"-min_rto")) {
+            min_rto_us_override = atoi(argv[i+1]);
+            cout << "min_rto override requested: " << min_rto_us_override << " us" << endl;
+            i++;
+        // ===== END ADDED =====
+        // ===== ADDED (per-host-lb) =====
+        // Override LB algorithm for specific source hosts. Format:
+        //   -host_lb_overrides 0:ecmp,3:freezing,7:oblivious
+        // Overridden hosts use the named algorithm; all others use the global
+        // -load_balancing_algo. Used to reproduce paper Fig 4 mixed regime
+        // (ECMP elephants + REPS or OPS sprayed) when -ecmp_elephant_threshold
+        // isn't precise enough.
+        } else if (!strcmp(argv[i],"-host_lb_overrides")) {
+            if (!UecSrc::_parseHostLBString(argv[i+1])) {
+                cerr << "Failed to parse -host_lb_overrides: " << argv[i+1] << endl;
+                exit(1);
+            }
+            cout << "Per-host LB overrides set for " << UecSrc::_per_host_lb_override.size()
+                 << " hosts" << endl;
+            i++;
+        // ===== END ADDED (per-host-lb) =====
         } else if (!strcmp(argv[i],"-sender_cc_only")) {
             UecSrc::_sender_based_cc = true;
             UecSrc::_receiver_based_cc = false;
@@ -241,6 +343,35 @@ int main(int argc, char **argv) {
             UecSrc::_target_Qdelay = timeFromUs(atof(argv[i+1]));
             cout << "target_q_delay" << atof(argv[i+1]) << " us"<< endl;
             i++;
+        // ===== ADDED (swift-cc) CLI flags ===================================
+        } else if (!strcmp(argv[i],"-swift_beta")) {
+            UecSrc::_swift_beta = atof(argv[i+1]);
+            cout << "swift_beta " << UecSrc::_swift_beta << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-swift_max_mdf")) {
+            UecSrc::_swift_max_mdf = atof(argv[i+1]);
+            cout << "swift_max_mdf " << UecSrc::_swift_max_mdf << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-swift_ai")) {
+            UecSrc::_swift_ai = atof(argv[i+1]);
+            cout << "swift_ai " << UecSrc::_swift_ai << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-swift_median_pct")) {
+            UecSrc::_swift_median_pct = atoi(argv[i+1]);
+            cout << "swift_median_pct " << UecSrc::_swift_median_pct << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-lswift_dup_threshold")) {
+            UecSrc::_lswift_dup_threshold = (uint32_t)atoi(argv[i+1]);
+            cout << "lswift_dup_threshold " << UecSrc::_lswift_dup_threshold << endl;
+            i++;
+        // ===== END ADDED (swift-cc) CLI flags ================================
+        // ===== ADDED (ecmp-elephant) CLI flag ================================
+        } else if (!strcmp(argv[i],"-ecmp_elephant_threshold")) {
+            UecSrc::_ecmp_elephant_threshold = (uint64_t)atoll(argv[i+1]);
+            cout << "ecmp_elephant_threshold " << UecSrc::_ecmp_elephant_threshold
+                 << " bytes (flows >= this size use ECMP)" << endl;
+            i++;
+        // ===== END ADDED (ecmp-elephant) CLI flag ============================
         } else if (!strcmp(argv[i],"-sender_cc_algo")) {
             UecSrc::_sender_based_cc = true;
             
@@ -264,10 +395,20 @@ int main(int argc, char **argv) {
                 UecSrc::_sender_cc_algo = UecSrc::SMARTT_ECN_FIFD;
             else if (!strcmp(argv[i+1],"smartt_rtt"))
                 UecSrc::_sender_cc_algo = UecSrc::SMARTT_RTT;
+            // ===== ADDED (swift-cc) =========================================
+            else if (!strcmp(argv[i+1],"swift"))
+                UecSrc::_sender_cc_algo = UecSrc::SWIFT;
+            else if (!strcmp(argv[i+1],"lswift"))
+                UecSrc::_sender_cc_algo = UecSrc::LSWIFT;
+            else if (!strcmp(argv[i+1],"mswift"))
+                UecSrc::_sender_cc_algo = UecSrc::MSWIFT;
+            else if (!strcmp(argv[i+1],"mnscc"))
+                UecSrc::_sender_cc_algo = UecSrc::MNSCC;
+            // ===== END ADDED (swift-cc) =====================================
             else {
                 cout << "UNKNOWN CC ALGO " << argv[i+1] << endl;
                 exit(1);
-            }    
+            }
             cout << "sender based algo "<< argv[i+1] << endl;
             i++;
         } else if (!strcmp(argv[i],"-save_data_folder")) {
@@ -312,8 +453,13 @@ int main(int argc, char **argv) {
                 UecSrc::_load_balancing_algo = UecSrc::MP;
             }else if (!strcmp(argv[i+1], "freezing")) {
                 UecSrc::_load_balancing_algo = UecSrc::FREEZING;
-            } 
-            else {
+            } else if (!strcmp(argv[i+1], "klb")) {
+                UecSrc::_load_balancing_algo = UecSrc::KLB;
+            } else if (!strcmp(argv[i+1], "sklb")) {
+                UecSrc::_load_balancing_algo = UecSrc::SKLB;
+            } else if (!strcmp(argv[i+1], "hklb")) {
+                UecSrc::_load_balancing_algo = UecSrc::HKLB;
+            } else {
                 cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps or reps2" << endl;
                 exit_error(argv[0]);
             }
@@ -332,6 +478,9 @@ int main(int argc, char **argv) {
             }
             else if (!strcmp(argv[i+1], "aeolus_ecn")){
                 qt = AEOLUS_ECN;
+            }
+            else if (!strcmp(argv[i+1], "stateful_ecn")) {
+                qt = STATEFUL_ECN;
             }
             else {
                 cout << "Unknown queue type " << argv[i+1] << endl;
@@ -463,6 +612,98 @@ int main(int argc, char **argv) {
             }
 
             i++;
+        } else if (!strcmp(argv[i],"-state_aware_ecn")){
+            // State-Aware NSCC+REPS master toggle. Off by default.
+            UecSrc::_state_aware_ecn_enabled = true;
+            // State-aware mode requires REPS freezing semantics to function.
+            CircularBufferREPS<int>::setUseFreezing(true);
+            cout << "State-Aware NSCC+REPS enabled (CC will mask ECN unless _network_is_asymmetric)" << endl;
+
+        // ===== ADDED (smart-filter): off by default. Mutually exclusive with =====
+        // -state_aware_ecn (hard error below after parse loop).               =====
+        // See state_aware_experiments/expNN_smart_filter/ARCHITECTURE.md.     =====
+        } else if (!strcmp(argv[i],"-smart_filter_mode")){
+            const char* m = argv[i+1];
+            if      (!strcmp(m,"none"))                 UecSrc::_smart_filter_mode = UecSrc::SF_NONE;
+            else if (!strcmp(m,"md_gain"))              UecSrc::_smart_filter_mode = UecSrc::SF_MD_GAIN;
+            else if (!strcmp(m,"rtt_blend_ecn_thresh")) UecSrc::_smart_filter_mode = UecSrc::SF_RTT_BLEND_ECN_THRESH;
+            else { cerr << "Unknown -smart_filter_mode: " << m
+                        << " (valid: none, md_gain, rtt_blend_ecn_thresh)" << endl; exit(1); }
+            cout << "Smart-filter mode: " << m << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-smart_filter_counter")){
+            const char* c = argv[i+1];
+            if      (!strcmp(c,"ecn"))      UecSrc::_smart_filter_counter = UecSrc::SF_COUNTER_ECN;
+            else if (!strcmp(c,"fresh"))    UecSrc::_smart_filter_counter = UecSrc::SF_COUNTER_FRESH;
+            // ===== ADDED (ev-health-counter) =================================
+            else if (!strcmp(c,"evhealth")) UecSrc::_smart_filter_counter = UecSrc::SF_COUNTER_EVHEALTH;
+            // ===== END ADDED (ev-health-counter) =============================
+            else { cerr << "Unknown -smart_filter_counter: " << c
+                        << " (valid: ecn, fresh, evhealth)" << endl; exit(1); }
+            cout << "Smart-filter counter source: " << c << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-smart_filter_ecn_thresh")){
+            // Interpreted at use-time against the live B so no manual sync with
+            // -reps_buffer_size is needed. Default -1 = auto ceil(B/4).
+            int k = atoi(argv[i+1]);
+            if (k < -1) { cerr << "-smart_filter_ecn_thresh must be >= -1 (use -1 for auto)\n"; exit(1); }
+            UecSrc::_smart_filter_ecn_thresh = k;
+            if (k < 0) cout << "Smart-filter ECN threshold: auto (ceil(B/4))" << endl;
+            else       cout << "Smart-filter ECN threshold K=" << k << endl;
+            i++;
+        // ===== END ADDED (smart-filter) =====================================
+
+        // ===== ADDED (wtd-in-nscc): off by default. Mutually exclusive with =====
+        // -state_aware_ecn and -smart_filter_mode (hard error below).         =====
+        // Reference: SMaRTT-REPS paper §3.6.1.                               =====
+        } else if (!strcmp(argv[i],"-wtd_in_nscc")){
+            UecSrc::_nscc_wtd_enabled = true;
+            cout << "WTD in NSCC enabled (ECN EWMA threshold="
+                 << UecSrc::_wtd_threshold << ")" << endl;
+        // ===== END ADDED (wtd-in-nscc) ======================================
+
+        } else if (!strcmp(argv[i],"-reps_buffer_size")){
+            // Set the FREEZING circular-buffer capacity (default 8).
+            // Must be parsed before UecSrc objects are constructed.
+            int buf_sz = atoi(argv[i+1]);
+            CircularBufferREPS<int>::setBufferSize(buf_sz);
+            cout << "REPS buffer size set to " << buf_sz << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_reps_state")){
+            // Open output CSV for REPS-buffer state instrumentation.
+            UecSrc::_reps_state_log = fopen(argv[i+1], "w");
+            if (!UecSrc::_reps_state_log) {
+                cerr << "Could not open REPS state log: " << argv[i+1] << endl;
+                exit(1);
+            }
+            fprintf(UecSrc::_reps_state_log,
+                    "time_us,src_id,ecn,fresh,recycle,cwnd_pkts,in_flight_pkts,exp_avg_ecn,"
+                    "buf_size,ecn_counter,fresh_inv,sf_mode,sf_counter_used,sf_ecn_thresh,"
+                    "sf_gain,sa_asym,cc_ecn_view,"
+                    "wtd_enabled,wtd_can_decrease\n");
+            cout << "Logging REPS-buffer state to " << argv[i+1] << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_reps_state_src")){
+            UecSrc::_reps_state_log_srcs.insert((uint32_t)atoi(argv[i+1]));
+            cout << "Adding src " << argv[i+1]
+                 << " to REPS-state log (total tracked="
+                 << UecSrc::_reps_state_log_srcs.size() << ")" << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-fail_link_time")){
+            fail_link_fail_us    = atof(argv[i+1]);
+            fail_link_recover_us = atof(argv[i+2]);
+            cout << "Scheduled dynamic link failure: fail at " << fail_link_fail_us
+                 << " us, recover at " << fail_link_recover_us << " us" << endl;
+            i += 2;
+        } else if (!strcmp(argv[i],"-fail_link_target")){
+            // Repeatable: each -fail_link_target <agg> <core> appends one link.
+            int agg  = atoi(argv[i+1]);
+            int core = atoi(argv[i+2]);
+            fail_link_targets.emplace_back(agg, core);
+            cout << "Dynamic link-failure target appended: agg=" << agg
+                 << ", core=" << core
+                 << " (total targets=" << fail_link_targets.size() << ")" << endl;
+            i += 2;
         } else if (!strcmp(argv[i],"-linkspeed")){
             // linkspeed specified is in Mbps
             linkspeed = speedFromMbps(atof(argv[i+1]));
@@ -594,6 +835,23 @@ int main(int argc, char **argv) {
         //FAILURE_GENERATOR->topology = topo[0];
     }
 
+    // ===== ADDED (smart-filter + wtd-in-nscc): coexistence guard ==========
+    // -state_aware_ecn, -smart_filter_mode, and -wtd_in_nscc are three
+    // independent CC additions that target the same gate site and must not
+    // be combined in the same run (each is its own A/B test).
+    {
+        int cc_addons = (UecSrc::_state_aware_ecn_enabled ? 1 : 0)
+                      + (UecSrc::_smart_filter_mode != UecSrc::SF_NONE ? 1 : 0)
+                      + (UecSrc::_nscc_wtd_enabled ? 1 : 0);
+        if (cc_addons > 1) {
+            cerr << "ERROR: -state_aware_ecn, -smart_filter_mode, and -wtd_in_nscc are "
+                 << "independent CC additions and must not be combined in the same run. "
+                 << "Pick exactly one." << endl;
+            exit(1);
+        }
+    }
+    // ===== END ADDED (smart-filter + wtd-in-nscc) ========================
+
     if (!param_queuesize_set || !param_ecn_set){
         cout << "queuesizes and ecn threshold should be input from the parameters, otherwise, queuesize = BDP of 100Gbps and 12us RTT and ecn_low is 20\% of queuesize and 80\% of queuesize."<< endl;
         //abort(); We should restore to default values here, not abort
@@ -620,8 +878,9 @@ int main(int argc, char **argv) {
     if (ecn){
         ecn_low = memFromPkt(ecn_low);
         ecn_high = memFromPkt(ecn_high);
-        cout << "Setting ECN for queues with size " << queuesize << ", with parameters low " << ecn_low << " high " << ecn_high <<  " enable on tor downlink " << !receiver_driven << endl;
-        FatTreeTopology::set_ecn_parameters(true, !receiver_driven, ecn_low,ecn_high);
+        bool ecn_on_tor_dl = !receiver_driven && !force_disable_tor_ecn;
+        cout << "Setting ECN for queues with size " << queuesize << ", with parameters low " << ecn_low << " high " << ecn_high <<  " enable on tor downlink " << ecn_on_tor_dl << endl;
+        FatTreeTopology::set_ecn_parameters(true, ecn_on_tor_dl, ecn_low,ecn_high);
     }
 
     if (enable_qa_gate){
@@ -789,6 +1048,14 @@ int main(int argc, char **argv) {
 
    //2 priority queues; 3 hops for incast
     UecSrc::_min_rto = timeFromUs(timeAsUs(network_max_unloaded_rtt) + queuesize * 4.0 * 8 * 1000000 / linkspeed);
+
+    // ===== ADDED (min-rto-flag) =====
+    // Honor the -min_rto override AFTER the auto-compute above so the user's value wins.
+    if (min_rto_us_override > 0) {
+        UecSrc::_min_rto = timeFromUs((uint32_t)min_rto_us_override);
+        cout << "min_rto override applied: " << min_rto_us_override << " us" << endl;
+    }
+    // ===== END ADDED =====
 
     cout << "Setting queuesize to " << queuesize << endl;
     cout << "Setting min RTO to " << timeAsUs(UecSrc::_min_rto) << endl;
@@ -958,6 +1225,12 @@ int main(int argc, char **argv) {
         uec_src->setSrc(src);
         uec_src->setDst(dest);
 
+        // ===== ADDED (per-host-lb) =====
+        // If this src host has a -host_lb_overrides entry, re-run LB dispatch
+        // with the overridden algorithm. No-op if no override is set.
+        uec_src->applyHostLBOverride();
+        // ===== END ADDED (per-host-lb) =====
+
         uec_src->from = src;
         uec_src->to = dest;
 
@@ -1075,12 +1348,55 @@ int main(int argc, char **argv) {
     //logfile.write("# corelinkrate = " + ntoa(HOST_NIC*CORE_TO_HOST) + " pkt/sec");
     //logfile.write("# buffer = " + ntoa((double) (queues_na_ni[0][1]->_maxsize) / ((double) pktsize)) + " pkt");
     
+    // State-Aware NSCC+REPS: schedule a dynamic Agg<->Core pipe failure if the
+    // user asked for one. Both directions of the link are flipped together to
+    // mimic a cut cable. Indexes default to (0, 0) targeting the first
+    // agg<->core pipe in the topology.
+    if (fail_link_fail_us > 0.0 && !topo.empty() && topo[0] != nullptr) {
+        if (fail_link_targets.empty()) {
+            fail_link_targets.emplace_back(0, 0); // default = first agg<->core
+        }
+        FatTreeTopology* t0 = topo[0];
+        // simtime_picosec uses picoseconds; 1 us == 1e6 ps. Shared by all targets.
+        simtime_picosec t_fail    = (simtime_picosec)(fail_link_fail_us    * 1000000.0);
+        simtime_picosec t_recover = (simtime_picosec)(fail_link_recover_us * 1000000.0);
+        for (const auto& tgt : fail_link_targets) {
+            int agg = tgt.first, core = tgt.second;
+            Pipe* up = nullptr;
+            Pipe* down = nullptr;
+            if (agg  >= 0 && (size_t)agg  < t0->pipes_nup_nc.size() &&
+                core >= 0 && (size_t)core < t0->pipes_nup_nc[agg].size() &&
+                (size_t)fail_link_bundle < t0->pipes_nup_nc[agg][core].size()) {
+                up = t0->pipes_nup_nc[agg][core][fail_link_bundle];
+            }
+            if (core >= 0 && (size_t)core < t0->pipes_nc_nup.size() &&
+                agg  >= 0 && (size_t)agg  < t0->pipes_nc_nup[core].size() &&
+                (size_t)fail_link_bundle < t0->pipes_nc_nup[core][agg].size()) {
+                down = t0->pipes_nc_nup[core][agg][fail_link_bundle];
+            }
+            if (up == nullptr || down == nullptr) {
+                cerr << "[link_failure] target agg=" << agg
+                     << " core=" << core
+                     << " not found in topology; skipping." << endl;
+                continue;
+            }
+            new LinkFailureEvent(eventlist, up, down, t_fail, t_recover);
+            cout << "[link_failure] scheduled: pipe agg=" << agg
+                 << " core=" << core
+                 << " fail@" << fail_link_fail_us << "us"
+                 << " recover@" << fail_link_recover_us << "us" << endl;
+        }
+    }
+
     // GO!
     cout << "Starting simulation" << endl;
     while (eventlist.doNextEvent()) {
     }
 
     cout << "Done" << endl;
+    if (CompositeQueue::_log_ecn_timeseries) {
+        CompositeQueue::dump_ecn_timeseries(cout);
+    }
     int new_pkts = 0, rtx_pkts = 0, bounce_pkts = 0, rts_pkts = 0, ack_pkts = 0;
     for (size_t ix = 0; ix < uec_srcs.size(); ix++) {
         new_pkts += uec_srcs[ix]->_new_packets_sent;

@@ -10,6 +10,45 @@ bool CompositeQueue::_collect_data = false;
 bool CompositeQueue::scenario_micro_failures = false;
 bool CompositeQueue::_use_timeouts = true;
 
+bool CompositeQueue::_log_ecn_timeseries = false;
+simtime_picosec CompositeQueue::_ecn_bin_ps = 100000000; // 100us in ps
+std::vector<uint64_t> CompositeQueue::_ecn_bin_marks_tor;
+std::vector<uint64_t> CompositeQueue::_ecn_bin_marks_agg;
+std::vector<uint64_t> CompositeQueue::_ecn_bin_marks_core;
+std::vector<uint64_t> CompositeQueue::_ecn_bin_pkts_tor;
+std::vector<uint64_t> CompositeQueue::_ecn_bin_pkts_agg;
+std::vector<uint64_t> CompositeQueue::_ecn_bin_pkts_core;
+
+void CompositeQueue::record_ecn_bin(simtime_picosec now, uint32_t tier, bool marked) {
+    size_t bin = (size_t)(now / _ecn_bin_ps);
+    std::vector<uint64_t> *m = nullptr, *p = nullptr;
+    if (tier == 1)      { m = &_ecn_bin_marks_tor;  p = &_ecn_bin_pkts_tor;  }
+    else if (tier == 2) { m = &_ecn_bin_marks_agg;  p = &_ecn_bin_pkts_agg;  }
+    else if (tier == 3) { m = &_ecn_bin_marks_core; p = &_ecn_bin_pkts_core; }
+    else return;
+    while (m->size() <= bin) m->push_back(0);
+    while (p->size() <= bin) p->push_back(0);
+    (*p)[bin]++;
+    if (marked) (*m)[bin]++;
+}
+
+void CompositeQueue::dump_ecn_timeseries(std::ostream& os) {
+    size_t n = std::max({_ecn_bin_marks_tor.size(),  _ecn_bin_marks_agg.size(),
+                         _ecn_bin_marks_core.size(), _ecn_bin_pkts_tor.size(),
+                         _ecn_bin_pkts_agg.size(),   _ecn_bin_pkts_core.size()});
+    os << "ECN_TIMESERIES bin_us=" << (_ecn_bin_ps / 1000000) << " bins=" << n << "\n";
+    auto at = [](const std::vector<uint64_t>& v, size_t i) -> uint64_t {
+        return i < v.size() ? v[i] : 0;
+    };
+    for (size_t b = 0; b < n; b++) {
+        os << "ECN_BIN t_us=" << (b * (_ecn_bin_ps / 1000000))
+           << " tor_m=" << at(_ecn_bin_marks_tor,  b) << " tor_p=" << at(_ecn_bin_pkts_tor,  b)
+           << " agg_m=" << at(_ecn_bin_marks_agg,  b) << " agg_p=" << at(_ecn_bin_pkts_agg,  b)
+           << " core_m=" << at(_ecn_bin_marks_core, b) << " core_p=" << at(_ecn_bin_pkts_core, b)
+           << "\n";
+    }
+}
+
 #define DEBUG_QUEUE_ID -1 // set to queue ID to enable debugging
 
 CompositeQueue::CompositeQueue(linkspeed_bps bitrate, mem_b maxsize, EventList& eventlist, 
@@ -95,8 +134,12 @@ void CompositeQueue::completeService(){
         _queuesize_low -= pkt->size();
 
         //ECN mark on deque
-        if (decide_ECN()) {
+        bool ecn_marked = decide_ECN();
+        if (ecn_marked) {
             pkt->set_flags(pkt->flags() | ECN_CE);
+        }
+        if (_log_ecn_timeseries && _switch) {
+            CompositeQueue::record_ecn_bin(eventlist().now(), _switch->getType(), ecn_marked);
         }
         if (_queue_id == DEBUG_QUEUE_ID) {
             cout << timeAsUs(eventlist().now()) <<" name " <<_nodename <<" _queuesize_low " 

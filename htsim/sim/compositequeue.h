@@ -12,6 +12,8 @@
 
 
 #include <list>
+#include <ostream>
+#include <vector>
 #include "metric.h"
 #include "failuregenerator.h"
 #include "queue.h"
@@ -71,6 +73,19 @@ class CompositeQueue : public Queue {
     static bool _collect_data;
     static bool _use_timeouts;
     static bool scenario_micro_failures;
+
+    // Per-tier ECN time-series instrumentation (set via -log_ecn_timeseries).
+    // Bin index = eventlist().now() / _ecn_bin_ps. Tier index: 0=ToR, 1=Agg, 2=Core.
+    static bool _log_ecn_timeseries;
+    static simtime_picosec _ecn_bin_ps;
+    static std::vector<uint64_t> _ecn_bin_marks_tor;
+    static std::vector<uint64_t> _ecn_bin_marks_agg;
+    static std::vector<uint64_t> _ecn_bin_marks_core;
+    static std::vector<uint64_t> _ecn_bin_pkts_tor;
+    static std::vector<uint64_t> _ecn_bin_pkts_agg;
+    static std::vector<uint64_t> _ecn_bin_pkts_core;
+    static void record_ecn_bin(simtime_picosec now, uint32_t tier, bool marked);
+    static void dump_ecn_timeseries(std::ostream& os);
 
  protected:
     // Mechanism

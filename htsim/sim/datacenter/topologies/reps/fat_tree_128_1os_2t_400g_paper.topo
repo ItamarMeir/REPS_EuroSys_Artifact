@@ -1,0 +1,18 @@
+# 2-tier FatTree, 128 nodes, 400 Gbps
+# Paper-faithful: Downlink_Latency_ns 500 (0.5 us/hop) matching REPS paper arXiv:2407.21625 sec 4.1
+Nodes 128
+Tiers 2
+Podsize 128
+
+Tier 0
+Downlink_speed_Gbps 400
+Radix_Down 8
+Radix_Up 8
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+
+Tier 1
+Downlink_speed_Gbps 400
+Radix_Down 16
+Downlink_Latency_ns 500
+Switch_Latency_ns 0

@@ -62,6 +62,13 @@ Pipe::receivePacket(Packet& pkt)
         }
     }
 
+    // Dynamic link failure (State-Aware NSCC+REPS): if this pipe is marked
+    // failed by the LinkFailureEvent, drop every arriving packet.
+    if (_failed) {
+        pkt.free();
+        return;
+    }
+
     if (_count == 0){
         /* no packets currently inflight; need to notify the eventlist
            we've an event pending */

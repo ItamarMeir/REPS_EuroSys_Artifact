@@ -1,0 +1,29 @@
+# k=10 3-tier fat-tree: 250 hosts, 10 pods, (k/2)^2 = 25 core paths, 1:1 oversubscription
+# Paper-faithful copy: Downlink_Latency_ns 500 (0.5 µs/hop) matching arXiv:2509.07907v2
+Nodes 250
+Tiers 3
+Podsize 25
+
+Tier 0
+Oversubscribed 1
+Downlink_speed_Gbps 400
+Radix_Down 5
+Radix_Up 5
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+
+Tier 1
+Oversubscribed 1
+Downlink_speed_Gbps 400
+Radix_Down 5
+Radix_Up 5
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+Bundle 1
+
+Tier 2
+Downlink_speed_Gbps 400
+Radix_Down 10
+Downlink_Latency_ns 500
+Switch_Latency_ns 0
+Bundle 1

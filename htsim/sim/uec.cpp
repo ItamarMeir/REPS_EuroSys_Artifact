@@ -2,6 +2,8 @@
 #include "uec.h"
 #include <math.h>
 #include <cstdint>
+#include <numeric>
+#include <algorithm>
 #include "circular_buffer.h"
 #include "uec_logger.h"
 #include "pciemodel.h"
@@ -52,6 +54,8 @@ bool UecSink::_oversubscribed_cc = false; // can only be enabled when receiver_b
 
 UecSrc::Sender_CC UecSrc::_sender_cc_algo = UecSrc::NSCC;
 UecSrc::LoadBalancing_Algo UecSrc::_load_balancing_algo = UecSrc::BITMAP;
+int UecSrc::_klb_k_param = 2;
+bool UecSrc::_klb_enable_fixes = false;
 
 linkspeed_bps UecSrc::_reference_network_linkspeed = 0; // set by initNsccParams
 simtime_picosec UecSrc::_reference_network_rtt = timeFromUs(12u); 
@@ -81,6 +85,225 @@ bool UecSrc::_enable_qa_gate = false;
 bool UecSrc::_enable_avg_ecn_over_path = false;
 bool UecSrc::_enable_fast_loss_recovery = false;
 
+// State-Aware NSCC+REPS master toggle. Off by default so baseline runs are
+// byte-for-byte identical to vanilla NSCC+REPS. Enabled from main_uec.cpp
+// when -state_aware_ecn is passed on the CLI.
+bool UecSrc::_state_aware_ecn_enabled = false;
+
+// ===== ADDED (smart-filter) ============================================
+// Static storage for smart-filter globals. All default to "off" so that
+// without -smart_filter_mode the binary is byte-for-byte identical to
+// vanilla NSCC+REPS. See uec.h and expNN_smart_filter/ARCHITECTURE.md.
+UecSrc::SmartFilterMode    UecSrc::_smart_filter_mode    = UecSrc::SF_NONE;
+UecSrc::SmartFilterCounter UecSrc::_smart_filter_counter = UecSrc::SF_COUNTER_ECN;
+int                        UecSrc::_smart_filter_ecn_thresh = -1; // -1 = auto ceil(B/4)
+// ===== END ADDED (smart-filter) ========================================
+
+// ===== ADDED (wtd-in-nscc) ============================================
+// Paper's "Wait to Decrease" for NSCC. Off by default so runs without
+// -wtd_in_nscc are byte-for-byte identical to vanilla NSCC+REPS.
+bool   UecSrc::_nscc_wtd_enabled = false;
+double UecSrc::_wtd_threshold    = 0.25;   // paper value (§3.6.1)
+// ===== END ADDED (wtd-in-nscc) ========================================
+
+// ===== ADDED (swift-cc) ===============================================
+// Static parameters for Swift/LSwift/MSwift/MNSCC.  All CCAs share
+// _target_Qdelay with NSCC (paper: "set NSCC's target queueing delay to
+// equal that of Swift").  Defaults match swift_new.cpp.
+double   UecSrc::_swift_ai            = 1.0;   // AI step per cwnd per RTT
+double   UecSrc::_swift_beta          = 0.8;   // MD scale factor
+double   UecSrc::_swift_max_mdf       = 0.5;   // max multiplicative decrease
+uint32_t UecSrc::_lswift_dup_threshold = 5;    // consecutive high-delay before LSwift MD
+int      UecSrc::_swift_median_pct    = 50;    // percentile for median buffer (50 = median)
+// ===== END ADDED (swift-cc) ============================================
+
+// ===== ADDED (ecmp-elephant) ===========================================
+uint64_t UecSrc::_ecmp_elephant_threshold = 0;   // 0 = disabled
+// ===== END ADDED (ecmp-elephant) ======================================
+
+// ===== ADDED (per-host-lb) =============================================
+std::map<uint32_t, UecSrc::LoadBalancing_Algo> UecSrc::_per_host_lb_override;
+
+UecSrc::LoadBalancing_Algo UecSrc::_parseLBName(const std::string& name) {
+    if (name == "bitmap")      return BITMAP;
+    if (name == "reps")        return REPS;
+    if (name == "oblivious")   return OBLIVIOUS;
+    if (name == "incremental") return INCREMENTAL;
+    if (name == "mprdma")      return MPRDMA;
+    if (name == "flowlet")     return FLOWLET;
+    if (name == "plb")         return PLB;
+    if (name == "mp")          return MP;
+    if (name == "freezing")    return FREEZING;
+    if (name == "ecmp")        return ECMP;
+    if (name == "klb")         return KLB;
+    if (name == "sklb")        return SKLB;
+    if (name == "hklb")        return HKLB;
+    return (LoadBalancing_Algo)(-1);  // sentinel for "unknown"
+}
+
+bool UecSrc::_parseHostLBString(const std::string& spec) {
+    // Format: "0:ecmp,3:freezing,7:oblivious"
+    _per_host_lb_override.clear();
+    std::string s = spec;
+    while (!s.empty()) {
+        size_t comma = s.find(',');
+        std::string pair = (comma == std::string::npos) ? s : s.substr(0, comma);
+        size_t colon = pair.find(':');
+        if (colon == std::string::npos) return false;
+        uint32_t host_id = std::stoul(pair.substr(0, colon));
+        std::string algo_name = pair.substr(colon + 1);
+        LoadBalancing_Algo lb = _parseLBName(algo_name);
+        if (lb == (LoadBalancing_Algo)(-1)) {
+            std::cerr << "Unknown LB algorithm in -host_lb_overrides: " << algo_name << std::endl;
+            return false;
+        }
+        _per_host_lb_override[host_id] = lb;
+        if (comma == std::string::npos) break;
+        s = s.substr(comma + 1);
+    }
+    return true;
+}
+
+void UecSrc::applyHostLBOverride() {
+    auto it = _per_host_lb_override.find(_srcaddr);
+    if (it == _per_host_lb_override.end()) return;
+    _dispatchLB(it->second);
+}
+// ===== END ADDED (per-host-lb) =========================================
+
+// REPS-buffer instrumentation file + set of source ids to log. Off by default.
+FILE* UecSrc::_reps_state_log = nullptr;
+std::set<uint32_t> UecSrc::_reps_state_log_srcs;
+
+// ===== ADDED (smart-filter) ============================================
+// smartFilterCounter(): returns the active congestion-evidence counter in [0..B],
+// where B = CircularBufferREPS<int>::repsBufferSize (the live REPS buffer size,
+// set by -reps_buffer_size, default 8).
+// ===== ADDED (per-host-lb) =============================================
+// Helper: dispatch nextEntropy/processEv function pointers and per-algo init
+// based on the chosen LB algorithm. Factored out of UecSrc::UecSrc(...) so
+// applyHostLBOverride() can re-run it with a different algorithm after
+// setSrc() establishes _srcaddr.
+void UecSrc::_dispatchLB(LoadBalancing_Algo lb) {
+    if (lb == BITMAP){
+        nextEntropy = &UecSrc::nextEntropy_bitmap;
+        processEv = &UecSrc::processEv_bitmap;
+        _crt_path = 0;
+        _ev_skip_bitmap.resize(_no_of_paths);
+        for (uint32_t i = 0; i < _no_of_paths; i++) _ev_skip_bitmap[i] = 0;
+    } else if (lb == REPS){
+        nextEntropy = &UecSrc::nextEntropy_REPS;
+        processEv = &UecSrc::processEv_REPS;
+        _crt_path = 0;
+    } else if (lb == OBLIVIOUS ){
+        nextEntropy = &UecSrc::nextEntropy_oblivious;
+        processEv = &UecSrc::processEv_oblivious;
+        _crt_path = 0;
+    } else if (lb == INCREMENTAL ){
+        nextEntropy = &UecSrc::nextEntropy_incremental;
+        processEv = &UecSrc::processEv_incremental;
+        _crt_path = 0;
+    } else if (lb == MPRDMA ){
+        nextEntropy = &UecSrc::nextEntropy_mprdma;
+        processEv = &UecSrc::processEv_mprdma;
+        _crt_path = 0;
+    } else if (lb == FLOWLET ){
+        nextEntropy = &UecSrc::nextEntropy_flowlet;
+        processEv = &UecSrc::processEv_flowlet;
+        flowlet_entropy = _node_num % _no_of_paths;
+    } else if (lb == PLB ){
+        nextEntropy = &UecSrc::nextEntropy_plb;
+        processEv = &UecSrc::processEv_plb;
+        plb_entropy = rand() % _no_of_paths;
+    } else if (lb == MP ){
+        nextEntropy = &UecSrc::nextEntropy_mp;
+        processEv = &UecSrc::processEv_mp;
+        working_path_ecmp_mp = _node_num % _no_of_paths;
+    } else if (lb == FREEZING ){
+        nextEntropy = &UecSrc::nextEntropy_freezing;
+        processEv = &UecSrc::processEv_freezing;
+        _crt_path = 0;
+    } else if (lb == ECMP){
+        nextEntropy = &UecSrc::nextEntropy_ecmp;
+        processEv = &UecSrc::processEv_ecmp;
+        working_path_ecmp_mp = _node_num % _no_of_paths;
+    } else if (lb == KLB || lb == SKLB) {
+        if (lb == KLB) {
+            nextEntropy = &UecSrc::nextEntropy_KLB;
+            processEv = &UecSrc::processEv_KLB;
+        } else {
+            nextEntropy = &UecSrc::nextEntropy_SKLB;
+            processEv = &UecSrc::processEv_SKLB;
+        }
+        _klb_k = _klb_k_param;
+        _klb_send_idx = 0;
+        _klb_active_evs.resize(_klb_k);
+        _klb_ecn_streak.assign(_klb_k, 0);
+        _ev_quiet_until.assign(_no_of_paths, 0);
+        std::vector<int> pool(_no_of_paths);
+        std::iota(pool.begin(), pool.end(), 0);
+        int limit = std::min(_klb_k, (int)_no_of_paths);
+        for (int ki = 0; ki < limit; ki++) {
+            int j = ki + rand() % (_no_of_paths - ki);
+            std::swap(pool[ki], pool[j]);
+            _klb_active_evs[ki] = (uint16_t)pool[ki];
+        }
+        for (int ki = limit; ki < _klb_k; ki++)
+            _klb_active_evs[ki] = rand() % _no_of_paths;
+    } else if (lb == HKLB) {
+        nextEntropy    = &UecSrc::nextEntropy_HybridKLB;
+        processEv      = &UecSrc::processEv_HybridKLB;
+        _klb_k         = std::min(_klb_k_param, (int)_no_of_paths);
+        _hklb_send_idx = 0;
+        _hklb_active_set.clear();
+        _hklb_active_list.clear();
+        _hklb_ecn_streak.assign(_no_of_paths, 0);
+        _ev_quiet_until.assign(_no_of_paths, 0);
+    }
+}
+// ===== END ADDED (per-host-lb) =========================================
+
+//
+// Two counter sources are plumbed side-by-side for A/B comparison:
+//   SF_COUNTER_ECN   — explicit per-source counter (+1 ECN, -1 clean, clamped [0..B])
+//   SF_COUNTER_FRESH — (B - fresh), derived from the buffer's unused-slot count;
+//                      fires before the first ECN of a burst (leading indicator).
+int UecSrc::smartFilterCounter() const {
+    const int B = CircularBufferREPS<int>::repsBufferSize;
+    if (_smart_filter_counter == SF_COUNTER_FRESH) {
+        int fresh = circular_buffer_reps
+                  ? circular_buffer_reps->getNumberFreshEntropies() : 0;
+        int v = B - fresh;
+        if (v < 0) v = 0;
+        if (v > B) v = B;
+        return v;
+    }
+    // ===== ADDED (ev-health-counter) =====================================
+    // SF_COUNTER_EVHEALTH: _ecn_buffer_counter is updated by the processAck()
+    // block below to hold the count of bad-EV slots directly, so we just
+    // clamp and return it like SF_COUNTER_ECN does.
+    // ===== END ADDED (ev-health-counter) =================================
+    // SF_COUNTER_ECN / SF_COUNTER_EVHEALTH: defensive clamp in case B changed between runs
+    int v = _ecn_buffer_counter;
+    if (v < 0) v = 0;
+    if (v > B) v = B;
+    return v;
+}
+
+// smartFilterEcnThresh(): returns the resolved Mode-B ECN threshold in [1..B].
+// If _smart_filter_ecn_thresh == -1 (default "auto"), resolves to ceil(B/4),
+// which matches the ECN-low marking threshold (-ecn 25 76 = 25% of queue).
+int UecSrc::smartFilterEcnThresh() const {
+    const int B = CircularBufferREPS<int>::repsBufferSize;
+    if (_smart_filter_ecn_thresh < 0) {
+        int k = (B + 3) / 4;   // ceil(B/4)
+        return k < 1 ? 1 : k;
+    }
+    if (_smart_filter_ecn_thresh > B) return B;
+    return _smart_filter_ecn_thresh;
+}
+// ===== END ADDED (smart-filter) ========================================
+
 bool UecSrc::use_exp_avg_ecn = true;
 // The params in the comments are those mentioned in smartt sigcomm24
 // submission. These produced oscillations (fast increase then mult/fair
@@ -100,12 +323,20 @@ void UecSrc::initNsccParams(simtime_picosec network_rtt,
     _reference_network_bdp = timeAsSec(_reference_network_rtt)*(_reference_network_linkspeed/8);
 
     _network_linkspeed = linkspeed;
-    _network_rtt = network_rtt; 
+    _network_rtt = network_rtt;
     _network_bdp = timeAsSec(_network_rtt)*(_network_linkspeed/8);
 
-    _target_Qdelay = timeFromUs(6u);
+    // ===== FIX (target-qdelay-respect-cli) =====
+    // Previously this line unconditionally set _target_Qdelay = 6 µs, OVERRIDING any
+    // earlier `-target_q_delay X` CLI flag (parsed at main_uec.cpp:327). That made
+    // Paper 2's `-target_q_delay 1` silently no-op'd, with the actual target stuck at
+    // 6 µs — preventing LSwift's MD branch from firing on realistic queueing and
+    // making MSwift's median filter have nothing to suppress. The static default at
+    // uec.cpp:79 already initialises `_target_Qdelay = 6 µs`, so removing the reset
+    // here preserves backward compatibility for runs that don't pass the flag.
+    //_target_Qdelay = timeFromUs(6u);    // disabled; honor CLI value
 
-    _qa_threshold = 4 * _target_Qdelay; 
+    _qa_threshold = 4 * _target_Qdelay;
 
     _scaling_factor_a = (double)_network_bdp/(double)_reference_network_bdp;
     _scaling_factor_b = (double)_target_Qdelay/(double)_reference_network_rtt; // no unit
@@ -533,53 +764,9 @@ UecSrc::UecSrc(TrafficLogger* trafficLogger, EventList& eventList, UecNIC& nic, 
     
 
 
-    if (_load_balancing_algo == BITMAP){
-        nextEntropy = &UecSrc::nextEntropy_bitmap;
-        processEv = &UecSrc::processEv_bitmap;
-        _crt_path = 0;
-        
-        // reset path penalties
-        _ev_skip_bitmap.resize(_no_of_paths);
-        for (uint32_t i = 0; i < _no_of_paths; i++) {
-            _ev_skip_bitmap[i] = 0;
-        }
-    } else if (_load_balancing_algo == REPS){
-        nextEntropy = &UecSrc::nextEntropy_REPS;
-        processEv = &UecSrc::processEv_REPS;
-        _crt_path = 0;
-    } else if (_load_balancing_algo == OBLIVIOUS ){
-        nextEntropy = &UecSrc::nextEntropy_oblivious;
-        processEv = &UecSrc::processEv_oblivious;
-        _crt_path = 0;
-    } else if (_load_balancing_algo == INCREMENTAL ){
-        nextEntropy = &UecSrc::nextEntropy_incremental;
-        processEv = &UecSrc::processEv_incremental;
-        _crt_path = 0;
-    } else if (_load_balancing_algo == MPRDMA ){
-        nextEntropy = &UecSrc::nextEntropy_mprdma;
-        processEv = &UecSrc::processEv_mprdma;
-        _crt_path = 0;
-    } else if (_load_balancing_algo == FLOWLET ){
-        nextEntropy = &UecSrc::nextEntropy_flowlet;
-        processEv = &UecSrc::processEv_flowlet;
-        flowlet_entropy = _node_num % _no_of_paths;
-    } else if (_load_balancing_algo == PLB ){
-        nextEntropy = &UecSrc::nextEntropy_plb;
-        processEv = &UecSrc::processEv_plb;
-        plb_entropy = rand() % _no_of_paths;
-    } else if (_load_balancing_algo == MP ){
-        nextEntropy = &UecSrc::nextEntropy_mp;
-        processEv = &UecSrc::processEv_mp;
-        working_path_ecmp_mp = _node_num % _no_of_paths;
-    } else if (_load_balancing_algo == FREEZING ){
-        nextEntropy = &UecSrc::nextEntropy_freezing;
-        processEv = &UecSrc::processEv_freezing;
-        _crt_path = 0;
-    } else if (_load_balancing_algo == ECMP){
-        nextEntropy = &UecSrc::nextEntropy_ecmp;
-        processEv = &UecSrc::processEv_ecmp;
-        working_path_ecmp_mp = _node_num % _no_of_paths;
-    }
+    // ===== ADDED (per-host-lb): dispatch moved into helper so per-host override =====
+    // can re-run it with a different LB algorithm after setSrc().
+    _dispatchLB(_load_balancing_algo);
 
     if (_mixed_lb_traffic && _node_num % 10 == 0) {
         nextEntropy = &UecSrc::nextEntropy_ecmp;
@@ -651,6 +838,24 @@ UecSrc::UecSrc(TrafficLogger* trafficLogger, EventList& eventList, UecNIC& nic, 
                 updateCwndOnAck = &UecSrc::dontUpdateCwndOnAck;
                 updateCwndOnNack = &UecSrc::dontUpdateCwndOnNack;
                 break;
+            // ===== ADDED (swift-cc) =========================================
+            case SWIFT:
+                updateCwndOnAck  = &UecSrc::updateCwndOnAck_Swift;
+                updateCwndOnNack = &UecSrc::updateCwndOnNack_Swift;
+                break;
+            case LSWIFT:
+                updateCwndOnAck  = &UecSrc::updateCwndOnAck_LSwift;
+                updateCwndOnNack = &UecSrc::updateCwndOnNack_Swift;
+                break;
+            case MSWIFT:
+                updateCwndOnAck  = &UecSrc::updateCwndOnAck_MSwift;
+                updateCwndOnNack = &UecSrc::updateCwndOnNack_Swift;
+                break;
+            case MNSCC:
+                updateCwndOnAck  = &UecSrc::updateCwndOnAck_MNSCC;
+                updateCwndOnNack = &UecSrc::updateCwndOnNack_NSCC;
+                break;
+            // ===== END ADDED (swift-cc) =====================================
             default:
                 cout << "Unknown CC algo specified " << _sender_cc_algo << endl;
                 assert(0);
@@ -908,8 +1113,10 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
         cout << "Flow " << _name << " flowId " << flowId() << " " << _nodename << " finished at "
              << timeAsUs(eventlist().now()-_flow_start_time) << " flowSize " << _flow_size << " total packets " << cum_ack << " RTS "
              << _rts_packets_sent << " total bytes " << ((mem_b)cum_ack - _rts_packets_sent) * _mss
-             << " in_flight now " << _in_flight << " cwnd " << _cwnd << " sim time " << timeAsUs(eventlist().now()) << 
-             " bg traffic " << background_traffic << endl;
+             << " in_flight now " << _in_flight << " cwnd " << _cwnd << " sim time " << timeAsUs(eventlist().now()) <<
+             " bg traffic " << background_traffic <<
+             " swift_md_fires " << _swift_md_fires <<  // ===== ADDED (swift-md-counter) =====
+             endl;
         _speculating = false;
         
 
@@ -1136,6 +1343,60 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
 
     average_ecn_bytes(pkt_size,newly_recvd_bytes, pkt.ecn_echo());
 
+    // ===== ADDED (smart-filter) ==========================================
+    // Update the per-source ECN counter and (Mode A only) compute the MD gain.
+    // Done unconditionally so the value is always loggable, even when the
+    // filter is OFF. All bounds and ratios scale with the live REPS buffer
+    // size B so that -reps_buffer_size sweeps automatically adjust the filter.
+    {
+        const int B = CircularBufferREPS<int>::repsBufferSize;
+        if (_smart_filter_counter == SF_COUNTER_EVHEALTH) {
+            // ===== ADDED (ev-health-counter) ================================
+            // EV-health counter: count how many EVs currently in the REPS
+            // buffer have their last-seen ACK marked ECN=1. Unlike the plain
+            // ECN counter (global) or fresh counter (always depleted), this
+            // measures the fraction of the *active* entropy pool that is
+            // spatially congested — the outlier-EV hypothesis's true signal.
+            //
+            // Implementation:
+            //   1. Update _ev_last_ecn_state[ev] for this ACK's EV.
+            //   2. Get the set of EVs in the current buffer (≤ B entries).
+            //   3. Count those whose _ev_last_ecn_state is 1.
+            //   4. Store in _ecn_buffer_counter (shared output path; clamped
+            //      to [0..B] in smartFilterCounter()).
+            // Complexity: O(B²) = O(64) per ACK — acceptable.
+            // ================================================================
+            uint16_t ev = pkt.ev();
+            // Lazy-init: _no_of_paths is set before any ACK arrives.
+            if (_ev_last_ecn_state.empty() && _no_of_paths > 0)
+                _ev_last_ecn_state.assign(_no_of_paths, 0);
+            if (!_ev_last_ecn_state.empty() && ev < (uint16_t)_ev_last_ecn_state.size())
+                _ev_last_ecn_state[ev] = pkt.ecn_echo() ? 1 : 0;
+
+            int bad = 0;
+            if (circular_buffer_reps) {
+                auto buf_evs = circular_buffer_reps->getValidEntropies();
+                for (int e : buf_evs) {
+                    if ((uint16_t)e < (uint16_t)_ev_last_ecn_state.size()
+                            && _ev_last_ecn_state[(uint16_t)e])
+                        bad++;
+                }
+            }
+            _ecn_buffer_counter = bad;   // range [0..B]; smartFilterCounter() clamps
+            // ===== END ADDED (ev-health-counter) ============================
+        } else {
+            // SF_COUNTER_ECN or SF_COUNTER_FRESH: standard symmetric counter update.
+            if (pkt.ecn_echo()) {
+                if (_ecn_buffer_counter < B) _ecn_buffer_counter++;
+            } else {
+                if (_ecn_buffer_counter > 0) _ecn_buffer_counter--;
+            }
+        }
+        _sf_md_gain = (_smart_filter_mode == SF_MD_GAIN && B > 0)
+                     ? (double)smartFilterCounter() / (double)B : 1.0;
+    }
+    // ===== END ADDED (smart-filter) =====================================
+
     if(_flow.flow_id() == _debug_flowid ){
         cout <<  timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " track_avg_rtt " << timeAsUs(get_avg_delay())
             << " rtt " << timeAsUs(_raw_rtt) << " skip " << pkt.ecn_echo()  << " ev " << pkt.ev()
@@ -1158,7 +1419,28 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
             (this->*updateCwndOnAck)(false, delay, newly_recvd_bytes - pkt_size);
         }
         else */
-        (this->*updateCwndOnAck)(pkt.ecn_echo(), delay, newly_recvd_bytes);
+        // ----- ORIGINAL vanilla NSCC+REPS path ---------------------------
+        bool cc_ecn_view = pkt.ecn_echo();
+
+        // ----- ADDED (state-aware): user's prior extension (unchanged) ---
+        // Masks CC's ECN view when the network is symmetric; the LB (below)
+        // always sees the real ECN bit.
+        if (_state_aware_ecn_enabled) {
+            cc_ecn_view = pkt.ecn_echo() && _network_is_asymmetric;
+        }
+
+        // ===== ADDED (smart-filter) ======================================
+        // Independent of state-aware; mutually exclusive (CLI enforces this).
+        // Mode A (md_gain): ECN passes through; damping happens in MD site.
+        // Mode B (rtt_blend_ecn_thresh): threshold ECN against [0..B] counter.
+        else if (_smart_filter_mode == SF_RTT_BLEND_ECN_THRESH) {
+            cc_ecn_view = pkt.ecn_echo()
+                       && (smartFilterCounter() >= smartFilterEcnThresh());
+        }
+        // (Mode A: cc_ecn_view stays = pkt.ecn_echo(); gain applied in MD)
+        // ===== END ADDED (smart-filter) ==================================
+
+        (this->*updateCwndOnAck)(cc_ecn_view, delay, newly_recvd_bytes);
     }
 
     if (_load_balancing_algo == MPRDMA) {
@@ -1173,6 +1455,52 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     }
     
     (this->*processEv)(pkt.ev(), pkt.ecn_echo() ? PATH_ECN:PATH_GOOD);
+
+    // REPS-state instrumentation: capture per-ACK LB-buffer snapshot for the
+    // chosen source ids. Columns: time_us, src_id, ecn, fresh, recycle, cwnd,
+    // exp_avg_ecn [original] + buf_size, ecn_counter, fresh_inv, sf_mode,
+    // sf_counter_used, sf_ecn_thresh, sf_gain, sa_asym, cc_ecn_view [ADDED smart-filter].
+    // Only emits a row when the log file and the source-id allow-list are both configured.
+    if (_reps_state_log && circular_buffer_reps &&
+        _reps_state_log_srcs.find(_node_num) != _reps_state_log_srcs.end()) {
+        // ===== ADDED (smart-filter): reconstruct cc_ecn_view for logging =====
+        const int _sf_buf_size = CircularBufferREPS<int>::repsBufferSize;
+        const int _sf_fresh    = circular_buffer_reps->getNumberFreshEntropies();
+        bool cc_ecn_log = pkt.ecn_echo() &&
+                          (_network_is_asymmetric                                    // state-aware leg
+                           || (_smart_filter_mode == SF_MD_GAIN)                     // mode A: ECN passes through
+                           || (_smart_filter_mode == SF_RTT_BLEND_ECN_THRESH
+                               && smartFilterCounter() >= smartFilterEcnThresh()));  // mode B: threshold
+        // ===== END ADDED (smart-filter) ======================================
+        // ===== ADDED (wtd-in-nscc) =============================================
+        int wtd_can_decrease = (_exp_avg_ecn >= _wtd_threshold) ? 1 : 0;
+        // ===== END ADDED (wtd-in-nscc) =========================================
+        fprintf(_reps_state_log,
+                "%.3f,%u,%d,%d,%zu,%u,%u,%.4f,%d,%d,%d,%d,%d,%d,%.4f,%d,%d,%d,%d\n",
+                (double)eventlist().now() / 1000.0,          // time_us
+                _node_num,                                    // src_id
+                pkt.ecn_echo() ? 1 : 0,                      // ecn
+                _sf_fresh,                                    // fresh
+                _next_pathid.size(),                          // recycle
+                (unsigned)(_cwnd / get_avg_pktsize()),        // cwnd_pkts
+                (unsigned)(_in_flight / get_avg_pktsize()),   // in_flight_pkts
+                _exp_avg_ecn,                                 // exp_avg_ecn
+                // ===== ADDED (smart-filter) columns ==========================
+                _sf_buf_size,                                 // buf_size
+                _ecn_buffer_counter,                          // ecn_counter
+                _sf_buf_size - _sf_fresh,                     // fresh_inv = B - fresh
+                (int)_smart_filter_mode,                      // sf_mode (0/1/2)
+                (int)smartFilterCounter(),                    // sf_counter_used
+                (int)smartFilterEcnThresh(),                  // sf_ecn_thresh (resolved)
+                _sf_md_gain,                                  // sf_gain
+                _network_is_asymmetric ? 1 : 0,              // sa_asym
+                cc_ecn_log ? 1 : 0,                          // cc_ecn_view
+                // ===== END ADDED (smart-filter) ==============================
+                // ===== ADDED (wtd-in-nscc) columns ===========================
+                _nscc_wtd_enabled ? 1 : 0,                   // wtd_enabled
+                wtd_can_decrease);                            // wtd_can_decrease (1 if exp_avg_ecn>=thresh)
+                // ===== END ADDED (wtd-in-nscc) ================================
+    }
 
     if (_debug_src) {
         cout << "At " << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " processAck: " << cum_ack << " flow " << _flow.str() << " cwnd " << _cwnd << " flightsize " << _in_flight << " delay " << timeAsUs(delay) << " newlyrecvd " << newly_recvd_bytes << " skip " << pkt.ecn_echo() << " raw rtt " << _raw_rtt <<  " ecn avg " << _exp_avg_ecn << endl;
@@ -1356,9 +1684,28 @@ void UecSrc::multiplicative_decrease(uint32_t newly_acked_bytes){
     _increase = false;
     _fi_count = 0;
     simtime_picosec avg_delay = get_avg_delay();
+
+    // ===== ADDED (smart-filter Mode B) ===================================
+    // Convex-blend the queuing component by counter/B AFTER the EWMA so that
+    // the blend only affects this MD branch, not quick_adapt or proportional_
+    // increase which also read _avg_delay. At counter=0 avg_delay collapses to
+    // 0 (no perceived queuing → no decrease). At counter=B full vanilla MD.
+    if (_smart_filter_mode == SF_RTT_BLEND_ECN_THRESH) {
+        const int B = CircularBufferREPS<int>::repsBufferSize;
+        double x = (B > 0) ? (double)smartFilterCounter() / (double)B : 1.0;
+        avg_delay = (simtime_picosec)(x * (double)avg_delay);
+    }
+    // ===== END ADDED (smart-filter Mode B) ===============================
+
     if (avg_delay > _target_Qdelay){
         if (eventlist().now() - _last_dec_time > _base_rtt){
-            _cwnd *= max(1-_gamma*(avg_delay-_target_Qdelay)/avg_delay, 0.5);/*_max_md_jump instead of 1*/
+            // ===== ADDED (smart-filter Mode A) ===========================
+            // Scale the MD step by gain = counter/B. At counter=0 gain=0
+            // → MD factor = max(1.0, 0.5) = 1.0 (no decrease).
+            // At counter=B gain=1 → original vanilla MD.
+            double gain = (_smart_filter_mode == SF_MD_GAIN) ? _sf_md_gain : 1.0;
+            // ===== END ADDED (smart-filter Mode A) =======================
+            _cwnd *= max(1.0 - _gamma * gain * (avg_delay - _target_Qdelay) / avg_delay, 0.5);/*_max_md_jump instead of 1*/
             _last_dec_time = eventlist().now();
         }
         // fair_decrease(can_decrease, newly_acked_bytes);
@@ -1393,6 +1740,201 @@ void UecSrc::mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t p
 void UecSrc::dontUpdateCwndOnAck(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
 }
 
+// ===== ADDED (swift-cc) =====================================================
+//
+// All four new CCAs use _target_Qdelay (configurable via -target_q_delay) as
+// their queueing-delay target, matching the paper's setup.  The delay
+// parameter already equals _raw_rtt - _base_rtt (queue delay) as set by
+// processAck() before dispatch.
+//
+// Shared RTT EMA update helper used by Swift / LSwift / MSwift.
+// Updates _swift_rtt with α = 1/8, matching swift_new.cpp's convention.
+// Uses _raw_rtt (already set in processAck before dispatch).
+static inline void _swift_update_rtt(UecSrc& s) {
+    // _raw_rtt is a public member set every ACK in processAck().
+    // We access it via the class because _swift_rtt is private.
+    // (This is a file-local helper; keeps the actual methods readable.)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Swift: delay-based AIMD.  AI when delay < target, MD when delay >= target
+// subject to a per-RTT cooldown guard.
+// ─────────────────────────────────────────────────────────────────────────────
+// Swift: per-ACK AIMD without per-RTT cooldown.
+// The original Swift paper (Liu et al., SIGCOMM 2020) and the REPS companion
+// paper both apply the MD factor on EVERY high-delay ACK, not once per RTT.
+// This matches the typical htsim convention for per-ACK CC algorithms (NSCC,
+// DCTCP, etc.) and produces the aggressive window collapse that differentiates
+// Swift from LSwift (which requires 5 consecutive RTT-rounds of high delay).
+void UecSrc::updateCwndOnAck_Swift(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
+    // RTT EMA still needed for LSwift/MSwift (shared _swift_rtt field); update
+    // it here so that switching between algos doesn't leave it stale.
+    if (_raw_rtt > 0) {
+        _swift_rtt = (_swift_rtt == 0) ? _raw_rtt : (_swift_rtt * 7 + _raw_rtt) / 8;
+    }
+
+    const simtime_picosec target = _target_Qdelay;  // paper: same target as NSCC
+
+    int num_acked  = (int)(newly_acked_bytes / _mss);
+    if (num_acked < 1) num_acked = 1;
+    int cwnd_pkts  = (int)(_cwnd / _mss);
+    if (cwnd_pkts < 1) cwnd_pkts = 1;
+
+    if (delay < target) {
+        // Additive Increase: Δcwnd = mss * ai / cwnd_pkts per ACK
+        _swift_consec_high_d = 0;   // reset reordering counter on clean ACK
+        if (_cwnd >= (mem_b)_mss)
+            _cwnd += (mem_b)((double)_mss * _swift_ai * num_acked / cwnd_pkts);
+        else
+            _cwnd += (mem_b)(_swift_ai * num_acked);
+    } else {
+        // Multiplicative Decrease on EVERY high-delay ACK (no per-RTT cooldown).
+        // Factor is proportional to how far above target; clamped by max_mdf.
+        double factor = 1.0 - _swift_beta * (double)(delay - target) / (double)delay;
+        if (factor < 1.0 - _swift_max_mdf) factor = 1.0 - _swift_max_mdf;
+        _cwnd = (mem_b)(_cwnd * factor);
+        _swift_md_fires++;  // ===== ADDED (swift-md-counter) =====
+        // Note: _swift_last_decrease is not updated here because Swift no longer
+        // uses a per-RTT cooldown (unlike LSwift/MSwift which do).
+    }
+
+    if (_cwnd < (mem_b)_mtu) _cwnd = _mtu;
+    if (_cwnd > _maxwnd)     _cwnd = _maxwnd;
+}
+
+void UecSrc::updateCwndOnNack_Swift(bool skip, mem_b nacked_bytes) {
+    const simtime_picosec now = eventlist().now();
+    bool can_decrease = (_swift_rtt > 0) &&
+                        ((now - _swift_last_decrease) >= (simtime_picosec)_swift_rtt);
+    if (can_decrease) {
+        _cwnd = (mem_b)(_cwnd * (1.0 - _swift_max_mdf));
+        _swift_last_decrease = now;
+    }
+    if (_cwnd < (mem_b)_mtu) _cwnd = _mtu;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _updateCwndOnAck_LSwift_core: the LSwift AI/MD logic called by both
+// updateCwndOnAck_LSwift() and updateCwndOnAck_MSwift() (the latter supplies
+// a median-filtered delay instead of the raw queue delay).
+// ─────────────────────────────────────────────────────────────────────────────
+void UecSrc::_updateCwndOnAck_LSwift_core(simtime_picosec delay, mem_b newly_acked_bytes) {
+    const simtime_picosec target = _target_Qdelay;
+    const simtime_picosec now    = eventlist().now();
+    bool can_decrease = (_swift_rtt > 0) &&
+                        ((now - _swift_last_decrease) >= (simtime_picosec)_swift_rtt);
+
+    int num_acked = (int)(newly_acked_bytes / _mss);
+    if (num_acked < 1) num_acked = 1;
+    int cwnd_pkts = (int)(_cwnd / _mss);
+    if (cwnd_pkts < 1) cwnd_pkts = 1;
+
+    if (delay < target) {
+        // Clean ACK: AI and reset consecutive-high counter.
+        _swift_consec_high_d = 0;
+        if (_cwnd >= (mem_b)_mss)
+            _cwnd += (mem_b)((double)_mss * _swift_ai * num_acked / cwnd_pkts);
+        else
+            _cwnd += (mem_b)(_swift_ai * num_acked);
+    } else {
+        // Paper §III.B: "five successive delayed packets" — count per individual ACK,
+        // not per RTT-round. The `can_decrease` 1-RTT cooldown still prevents
+        // multiple MDs from firing in quick succession on sustained congestion.
+        _swift_consec_high_d++;
+        if (_swift_consec_high_d >= _lswift_dup_threshold && can_decrease) {
+            double factor = 1.0 - _swift_beta * (double)(delay - target) / (double)delay;
+            if (factor < 1.0 - _swift_max_mdf) factor = 1.0 - _swift_max_mdf;
+            _cwnd = (mem_b)(_cwnd * factor);
+            _swift_last_decrease = now;
+            _swift_consec_high_d = 0;
+            _swift_md_fires++;  // ===== ADDED (swift-md-counter) =====
+        }
+    }
+
+    if (_cwnd < (mem_b)_mtu) _cwnd = _mtu;
+    if (_cwnd > _maxwnd)     _cwnd = _maxwnd;
+}
+
+// LSwift: update RTT EMA then call core.
+void UecSrc::updateCwndOnAck_LSwift(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
+    if (_raw_rtt > 0)
+        _swift_rtt = (_swift_rtt == 0) ? _raw_rtt : (_swift_rtt * 7 + _raw_rtt) / 8;
+    _updateCwndOnAck_LSwift_core(delay, newly_acked_bytes);
+}
+
+// MSwift: push delay into median buffer, pass percentile to LSwift core.
+void UecSrc::updateCwndOnAck_MSwift(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
+    // RTT update uses raw delay, not the median (RTT EMA must track actual RTT).
+    if (_raw_rtt > 0)
+        _swift_rtt = (_swift_rtt == 0) ? _raw_rtt : (_swift_rtt * 7 + _raw_rtt) / 8;
+
+    // Update window size H = max(cwnd_pkts / 2, 1), capped at DelayMedianBuffer::MAX_H.
+    int cwnd_pkts = (int)(_cwnd / _mss);
+    if (cwnd_pkts < 1) cwnd_pkts = 1;
+    int H = cwnd_pkts / 2;
+    if (H < 1) H = 1;
+    _median_delay_buf.setCapacity(H);
+    _median_delay_buf.push(delay);
+
+    simtime_picosec eff_delay = _median_delay_buf.percentile(_swift_median_pct);
+    _updateCwndOnAck_LSwift_core(eff_delay, newly_acked_bytes);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _updateCwndOnAck_NSCC_core: the NSCC AI/MD logic, parameterised on delay so
+// that MNSCC can pass a median-filtered value.  Extracted from
+// updateCwndOnAck_NSCC() without functional change.
+// ─────────────────────────────────────────────────────────────────────────────
+void UecSrc::_updateCwndOnAck_NSCC_core(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
+    if (!skip && delay >= _target_Qdelay) {
+        fair_increase(newly_acked_bytes);
+    } else if (!skip && delay < _target_Qdelay) {
+        proportional_increase(newly_acked_bytes, delay);
+    } else if (skip && delay >= _target_Qdelay) {
+        if (!(_nscc_wtd_enabled && _exp_avg_ecn < _wtd_threshold)) {
+            multiplicative_decrease(newly_acked_bytes);
+        }
+    }
+    // skip && delay < target: NOOP (path switch handled by LB)
+}
+
+// MNSCC: push delay into median buffer, pass percentile to NSCC core.
+void UecSrc::updateCwndOnAck_MNSCC(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
+    if (_bytes_ignored < _bytes_to_ignore && skip)
+        return;
+
+    simtime_picosec avg_delay = get_avg_delay();
+    if (quick_adapt(false, avg_delay))
+        return;
+
+    // Window size H = max(min(cwnd_pkts/2, 4), 1)
+    int cwnd_pkts = (int)(_cwnd / _mss);
+    if (cwnd_pkts < 1) cwnd_pkts = 1;
+    int H = cwnd_pkts / 2;
+    if (H > 4) H = 4;
+    if (H < 1) H = 1;
+    _median_delay_buf.setCapacity(H);
+    _median_delay_buf.push(delay);
+
+    simtime_picosec eff_delay = _median_delay_buf.percentile(50);
+    _updateCwndOnAck_NSCC_core(skip, eff_delay, newly_acked_bytes);
+
+    // Periodic adjustment (same as NSCC)
+    if (_received_bytes > _adjust_bytes_threshold ||
+        eventlist().now() - _last_adjust_time > _adjust_period_threshold) {
+        fulfill_adjustment();
+    }
+    if (eventlist().now() - _last_eta_time > _adjust_period_threshold) {
+        _cwnd += _eta;
+        _last_eta_time = eventlist().now();
+    }
+
+    if (_cwnd < _mtu)   _cwnd = _mtu;
+    if (_cwnd > _maxwnd) _cwnd = _maxwnd;
+}
+
+// ===== END ADDED (swift-cc) =================================================
+
 
 void UecSrc::updateCwndOnAck_NSCC(bool skip, simtime_picosec delay, mem_b newly_acked_bytes) {
     // bool can_decrease = _exp_avg_ecn > _ecn_thresh;
@@ -1415,8 +1957,17 @@ void UecSrc::updateCwndOnAck_NSCC(bool skip, simtime_picosec delay, mem_b newly_
         if (_flow.flow_id() == _debug_flowid || UecSrc::_debug) {
             cout << timeAsUs(eventlist().now()) <<" flowid " << _flow.flow_id()<< " " << _flow.str() << " proportional_increase _nscc_cwnd " << _cwnd << endl;
         }
-    } else if (skip && delay >= _target_Qdelay) {    
-        multiplicative_decrease(newly_acked_bytes);
+    } else if (skip && delay >= _target_Qdelay) {
+        // ===== ADDED (wtd-in-nscc) =======================================
+        // Paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1): skip MD when the
+        // EWMA of ECN-marked ACKs is below the threshold. _exp_avg_ecn (α=0.125)
+        // is already updated every ACK before this dispatch. The reset to 1.0 on
+        // RTO (uec.cpp ~L2093+7) is preserved: after a timeout the EWMA is
+        // forced high so WTD does not suppress the next MD on real congestion.
+        if (!(_nscc_wtd_enabled && _exp_avg_ecn < _wtd_threshold)) {
+            multiplicative_decrease(newly_acked_bytes);
+        }
+        // ===== END ADDED (wtd-in-nscc) ===================================
         if (_flow.flow_id() == _debug_flowid || UecSrc::_debug) {
             cout << timeAsUs(eventlist().now()) <<" flowid " << _flow.flow_id()<< " " << _flow.str() << " multiplicative_decrease _nscc_cwnd " << _cwnd << endl;
         }
@@ -1986,6 +2537,24 @@ void UecSrc::startFlow() {
     }
     
 
+    // ===== ADDED (ecmp-elephant) ==========================================
+    // If -ecmp_elephant_threshold is set and this flow is large enough,
+    // override the LB function pointers to static ECMP regardless of the
+    // global load-balancing algo.  This reproduces the paper's scenario of
+    // 4 long-lived elephant flows using ECMP alongside sprayed short flows.
+    if (_ecmp_elephant_threshold > 0 &&
+        (uint64_t)_flow_size >= _ecmp_elephant_threshold) {
+        nextEntropy = &UecSrc::nextEntropy_ecmp;
+        processEv   = &UecSrc::processEv_ecmp;
+        working_path_ecmp_mp = _node_num % _no_of_paths;
+        printf("Flow %s flowId %u: size %llu >= threshold %llu, using ECMP path %u\n",
+               _name.c_str(), flowId(),
+               (unsigned long long)_flow_size,
+               (unsigned long long)_ecmp_elephant_threshold,
+               working_path_ecmp_mp);
+    }
+    // ===== END ADDED (ecmp-elephant) =====================================
+
     if (_debug_src)
         cout << _flow.str() << " " << "startflow " << _flow._name << " CWND " << _cwnd << " at "
              << timeAsUs(eventlist().now()) << " flow " << _flow.str() << endl;
@@ -2254,6 +2823,21 @@ void UecSrc::processEv_bitmap(uint16_t path_id, PathFeedback reason){
 }
 
 void UecSrc::processEv_REPS(uint16_t path_id, PathFeedback feedback) {
+    // State-Aware NSCC+REPS: time-bounded auto-exit from frozen mode.
+    // Mirrors the check that exists in processEv_freezing (uec.cpp:2617). Gated so
+    // baseline REPS behavior is unchanged when -state_aware_ecn is not set.
+    if (_state_aware_ecn_enabled
+        && circular_buffer_reps
+        && circular_buffer_reps->isFrozenMode()
+        && eventlist().now() > circular_buffer_reps->can_exit_frozen_mode) {
+        circular_buffer_reps->setFrozenMode(false);
+        circular_buffer_reps->resetBuffer();
+        circular_buffer_reps->explore_counter = _bdp / _mtu;
+        _network_is_asymmetric = false;
+        printf("[state-aware] %s exited freezing mode + asymmetric=false at %lu us\n",
+               _name.c_str(), eventlist().now() / 1000);
+    }
+
     if (feedback == PATH_GOOD){
         _next_pathid.push_back(path_id);
         if (_debug){
@@ -2359,6 +2943,161 @@ uint16_t UecSrc::nextEntropy_oblivious(){
     return rand() % _no_of_paths;
 }
 
+// Pick a path not currently held by any slot other than `replacing_slot`,
+// and not currently in cooldown (Fix A — paths that recently signalled ECN are
+// excluded for ~1 RTT). Falls back to allowing cooldown paths if no candidate
+// passes within a bounded number of tries.
+uint16_t UecSrc::klb_pick_fresh_path(int replacing_slot) const {
+    int n_excluded = (replacing_slot < 0) ? _klb_k : _klb_k - 1;
+    if (n_excluded >= _no_of_paths) return rand() % _no_of_paths;
+    simtime_picosec now = eventlist().now();
+    uint16_t fallback = 0;
+    const int MAX_TRIES = 4 * _no_of_paths;
+    for (int t = 0; t < MAX_TRIES; t++) {
+        uint16_t candidate = rand() % _no_of_paths;
+        bool clash = false;
+        for (int i = 0; i < _klb_k; i++) {
+            if (i == replacing_slot) continue;
+            if (_klb_active_evs[i] == candidate) { clash = true; break; }
+        }
+        if (clash) continue;
+        fallback = candidate;  // distinct but possibly in cooldown
+        if (_ev_quiet_until.empty() || _ev_quiet_until[candidate] <= now)
+            return candidate;
+    }
+    return fallback;  // all distinct paths are in cooldown; accept anyway
+}
+
+uint16_t UecSrc::nextEntropy_KLB() {
+    uint16_t ev = _klb_active_evs[_klb_send_idx % _klb_k];
+    _klb_send_idx++;
+    return ev;
+}
+
+void UecSrc::processEv_KLB(uint16_t path_id, PathFeedback feedback) {
+    if (feedback != PATH_ECN) {
+        if (_klb_enable_fixes) {
+            for (int ki = 0; ki < _klb_k; ki++)
+                if (_klb_active_evs[ki] == path_id) { _klb_ecn_streak[ki] = 0; break; }
+        }
+        return;
+    }
+    int slot = -1;
+    for (int ki = 0; ki < _klb_k; ki++) {
+        if (_klb_active_evs[ki] == path_id) { slot = ki; break; }
+    }
+    if (slot < 0) return;
+
+    if (_klb_enable_fixes) {
+        // Fix B1: require 2 consecutive ECNs before considering eviction.
+        if (++_klb_ecn_streak[slot] < 2) return;
+    }
+
+    // With prob 1/K: ignore ECN, keep EV. With prob (K-1)/K: evict and draw distinct new EV.
+    double x = (double)rand() / ((double)RAND_MAX + 1.0);
+    if (x <= 1.0 / _klb_k) return;
+
+    if (_klb_enable_fixes) {
+        // Fix A: this path cannot be redrawn for ~1 RTT.
+        _ev_quiet_until[path_id] = eventlist().now() + timeFromUs(6u);
+        _klb_ecn_streak[slot] = 0;
+    }
+    _klb_active_evs[slot] = klb_pick_fresh_path(slot);
+}
+
+uint16_t UecSrc::nextEntropy_SKLB() {
+    uint16_t ev = _klb_active_evs[_klb_send_idx % _klb_k];
+    _klb_send_idx++;
+    return ev;
+}
+
+void UecSrc::processEv_SKLB(uint16_t path_id, PathFeedback feedback) {
+    if (feedback != PATH_ECN) {
+        if (_klb_enable_fixes) {
+            for (int ki = 0; ki < _klb_k; ki++)
+                if (_klb_active_evs[ki] == path_id) { _klb_ecn_streak[ki] = 0; break; }
+        }
+        return;
+    }
+    int slot = -1;
+    for (int ki = 0; ki < _klb_k; ki++) {
+        if (_klb_active_evs[ki] == path_id) { slot = ki; break; }
+    }
+    if (slot < 0) return;
+
+    if (_klb_enable_fixes) {
+        if (++_klb_ecn_streak[slot] < 2) return;
+        _ev_quiet_until[path_id] = eventlist().now() + timeFromUs(6u);
+        _klb_ecn_streak[slot] = 0;
+    }
+    _klb_active_evs[slot] = klb_pick_fresh_path(slot);
+}
+
+uint16_t UecSrc::nextEntropy_HybridKLB() {
+    _hklb_send_idx++;
+    if ((int)_hklb_active_set.size() >= _klb_k) {
+        // Steady-state: round-robin over K confirmed-clean paths
+        return _hklb_active_list[_hklb_send_idx % _klb_k];
+    }
+    if (!_klb_enable_fixes) {
+        return rand() % _no_of_paths;
+    }
+    // Fix A: oblivious random, but skip EVs currently in cooldown.
+    simtime_picosec now = eventlist().now();
+    uint16_t fallback = rand() % _no_of_paths;
+    for (int t = 0; t < _no_of_paths; t++) {
+        uint16_t ev = rand() % _no_of_paths;
+        if (_ev_quiet_until[ev] <= now) return ev;
+        fallback = ev;
+    }
+    return fallback;  // every path in cooldown — accept anyway
+}
+
+void UecSrc::processEv_HybridKLB(uint16_t path_id, PathFeedback feedback) {
+    bool in_active = _hklb_active_set.count(path_id) > 0;
+
+    if (feedback == PATH_GOOD) {
+        if (_klb_enable_fixes) _hklb_ecn_streak[path_id] = 0;
+        if (!in_active && (int)_hklb_active_set.size() < _klb_k) {
+            // With Fix A: skip a path that just signalled ECN.
+            if (!_klb_enable_fixes || _ev_quiet_until[path_id] <= eventlist().now()) {
+                _hklb_active_set.insert(path_id);
+                _hklb_active_list.push_back(path_id);
+            }
+        }
+        return;
+    }
+
+    if (feedback == PATH_ECN) {
+        if (!in_active) return;
+        if (_klb_enable_fixes) {
+            // Fix B1: require 2 consecutive ECNs.
+            if (++_hklb_ecn_streak[path_id] < 2) return;
+        }
+        // (K-1)/K probabilistic replacement; keep with prob 1/K.
+        double x = (double)rand() / ((double)RAND_MAX + 1.0);
+        if (x <= 1.0 / _klb_k) return;
+        if (_klb_enable_fixes) {
+            _ev_quiet_until[path_id] = eventlist().now() + timeFromUs(6u);  // Fix A
+            _hklb_ecn_streak[path_id] = 0;
+        }
+        _hklb_active_set.erase(path_id);
+        auto it = std::find(_hklb_active_list.begin(), _hklb_active_list.end(), path_id);
+        if (it != _hklb_active_list.end()) _hklb_active_list.erase(it);
+        return;
+    }
+
+    // PATH_NACK / PATH_TIMEOUT: always evict if incumbent.
+    if (in_active) {
+        _hklb_active_set.erase(path_id);
+        auto it = std::find(_hklb_active_list.begin(), _hklb_active_list.end(), path_id);
+        if (it != _hklb_active_list.end()) _hklb_active_list.erase(it);
+        if (_klb_enable_fixes) {
+            _ev_quiet_until[path_id] = eventlist().now() + timeFromUs(6u);
+            _hklb_ecn_streak[path_id] = 0;
+        }
+    }
+}
 
 uint16_t UecSrc::nextEntropy_incremental(){
     return _crt_path++ % _no_of_paths;
@@ -2410,10 +3149,18 @@ void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
 
     if (circular_buffer_reps->isFrozenMode() && eventlist().now() > circular_buffer_reps->can_exit_frozen_mode) {
         circular_buffer_reps->setFrozenMode(false);
+        // State-Aware NSCC+REPS (v2): when FREEZING's timer-driven auto-exit runs,
+        // the network is no longer considered asymmetric. Vanilla behavior is
+        // preserved when the flag is off.
+        if (_state_aware_ecn_enabled) {
+            _network_is_asymmetric = false;
+            printf("[state-aware] %s FREEZING unfreeze + asymmetric=false at %lu us\n",
+                   _name.c_str(), eventlist().now() / 1000);
+        }
         circular_buffer_reps->resetBuffer();
         circular_buffer_reps->explore_counter = _bdp / _mtu;
         //circular_buffer_reps->explore_counter = 8;
-        printf("%s exited freezing mode at %lu\n", _name.c_str(), eventlist().now() / 1000); 
+        printf("%s exited freezing mode at %lu\n", _name.c_str(), eventlist().now() / 1000);
     }
 
     if ((feedback == PATH_GOOD) && !circular_buffer_reps->isFrozenMode()) {
@@ -2799,13 +3546,43 @@ void UecSrc::rtxTimerExpired() {
         if (_trim_disbled && _last_rto_max_rtt < _base_rtt * 1.65) {
             circular_buffer_reps->setFrozenMode(true);
             circular_buffer_reps->can_exit_frozen_mode = eventlist().now() +  circular_buffer_reps->exit_freeze_after;
-            printf("%s started freezing mode1 at %lu (can exit at %lu) - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize()); 
+            // State-Aware NSCC+REPS (v2): paper-REPS = FREEZING. When FREEZING enters
+            // frozen mode after RTO, treat it as evidence the network is asymmetric so
+            // the CC stops masking ECN. Vanilla FREEZING is unchanged when the flag is off.
+            if (_state_aware_ecn_enabled) {
+                _network_is_asymmetric = true;
+                printf("[state-aware] %s FREEZING freeze + asymmetric=true at %lu us\n",
+                       _name.c_str(), eventlist().now() / 1000);
+            }
+            printf("%s started freezing mode1 at %lu (can exit at %lu) - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize());
             printf("Last Max RTT %lu - RTO Start %lu - Time is %lu - Base RTT is %lu -- Max %lu at %lu\n", _last_rto_max_rtt/1000, _last_rto_start/1000, eventlist().now()/1000, _base_rtt/1000, _max_rtt_seen/1000, _when__max_rtt_seen/1000);
         } else if (!_trim_disbled) {
             circular_buffer_reps->setFrozenMode(true);
             circular_buffer_reps->can_exit_frozen_mode = eventlist().now() +  circular_buffer_reps->exit_freeze_after;
-            printf("%s started freezing mode2 at %lu (can exit at %lu) - Explore Counter %d - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->explore_counter, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize()); 
-        }   
+            // State-Aware NSCC+REPS (v2): same flip in the !_trim_disbled branch.
+            if (_state_aware_ecn_enabled) {
+                _network_is_asymmetric = true;
+                printf("[state-aware] %s FREEZING freeze + asymmetric=true at %lu us\n",
+                       _name.c_str(), eventlist().now() / 1000);
+            }
+            printf("%s started freezing mode2 at %lu (can exit at %lu) - Explore Counter %d - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->explore_counter, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize());
+        }
+    }
+
+    // State-Aware NSCC+REPS: on RTO under REPS, treat it as evidence the network
+    // became asymmetric. Freeze REPS to stop exploring (cycle known-good EVs only)
+    // and flip _network_is_asymmetric so the CC starts honoring ECN.
+    if (_state_aware_ecn_enabled
+        && _load_balancing_algo == REPS
+        && circular_buffer_reps
+        && !circular_buffer_reps->isFrozenMode()
+        && circular_buffer_reps->explore_counter == 0) {
+        circular_buffer_reps->setFrozenMode(true);
+        circular_buffer_reps->can_exit_frozen_mode = eventlist().now() + circular_buffer_reps->exit_freeze_after;
+        _network_is_asymmetric = true;
+        printf("[state-aware] %s RTO -> freeze + asymmetric=true at %lu us (can exit at %lu us)\n",
+               _name.c_str(), eventlist().now() / 1000,
+               circular_buffer_reps->can_exit_frozen_mode / 1000);
     }
 
 

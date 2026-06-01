@@ -17,6 +17,7 @@
 #include "queue_lossless_output.h"
 #include "swift_scheduler.h"
 #include "ecnqueue.h"
+#include "../statefulecnqueue.h"
 
 // use tokenize from connection matrix
 extern void tokenize(string const &str, const char delim, vector<string> &out);
@@ -785,6 +786,21 @@ FatTreeTopology::alloc_queue(QueueLogger* queueLogger, linkspeed_bps speed, mem_
             }
             return q;
         }
+    case STATEFUL_ECN: {
+        StatefulECNQueue* q = new StatefulECNQueue(speed, queuesize, *_eventlist, queueLogger);
+        // Leaf Exception: disable incumbent tracking AND queue-depth ECN on ToR downlinks.
+        bool tracking_on = (!tor || dir == UPLINK);
+        q->set_enabled(tracking_on);
+        if (tracking_on) {
+            q->set_max_incumbents(StatefulECNQueue::_max_incumbents_param);
+            q->set_idle_timeout_ps(StatefulECNQueue::_idle_timeout_ps_param);
+            // Congestion-ECN for rejected newcomers (admitted sub-flows are
+            // protected by absolute incumbent advantage in receivePacket()).
+            if (_enable_ecn && _ecn_low > 0)
+                q->set_ecn_threshold(_ecn_low);
+        }
+        return q;
+    }
     default:
         abort();
     }

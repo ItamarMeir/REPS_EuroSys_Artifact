@@ -38,6 +38,13 @@ class Pipe : public EventSource, public PacketSink, public Drawable {
     static bool _use_timeouts;
     static bool _log_link_utilization;
     std::string full_name;
+
+    // Dynamic link-failure flag (State-Aware NSCC+REPS testbed). When set, the
+    // pipe drops every arriving packet, mimicking a cut cable. Default false so
+    // existing simulations are unaffected.
+    bool _failed = false;
+    void setFailed(bool f) { _failed = f; }
+    bool isFailed() const { return _failed; }
 protected:
     string _nodename;
     //typedef pair<simtime_picosec,Packet*> pktrecord_t;

@@ -5,9 +5,15 @@
 #include <memory>
 #include <tuple>
 #include <list>
+#include <map>
 #include <unordered_map>
+#include <unordered_set>
+#include <set>
+#include <cstdio>
+#include <string>
 
 #include "buffer_reps.h"
+#include "delay_median_buffer.h"
 #include "eventlist.h"
 #include "trigger.h"
 #include "uecpacket.h"
@@ -174,6 +180,13 @@ public:
     void receivePacket(Packet& pkt, uint32_t portnum);
     void doNextEvent();
     void setSrc(uint32_t src) { _srcaddr = src; }
+
+    // ===== ADDED (per-host-lb) =====
+    // Called after setSrc(). If `_per_host_lb_override` has an entry for
+    // this sender's host id, re-runs the LB dispatch with the overridden
+    // algorithm (overwrites nextEntropy/processEv function pointers).
+    void applyHostLBOverride();
+    // ===== END ADDED (per-host-lb) =====
     void setDst(uint32_t dst) { _dstaddr = dst; }
     const Route *get_route() { return _route_fail; }
     UecSink *get_sink() { return _sink; }
@@ -222,6 +235,8 @@ public:
     // called from a trigger to start the flow.
     virtual void activate();
     static uint32_t _path_entropy_size;  // now many paths do we include in our path set
+    static int _klb_k_param;            // K for KLB algorithm (set by CLI)
+    static bool _klb_enable_fixes;      // toggle Fix A (EV cooldown) + Fix B1 (ECN hysteresis)
     static int _global_node_count;
     static simtime_picosec _min_rto;
     static uint16_t _hdr_size;
@@ -237,6 +252,113 @@ public:
     int num_pkts = 0;
     static bool _trim_disbled;
 
+    // State-Aware NSCC+REPS: master toggle (CLI) and per-source structural-state view.
+    // When _state_aware_ecn_enabled is false, the code paths in processAck/rtxTimerExpired
+    // fall through to the original (vanilla) lines. When true, the CC's view of ECN is
+    // masked by _network_is_asymmetric, which is driven organically by REPS frozen mode.
+    static bool _state_aware_ecn_enabled;
+    bool _network_is_asymmetric = false;
+    void setNetworkAsymmetric(bool b) { _network_is_asymmetric = b; }
+    bool isNetworkAsymmetric() const { return _network_is_asymmetric; }
+
+    // ====================================================================
+    // ADDED (smart-filter): independent of -state_aware_ecn. Off by default.
+    // See state_aware_experiments/expNN_smart_filter/ARCHITECTURE.md.
+    //
+    // A B-bounded ECN counter (where B = CircularBufferREPS<int>::repsBufferSize)
+    // tracks how saturated the REPS buffer is with congestion signals. Two filter
+    // modes use this counter to dampen NSCC's multiplicative decrease:
+    //   md_gain              — scale MD step by counter/B
+    //   rtt_blend_ecn_thresh — blend queuing delay by counter/B; threshold ECN gate
+    //
+    // Mutually exclusive with -state_aware_ecn (hard error at startup if both set).
+    // ====================================================================
+    enum SmartFilterMode    { SF_NONE = 0, SF_MD_GAIN = 1, SF_RTT_BLEND_ECN_THRESH = 2 };
+    enum SmartFilterCounter {
+        SF_COUNTER_ECN      = 0,   // +1 ECN, -1 clean, clamped [0..B]
+        SF_COUNTER_FRESH    = 1,   // B - getNumberFreshEntropies() (leading indicator)
+        SF_COUNTER_EVHEALTH = 2,   // count of buffer EVs whose last ACK was ECN-marked
+    };
+    static SmartFilterMode    _smart_filter_mode;      // default SF_NONE
+    static SmartFilterCounter _smart_filter_counter;   // default SF_COUNTER_ECN
+    static int                _smart_filter_ecn_thresh; // Mode B; -1 = auto ceil(B/4)
+
+    int    _ecn_buffer_counter = 0;  // +1 on ECN ACK, -1 on clean ACK, clamped [0..B]
+                                      // (int not uint8_t: exp04 used B up to 1024)
+    double _sf_md_gain = 1.0;        // per-ACK scratch used by Mode A in multiplicative_decrease
+
+    inline int getEcnBufferCounter() const { return _ecn_buffer_counter; }
+    // Returns active counter value in [0..B], dispatching on _smart_filter_counter.
+    int smartFilterCounter() const;
+    // Returns resolved Mode-B ECN threshold in [1..B]; resolves -1 to ceil(B/4).
+    int smartFilterEcnThresh() const;
+    // ====================================================================
+    // END ADDED (smart-filter)
+    // ====================================================================
+
+    // ====================================================================
+    // ADDED (wtd-in-nscc): paper's "Wait to Decrease" for NSCC.
+    // Reuses existing _exp_avg_ecn (α=0.125). When enabled, gates NSCC's
+    // multiplicative_decrease dispatch on _exp_avg_ecn >= _wtd_threshold.
+    // Off by default. Mutually exclusive with -state_aware_ecn and
+    // -smart_filter_mode (hard error at startup if any two are combined).
+    // Reference: SMaRTT-REPS paper §3.6.1.
+    // ====================================================================
+    static bool   _nscc_wtd_enabled;  // default false
+    static double _wtd_threshold;     // default 0.25 (paper value)
+    // ====================================================================
+    // END ADDED (wtd-in-nscc)
+    // ====================================================================
+
+    // ====================================================================
+    // ADDED (swift-cc)
+    // Static parameters shared by Swift/LSwift/MSwift (all use _target_Qdelay
+    // as their queue-delay target, same as NSCC, matching the paper's setup).
+    // ====================================================================
+    static double   _swift_ai;              // AI step per cwnd per RTT (default 1.0)
+    static double   _swift_beta;            // MD aggressiveness (default 0.8)
+    static double   _swift_max_mdf;         // max multiplicative decrease (default 0.5)
+    static uint32_t _lswift_dup_threshold;  // consecutive high-delay ACKs for LSwift MD (default 5)
+    static int      _swift_median_pct;      // percentile for median buffer (default 50; 10/90 for Fig 12)
+    // ====================================================================
+    // END ADDED (swift-cc)
+    // ====================================================================
+
+    // ====================================================================
+    // ADDED (ecmp-elephant)
+    // Per-flow LB override: flows whose size >= _ecmp_elephant_threshold use
+    // ECMP (static path) regardless of the global -load_balancing_algo setting.
+    // Default 0 = disabled.  Set via -ecmp_elephant_threshold <bytes>.
+    // This reproduces the paper's "4 ECMP elephants + REPS short flows" scenario.
+    // ====================================================================
+    static uint64_t _ecmp_elephant_threshold;  // default 0 (disabled)
+    // ====================================================================
+    // END ADDED (ecmp-elephant)
+    // ====================================================================
+
+    // ====================================================================
+    // ADDED (per-host-lb)
+    // Per-host LB override: map<src_host_id, LB_algo>.  Each UecSrc whose
+    // _srcaddr is in this map uses the mapped algo instead of the global
+    // -load_balancing_algo. Set via -host_lb_overrides "0:ecmp,1:freezing,..."
+    // Empty by default. Useful for reproducing paper Fig 4 (per-flow LB).
+    // Caveat: only the dispatch (nextEntropy/processEv pointers + per-algo
+    // init in _dispatchLB) is overridden; other runtime checks of
+    // _load_balancing_algo (e.g. uec.cpp:1391) still see the global value.
+    // ====================================================================
+    // Declarations moved below the LoadBalancing_Algo enum (forward-decl would
+    // need underlying type — easier to just declare after the enum). See below.
+    // ====================================================================
+    // END ADDED (per-host-lb)
+    // ====================================================================
+
+    // REPS-buffer instrumentation. When _reps_state_log is non-null, each
+    // processAck() call for a source whose id is in _reps_state_log_srcs writes
+    // a CSV row capturing the buffer's state at that instant. Used to study how
+    // the LB's "active EV set" responds to ECN/NACK in real workloads.
+    static FILE* _reps_state_log;
+    static std::set<uint32_t> _reps_state_log_srcs;
+
     enum Sender_CC {
         DCTCP,
         NSCC,
@@ -247,9 +369,20 @@ public:
         SMARTT_ECN_AIFD,
         SMARTT_ECN_FIMD,
         SMARTT_ECN_FIFD,
-        SMARTT_RTT
+        SMARTT_RTT,
+        // ===== ADDED (swift-cc) =============================================
+        SWIFT,    // Delay-based AI/MD; identical target to NSCC (_target_Qdelay)
+        LSWIFT,   // Swift + 5-consecutive high-delay trigger (reordering resilience)
+        MSWIFT,   // LSwift + median delay window H = max(cwnd_pkts/2, 1)
+        MNSCC     // NSCC + median delay window H = max(min(cwnd_pkts/2,4), 1)
+        // ===== END ADDED (swift-cc) =========================================
     };
-    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING};
+    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB };
+    // ===== ADDED (per-host-lb): declarations placed after the enum =====
+    static std::map<uint32_t, LoadBalancing_Algo> _per_host_lb_override;
+    static LoadBalancing_Algo _parseLBName(const std::string& name);
+    static bool _parseHostLBString(const std::string& spec);
+    // ===== END ADDED (per-host-lb) =====
     enum PathFeedback {PATH_GOOD,PATH_ECN,PATH_NACK,PATH_TIMEOUT};
     enum EvState {STATE_GOOD,STATE_SKIP,STATE_ASSUMED_BAD};
     static Sender_CC _sender_cc_algo;
@@ -397,6 +530,17 @@ public:
     void dontUpdateCwndOnAck(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
     void dontUpdateCwndOnNack(bool skip, mem_b nacked_bytes);
 
+    // ===== ADDED (swift-cc) method declarations ==============================
+    void updateCwndOnAck_Swift (bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
+    void updateCwndOnAck_LSwift(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
+    void updateCwndOnAck_MSwift(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
+    void updateCwndOnAck_MNSCC (bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
+    void updateCwndOnNack_Swift(bool skip, mem_b nacked_bytes);
+    // Internal helpers refactored for reuse by M-variants:
+    void _updateCwndOnAck_LSwift_core(simtime_picosec delay, mem_b newly_acked_bytes);
+    void _updateCwndOnAck_NSCC_core  (bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
+    // ===== END ADDED (swift-cc) method declarations ==========================
+
     void (UecSrc::*updateCwndOnAck)(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
     void (UecSrc::*updateCwndOnNack)(bool skip, mem_b nacked_bytes);
 
@@ -411,6 +555,9 @@ public:
     uint16_t nextEntropy_freezing();
     uint16_t nextEntropy_flowlet();
     uint16_t nextEntropy_mprdma();
+    uint16_t nextEntropy_KLB();
+    uint16_t nextEntropy_SKLB();
+    uint16_t nextEntropy_HybridKLB();
 
     void processEv_bitmap(uint16_t path_id, PathFeedback feedback);
     void processEv_REPS(uint16_t path_id, PathFeedback feedback);
@@ -423,6 +570,10 @@ public:
     void processEv_freezing(uint16_t path_id, PathFeedback feedback);
     void processEv_flowlet(uint16_t path_id, PathFeedback feedback);
     void processEv_mprdma(uint16_t path_id, PathFeedback feedback);
+    void processEv_KLB(uint16_t path_id, PathFeedback feedback);
+    void processEv_SKLB(uint16_t path_id, PathFeedback feedback);
+    void processEv_HybridKLB(uint16_t path_id, PathFeedback feedback);
+    uint16_t klb_pick_fresh_path(int exclude_slot) const;
 
     inline EvState ev_state(uint16_t path) const { 
         if (_ev_skip_bitmap[path]==0) 
@@ -481,6 +632,17 @@ public:
     uint32_t saved_acked_bytes = 0;
     const Route *_route_fail;
 
+    // ===== ADDED (swift-cc) per-source fields ================================
+    simtime_picosec  _swift_rtt           = 0;  // EMA RTT for Swift cooldown (α = 7/8)
+    simtime_picosec  _swift_last_decrease = 0;  // timestamp of last MD (cooldown guard)
+    uint32_t         _swift_consec_high_d = 0;  // consecutive high-delay ACKs (LSwift)
+    DelayMedianBuffer _median_delay_buf;         // shared by MSwift and MNSCC
+    // ===== ADDED (swift-md-counter) =====
+    // Diagnostic: count MD fires per source. Always compiled, no behavior change.
+    // Phase D investigation of paper 2 Fig 4 gap (REPS+freezing → MD never fires?).
+    uint64_t         _swift_md_fires      = 0;
+    // ===== END ADDED (swift-cc) per-source fields ============================
+
 public:
     static linkspeed_bps _reference_network_linkspeed; 
     static simtime_picosec _reference_network_rtt; 
@@ -516,6 +678,12 @@ public:
     //debug
     static flowid_t _debug_flowid;
 private:
+    // ===== ADDED (per-host-lb) =====
+    // Selects nextEntropy/processEv function pointers + per-algo init for `lb`.
+    // Called from constructor with `_load_balancing_algo` (global), and from
+    // applyHostLBOverride() with the per-host override.
+    void _dispatchLB(LoadBalancing_Algo lb);
+    // ===== END ADDED (per-host-lb) =====
     bool quick_adapt(bool is_loss, simtime_picosec avgqdelay);
     void fair_increase(uint32_t newly_acked_bytes);
     void proportional_increase(uint32_t newly_acked_bytes,simtime_picosec delay);
@@ -591,6 +759,34 @@ private:
     simtime_picosec plb_last_rtt = 0;
     simtime_picosec plb_timeout_wait = 0;
     bool plb_timeout = false;
+
+    // KLB / SKLB state
+    int _klb_k = 2;
+    std::vector<uint16_t> _klb_active_evs;
+    uint32_t _klb_send_idx = 0;
+    std::vector<uint8_t>  _klb_ecn_streak;            // per-slot consecutive ECN count (Fix B1)
+
+    // Hybrid-KLB state
+    std::unordered_set<uint16_t> _hklb_active_set;    // confirmed-clean EVs (max K)
+    std::vector<uint16_t>        _hklb_active_list;   // ordered for round-robin
+    uint32_t                     _hklb_send_idx = 0;
+    std::vector<uint8_t>         _hklb_ecn_streak;    // per-EV consecutive ECN count (Fix B1)
+
+    // Per-EV cooldown — paths recently signalled ECN are excluded from selection
+    // until eventlist().now() >= _ev_quiet_until[ev] (Fix A). Size = _no_of_paths.
+    std::vector<simtime_picosec> _ev_quiet_until;
+
+    // ====================================================================
+    // ADDED (ev-health-counter): per-EV ECN state for SF_COUNTER_EVHEALTH.
+    // _ev_last_ecn_state[ev] = 1 if the most recent ACK on entropy-value ev
+    // carried ECN=1; 0 if it was clean. Size = _no_of_paths; lazy-initialised
+    // on first ACK (after _no_of_paths is set by CLI). Pattern mirrors
+    // _ev_quiet_until above. Only written/read in processAck().
+    // ====================================================================
+    std::vector<uint8_t> _ev_last_ecn_state;
+    // ====================================================================
+    // END ADDED (ev-health-counter)
+    // ====================================================================
 
     CircularBufferREPS<int> *circular_buffer_reps;
 
