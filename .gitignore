@@ -33,3 +33,13 @@ artifact_results_backup
 !failures_input/saved
 failures_input/saved_alternative
 !saved/README
+
+# === Heavy artifacts (added) ===
+# REPS experiment run bundles
+state_aware_experiments/**/runs.tar.gz
+state_aware_experiments/**/runs/
+
+# Generated connection matrices (regenerable via traffic_gen/);
+# already-tracked .cm files in the index are not affected by adding this rule.
+*.cm
+!**/validation/**/*.cm
