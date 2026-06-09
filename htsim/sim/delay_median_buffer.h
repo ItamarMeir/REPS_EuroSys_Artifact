@@ -3,9 +3,14 @@
 // Supports push(), median(), and percentile(p) operations.
 //
 // Design:
-//  - Fixed MAX_H = 32 cap — bounds per-ACK sort to ~160 comparisons, negligible.
-//  - setCapacity(H): only flushes the buffer when H decreases below the current
-//    fill level, so the buffer stays valid during AI-phase cwnd growth.
+//  - MAX_H = 128 (was 32). Paper 2 (arXiv:2509.07907v2) Eq (8) sets MSwift's
+//    H = max(W/2, 1). At BDP cwnd ~120 pkts in the Fig 4 setup, paper H = 60;
+//    earlier MAX_H = 32 silently clamped to half-paper-H and made the median
+//    behave closer to raw delay. Sort cost is now ~640 cmp/ACK — negligible.
+//  - setCapacity(H): on shrink, keeps the most-recent newCap samples (paper has
+//    no flush rule). The earlier "flush on shrink" behaviour discarded all
+//    history right after MD-induced cwnd drops, defeating the median framework
+//    exactly when its smoothing was most useful.
 //  - percentile(p): generalised form used for Fig-12 P10/P50/P90 variants.
 //    median() = percentile(50).
 // ===== END ADDED (swift-cc / median-buffer) ==================================
@@ -17,18 +22,21 @@
 
 class DelayMedianBuffer {
 public:
-    static const int MAX_H = 32;   // hard cap on history window
+    static const int MAX_H = 128;  // hard cap on history window
 
     DelayMedianBuffer() : _head(0), _count(0), _capacity(1) {}
 
-    // Update window size H. Only flushes when the new capacity is smaller than
-    // the number of valid samples already stored (shrinking the window).
+    // Update window size H.
     void setCapacity(int H) {
         int newCap = H < 1 ? 1 : (H > MAX_H ? MAX_H : H);
+        // ===== FIX (median-buf-paper-faithful) ===============================
+        // On shrink, keep the most-recent newCap samples (paper has no flush
+        // rule). The ring already stores them at indices
+        //   (_head - newCap) % MAX_H .. (_head - 1) % MAX_H
+        // so simply truncating _count to newCap leaves _head correct.
+        // =====================================================================
         if (newCap < _count) {
-            // Window shrank past stored samples — flush and start fresh.
-            _count = 0;
-            _head  = 0;
+            _count = newCap;
         }
         _capacity = newCap;
     }

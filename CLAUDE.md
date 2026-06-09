@@ -8,10 +8,11 @@ This file is the first-read document for any Claude Code session in this repo. I
 
 This is the **REPS EuroSys artifact** — a research simulator plus analysis code for the paper "REPS: Recycled Entropy Packet Spraying for Adaptive Load Balancing and Failure Mitigation". The simulator is `htsim`, extended with REPS.
 
-On top of the paper artifact we built three independent extensions, all gated behind CLI flags and living entirely in `htsim/sim/`:
+On top of the paper artifact we built several independent extensions, all gated behind CLI flags and living entirely in `htsim/sim/`:
 1. **State-aware NSCC + REPS** (`-state_aware_ecn`) — binary ECN gate driven by REPS freeze/unfreeze events + dynamic link-failure machinery. Experiments: exp01–03.
 2. **Smart filter** (`-smart_filter_mode`) — continuous, evidence-based dampening of NSCC's MD step using REPS buffer saturation. Mutually exclusive with state-aware. Experiments: exp06.
 3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
+4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
 
 The experiments for both live in `state_aware_experiments/`.
 
@@ -337,3 +338,119 @@ preserves 6 µs as the no-flag fallback). Affects all NSCC/Swift-family CCs.
 | File | Lines / what | Effect |
 |------|-------------|--------|
 | `htsim/sim/uec.cpp` | L195 reset line disabled with banner `// ===== FIX (target-qdelay-respect-cli) =====` | `-target_q_delay X` now actually takes effect |
+
+### `[FIX: median-buf-paper-faithful]` — applied 2026-06-01
+
+`DelayMedianBuffer` (used by MSwift + MNSCC) had two deviations from Paper 2
+(arXiv:2509.07907v2) §III.B + Eqs (8-9):
+
+1. **`MAX_H = 32`** silently clamped MSwift's window when Eq (8) `H = max(W/2, 1)`
+   exceeded 32 (BDP cwnd ≈ 120 pkts → paper H = 60). Raised to 128; sort cost
+   per ACK grows from ~160 to ~640 comparisons — still negligible.
+2. **`setCapacity` flushed the buffer on shrink**, discarding all history right
+   after MD-driven cwnd drops. Paper has no flush rule. Now keeps the most-recent
+   `newCap` samples (the ring buffer already organises them tail-aligned, so
+   only `_count` is truncated).
+
+Both changes are mechanical paper-fidelity items, not algorithmic. Effect on
+Paper 2 Fig 4 MSwift: 71 % → 75 % (small in this regime). MNSCC unaffected
+because its own H-cap of 4 is tighter than MAX_H.
+
+| File | Lines / what | Effect |
+|------|-------------|--------|
+| `htsim/sim/delay_median_buffer.h` | `MAX_H = 32 → 128`; `setCapacity` truncates `_count` instead of flushing; banner `// ===== FIX (median-buf-paper-faithful) =====` | MSwift's H now follows paper Eq (8) up to W ≈ 240; median window survives MD-induced cwnd drops |
+
+### `[ADDED: swift-sack-hole-md]` — gated by `_sender_cc_algo == SWIFT`, always compiled
+
+Paper 2 (CC4Spraying, arXiv:2509.07907v2) §IV.B explicitly states the Swift CCA collapses under
+packet spraying because it MDs on SACK holes from out-of-order arrivals. Their footnote says
+they had to correct htsim's Swift to match this. This patch implements the same correction:
+inside `UecSrc::processAck()`, immediately after the per-ACK CCA dispatch, when the active CCA
+is `SWIFT` and the receiver-attached out-of-order count `pkt.ooo() > 0`, apply Swift's
+reordering-sensitive MD (`_cwnd *= 1 - _swift_max_mdf` with the standard per-RTT cooldown via
+`_swift_last_decrease` / `_swift_rtt`). LSWIFT/MSWIFT (which are the paper's *reordering-resilient*
+variants by definition) and NSCC/MNSCC are gated out and unchanged. With this fix, Paper 2 Fig 4
+Swift CCT inflation jumps from 355 % to ~1577 % (paper 1308 %, within 20 %).
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.cpp` | New block in `processAck()` after the CCA dispatch (~L1444); banner `// ===== ADDED (swift-sack-hole-md) =====` | `_sender_cc_algo == SWIFT && ooo > 0` |
+
+### `[ADDED: path-rr]` — gated by `-load_balancing_algo path_rr`
+
+True round-robin over distinct physical paths using **full source routing** — bypasses per-hop
+ECMP entirely.  At flow setup, `get_bidir_paths(src, dst)` enumerates all distinct end-to-end
+`Route*` objects and stores them in `UecSrc::_paths`.  Each packet is created with the next
+route in the cycle as its explicit route (not just an entropy value).  Switches never run their
+ECMP hash on these packets.  `processEv_path_rr` is a no-op (pure RR, no feedback).
+Architecture doc: [`state_aware_experiments/PATH_RR_ARCHITECTURE.md`](state_aware_experiments/PATH_RR_ARCHITECTURE.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `PATH_RR` appended to `LoadBalancing_Algo` enum; `_path_rr_idx` per-source field; `setPaths()` / `setPathRRStartIdx()` methods; `nextEntropy_path_rr` / `processEv_path_rr` declarations; `PathRRStartMode` enum + static | `-load_balancing_algo path_rr` |
+| `htsim/sim/uec.cpp` | `_parseLBName` entry; `_dispatchLB` case; `processEv_path_rr` (no-op); `nextEntropy_path_rr` (advances `_path_rr_idx`); `effective_route` override in `sendNewPacket` and `sendRtxPacket`; `_path_rr_start_mode` static def | `-load_balancing_algo path_rr` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `path_rr` parsed in `-load_balancing_algo` handler; `-path_rr_start_mode {zero\|src_mod\|dst_mod\|srcdst_hash\|src_mod2}`; `get_bidir_paths` + `setPaths` + `setPathRRStartIdx` call per flow after `connectPort` | `-load_balancing_algo path_rr` |
+
+### `[ADDED: path-rr-npaths]` — gated by `-path_rr_npaths_override "host:N,..."`
+
+Per-host cap on the number of PATH_RR paths. After `get_bidir_paths` builds `full_paths`,
+truncates the vector to at most N entries for any host in the override map. Purely a
+`main_uec.cpp` change — no uec.h/uec.cpp modifications. Used in exp19 to simulate one
+host having access to only 3 of 4 physical paths (fabric failure / misconfigured routing).
+Results: [`state_aware_experiments/exp19_path_rr_asymmetry_v19/README.md`](state_aware_experiments/exp19_path_rr_asymmetry_v19/README.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/datacenter/main_uec.cpp` | `path_rr_npaths_override` local map (~L214); CLI flag `-path_rr_npaths_override` parser (~L371); truncate `full_paths` before `setPaths` in PATH_RR setup block | `-path_rr_npaths_override` |
+
+### `[ADDED: path-rr-startslot]` — extends `-path_rr_start_mode`
+
+Adds a fifth start-slot mode `src_mod2`: each flow's RR start index is `(src × 2) % np`. With
+`np=4` this yields slots [0,2,0,2,...] — 2 distinct slots vs 4 for `src_mod`. Tested in exp18
+alongside the existing `zero` and `src_mod` modes against PATH_STATIC reference.
+Results: [`state_aware_experiments/exp18_path_rr_startslot_v18/README.md`](state_aware_experiments/exp18_path_rr_startslot_v18/README.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `PATH_RR_START_SRC2` appended to `PathRRStartMode` enum | `-path_rr_start_mode src_mod2` |
+| `htsim/sim/datacenter/main_uec.cpp` | `src_mod2` branch in `-path_rr_start_mode` parser; `PATH_RR_START_SRC2` case in `setPathRRStartIdx` switch: `start_idx = (src * 2) % np` | `-path_rr_start_mode src_mod2` |
+
+### `[ADDED: path-random]` — gated by `-load_balancing_algo path_random`
+
+Per-packet uniform-random path selection using the same source-routing infrastructure as PATH_RR.
+Reuses `UecSrc::_paths[]` populated by `get_bidir_paths` at flow setup.  On every packet,
+`rand() % _paths.size()` is stored into `_path_rr_idx` (scratch register) before the route is
+selected, so route and pathid are consistent.  `processEv_path_random` is a no-op.
+Results: [`state_aware_experiments/exp16_path_random_v16/README.md`](state_aware_experiments/exp16_path_random_v16/README.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `PATH_RANDOM` appended to `LoadBalancing_Algo` enum; `nextEntropy_path_random` / `processEv_path_random` declarations | `-load_balancing_algo path_random` |
+| `htsim/sim/uec.cpp` | `_parseLBName` entry; `_dispatchLB` case; `processEv_path_random` (no-op); `nextEntropy_path_random` (returns scratch `_path_rr_idx`); `rand()` roll in `sendNewPacket` and `sendRtxPacket`; `effective_route` guard extended to cover `PATH_RANDOM` | `-load_balancing_algo path_random` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `path_random` parsed in `-load_balancing_algo` handler; path-population condition extended to `PATH_RR || PATH_RANDOM` | `-load_balancing_algo path_random` |
+
+### `[ADDED: path-static]` — gated by `-load_balancing_algo path_static`
+
+Each flow is pinned to a single fixed path for its entire lifetime. Path is chosen at flow-setup
+time by a **greedy edge-load algorithm**: for each new flow, pick the path whose
+maximum-loaded edge (`PacketSink*`) has the minimum current load, then increment load counts
+for all edges on the chosen path. `Route*` objects reuse the same `Queue*`/`Pipe*` pointers for
+shared physical links, so tracking `PacketSink*` identity correctly identifies shared links
+without any topology-specific knowledge. For balanced workloads like tornado, all 16 flows are
+assigned with `max_edge_load=0` — truly no shared data-path edges.
+
+**Reverse-path routing for ACK/PULL:** The NIC sends control packets (PULLs, ACKs, NACKs) by
+calling `sink->getPortRoute(port)`, which by default returns only the first hop (dst→ToR) and
+relies on ECMP for the rest. In bidirectional tornado, ECMP hash collisions on the return path
+caused a bimodal FCT distribution (~80 µs gap). The fix: after the greedy selects `best`, build
+`rev = new Route(*orig_r->reverse(), *uec_src->getPort(p))` and call
+`uec_snk->getPort(p)->setRoute(*rev)`, overriding the sink port's route with the full source-routed
+reverse path. All 16 flows now finish at identical times (zero FCT spread), and PATH_STATIC achieves
+`1.0334×` avg/max slowdown — best of all five algorithms tested.
+Results: [`state_aware_experiments/exp17_cwnd_corrected_v17/`](state_aware_experiments/exp17_cwnd_corrected_v17/)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `PATH_STATIC` appended to `LoadBalancing_Algo` enum; `nextEntropy_path_static` / `processEv_path_static` declarations | `-load_balancing_algo path_static` |
+| `htsim/sim/uec.cpp` | `_parseLBName` entry; `_dispatchLB` case; `processEv_path_static` (no-op); `nextEntropy_path_static` (`_path_rr_idx % 1` → always 0); `effective_route` guard extended to cover `PATH_STATIC` | `-load_balancing_algo path_static` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `path_static` parsed; `path_static_edge_load` map; greedy selection; `get_bidir_paths` called with `reverse=true`; reverse route built and registered via `uec_snk->getPort(p)->setRoute(*rev)`; cross-linked with `set_reverse` for trim safety | `-load_balancing_algo path_static` |

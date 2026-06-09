@@ -188,7 +188,7 @@ protected:
 class UecAckPacket : public UecBasePacket {
     using Packet::set_route;
 public:
-    inline static UecAckPacket* newpkt(PacketFlow &flow, const Route *route, 
+    inline static UecAckPacket* newpkt(PacketFlow &flow, const Route *route,
                                         seq_t cumulative_ack, seq_t ref_ack, seq_t acked_psn,/*pull_quanta pullno,*/
                                         uint16_t path_id, bool ecn_marked, uint64_t recv_bytes, uint8_t rcv_wnd_pen,
                                         uint32_t destination = UINT32_MAX) {
@@ -263,7 +263,7 @@ protected:
 class UecNackPacket : public UecBasePacket {
     using Packet::set_route;
 public:
-    inline static UecNackPacket* newpkt(PacketFlow &flow, const Route *route, 
+    inline static UecNackPacket* newpkt(PacketFlow &flow, const Route *route,
                                          seq_t ref_epsn, /*pull_quanta pullno, */
                                          uint16_t path_id,uint64_t recv_bytes, uint64_t tbytes,
                                          uint32_t destination = UINT32_MAX) {

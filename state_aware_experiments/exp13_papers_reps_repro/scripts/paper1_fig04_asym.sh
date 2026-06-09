@@ -10,7 +10,7 @@ source "$SCRIPT_DIR/lib_common.sh"
 
 LBS="freezing ecmp"
 SIZES="4MB 8MB 16MB"
-SEEDS="42 43 44"
+SEEDS="42 43 44 45 46 47"
 NUM_DEGRADED=4  # 2% of ~200 ToR uplinks in fat_tree_128_1os_2t
 
 for size in $SIZES; do

@@ -6,7 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib_common.sh"
 
 for s in $SEEDS; do
-    tm="$CM_DIR/perm_250n_250c_8MB_s${s}.cm"
+    # Paper §IV.D Fig 8: 250-node baseline = 4 ECMP elephants + 246 sprayed
+    # 8 MB. Earlier this script used pure permutation (perm_250n_250c_8MB)
+    # which was a workload mismatch; fixed 2026-06-01.
+    tm="$WL_DIR/paper_baseline_250n_s${s}.cm"
     if [[ ! -f "$tm" ]]; then
         echo "WARN: missing $tm" ; continue
     fi

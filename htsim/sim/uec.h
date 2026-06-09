@@ -191,6 +191,13 @@ public:
     const Route *get_route() { return _route_fail; }
     UecSink *get_sink() { return _sink; }
     std::vector<const Route *> get_paths() { return _paths; }
+    // ===== ADDED (path-rr) =====
+    // Populates the source-route buffer used by PATH_RR.  Called from
+    // main_uec.cpp after connectPort(), once src/dst addresses are known.
+    // Each element is a full end-to-end Route* from get_bidir_paths().
+    void setPaths(const std::vector<const Route*>& paths) { _paths = paths; }
+    void setPathRRStartIdx(uint32_t idx) { _path_rr_idx = idx; }  // ===== ADDED (path-rr-order) =====
+    // ===== END ADDED (path-rr) =====
     static void setMinRTO(uint32_t min_rto_in_us) {
         _min_rto = timeFromUs((uint32_t)min_rto_in_us);
     }
@@ -359,6 +366,11 @@ public:
     static FILE* _reps_state_log;
     static std::set<uint32_t> _reps_state_log_srcs;
 
+    // ===== ADDED (cwnd-log): per-ACK cwnd logger, independent of REPS buffer =====
+    static FILE* _cwnd_log;
+    static std::set<uint32_t> _cwnd_log_srcs; // empty = log all sources
+    // ===== END ADDED (cwnd-log) =====
+
     enum Sender_CC {
         DCTCP,
         NSCC,
@@ -377,7 +389,18 @@ public:
         MNSCC     // NSCC + median delay window H = max(min(cwnd_pkts/2,4), 1)
         // ===== END ADDED (swift-cc) =========================================
     };
-    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB };
+    // ===== ADDED (path-rr) =====
+    // PATH_RR: true round-robin over distinct physical paths using full source
+    // routing (bypasses per-hop ECMP).  Each UecSrc gets a pre-computed buffer
+    // of Route* objects via setPaths(); packets cycle through them in order.
+    // ===== END ADDED (path-rr) =====
+    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB, PATH_RR, PATH_RANDOM, PATH_STATIC }; // ===== ADDED (path-random) (path-static) =====
+    // ===== ADDED (path-rr-order) =====
+    // Controls the starting index in the RR cycle per flow.  zero = all start
+    // at index 0 (synchronized); src/dst/srcdst_hash = staggered per flow.
+    enum PathRRStartMode { PATH_RR_START_ZERO = 0, PATH_RR_START_SRC, PATH_RR_START_DST, PATH_RR_START_SRCDST_HASH, PATH_RR_START_SRC2 }; // ===== ADDED (path-rr-startslot): (src*2)%np =====
+    static PathRRStartMode _path_rr_start_mode;
+    // ===== END ADDED (path-rr-order) =====
     // ===== ADDED (per-host-lb): declarations placed after the enum =====
     static std::map<uint32_t, LoadBalancing_Algo> _per_host_lb_override;
     static LoadBalancing_Algo _parseLBName(const std::string& name);
@@ -558,6 +581,15 @@ public:
     uint16_t nextEntropy_KLB();
     uint16_t nextEntropy_SKLB();
     uint16_t nextEntropy_HybridKLB();
+    // ===== ADDED (path-rr) =====
+    uint16_t nextEntropy_path_rr();
+    // ===== END ADDED (path-rr) =====
+    // ===== ADDED (path-random) =====
+    uint16_t nextEntropy_path_random();
+    // ===== END ADDED (path-random) =====
+    // ===== ADDED (path-static) =====
+    uint16_t nextEntropy_path_static();
+    // ===== END ADDED (path-static) =====
 
     void processEv_bitmap(uint16_t path_id, PathFeedback feedback);
     void processEv_REPS(uint16_t path_id, PathFeedback feedback);
@@ -573,6 +605,15 @@ public:
     void processEv_KLB(uint16_t path_id, PathFeedback feedback);
     void processEv_SKLB(uint16_t path_id, PathFeedback feedback);
     void processEv_HybridKLB(uint16_t path_id, PathFeedback feedback);
+    // ===== ADDED (path-rr) =====
+    void processEv_path_rr(uint16_t path_id, PathFeedback feedback);
+    // ===== END ADDED (path-rr) =====
+    // ===== ADDED (path-random) =====
+    void processEv_path_random(uint16_t path_id, PathFeedback feedback);
+    // ===== END ADDED (path-random) =====
+    // ===== ADDED (path-static) =====
+    void processEv_path_static(uint16_t path_id, PathFeedback feedback);
+    // ===== END ADDED (path-static) =====
     uint16_t klb_pick_fresh_path(int exclude_slot) const;
 
     inline EvState ev_state(uint16_t path) const { 
@@ -771,6 +812,12 @@ private:
     std::vector<uint16_t>        _hklb_active_list;   // ordered for round-robin
     uint32_t                     _hklb_send_idx = 0;
     std::vector<uint8_t>         _hklb_ecn_streak;    // per-EV consecutive ECN count (Fix B1)
+
+    // ===== ADDED (path-rr) =====
+    // Position in the round-robin cycle over _paths[].  Incremented once per
+    // sent packet (new or retransmit).  Wraps modulo _paths.size().
+    uint32_t _path_rr_idx = 0;
+    // ===== END ADDED (path-rr) =====
 
     // Per-EV cooldown — paths recently signalled ECN are excluded from selection
     // until eventlist().now() >= _ev_quiet_until[ev] (Fix A). Size = _no_of_paths.

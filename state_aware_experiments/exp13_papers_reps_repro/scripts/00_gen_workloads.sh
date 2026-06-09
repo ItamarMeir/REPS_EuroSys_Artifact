@@ -16,7 +16,7 @@ SIZE_8MB=8388608
 SIZE_16MB=16777216
 SIZE_32MB=33554432
 
-SEEDS=(42 43 44)
+SEEDS=(42 43 44 45 46 47)
 
 gen_if_missing() {
     local out="$1"; shift

@@ -30,7 +30,7 @@ import random
 HERE = os.path.dirname(os.path.abspath(__file__))
 N    = 128
 US   = 1_000_000
-SEEDS = [42, 43, 44]
+SEEDS = [42, 43, 44, 45, 46, 47]
 
 SIZE_8MB  =  8_388_608
 SIZE_16MB = 16_777_216
@@ -38,9 +38,11 @@ SIZE_64MB = 67_108_864      # long-lived ECMP elephants
 SIZE_HSDP = 3344 * 4096     # 13,697,024 B (paper: 3344 packets x 4 KB MTU)
 
 
-def write_tm(path, flows):
+def write_tm(path, flows, n_nodes=None):
+    if n_nodes is None:
+        n_nodes = N
     with open(path, "w") as fh:
-        fh.write(f"Nodes {N}\nConnections {len(flows)}\n")
+        fh.write(f"Nodes {n_nodes}\nConnections {len(flows)}\n")
         for ln in flows:
             fh.write(ln + "\n")
     print(f"wrote {path}: connections={len(flows)}")
@@ -54,10 +56,18 @@ def _avoid_self_loop(perm_list, idx, fallback_pool):
     return perm_list[idx]
 
 
-def gen_baseline(seed, n_ecmp=4, sprayed_size=SIZE_8MB):
-    """4 (or 8) ECMP elephants + (128 - n_ecmp) sprayed permutation."""
+def gen_baseline(seed, n_ecmp=4, sprayed_size=SIZE_8MB, sprayed_start_us=0, n_hosts=None):
+    """n_ecmp ECMP elephants + (n_hosts - n_ecmp) sprayed permutation.
+
+    n_hosts: defaults to module N=128. Pass 250 for Fig 8.
+    sprayed_start_us: delay (µs) before sprayed flows begin. Default 0 matches
+    paper §IV.A's unspecified-but-default-coincident-start. Tested 50 µs
+    stagger (H5 in exp13's Fig 4 workload-side investigation); did not close
+    the MSwift gap to paper, so default reverted to 0."""
+    if n_hosts is None:
+        n_hosts = N
     rng = random.Random(seed)
-    hosts = list(range(N))
+    hosts = list(range(n_hosts))
 
     ecmp_hosts = rng.sample(hosts, n_ecmp)
     ecmp_dst   = ecmp_hosts[:]; rng.shuffle(ecmp_dst)
@@ -71,10 +81,11 @@ def gen_baseline(seed, n_ecmp=4, sprayed_size=SIZE_8MB):
         d = _avoid_self_loop(ecmp_dst, i, ecmp_hosts)
         fid += 1
         flows.append(f"{s}->{d} id {fid} start 0 size {SIZE_64MB}")
+    sprayed_start_ps = sprayed_start_us * US
     for i, s in enumerate(sprayed_hosts):
         d = _avoid_self_loop(sprayed_dst, i, sprayed_hosts)
         fid += 1
-        flows.append(f"{s}->{d} id {fid} start 0 size {sprayed_size}")
+        flows.append(f"{s}->{d} id {fid} start {sprayed_start_ps} size {sprayed_size}")
     return flows
 
 
@@ -113,6 +124,13 @@ def main():
                  gen_hsdp(seed))
         write_tm(os.path.join(HERE, f"paper_incast32_s{seed}.cm"),
                  gen_incast32(seed))
+        # Paper 2 Fig 8: 250-node scaled baseline.
+        # Paper §IV.D: "increasing the three-level fat-tree network size from
+        # 128 to 250 nodes while keeping four elephants (and 250-4 = 246
+        # sprayed flows)."
+        write_tm(os.path.join(HERE, f"paper_baseline_250n_s{seed}.cm"),
+                 gen_baseline(seed, n_hosts=250),
+                 n_nodes=250)
 
 
 if __name__ == "__main__":

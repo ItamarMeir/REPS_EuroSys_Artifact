@@ -80,11 +80,12 @@ def workload_type_size(tm):
 # ─────────────────────────────────────────────────────────────────────
 # Fig 2 (left) — Synthetic speedup-vs-ECMP
 # ─────────────────────────────────────────────────────────────────────
-def fig2_synth(rows):
-    sub = [r for r in rows if r["fig"] == "fig02_synth"]
+def fig2_synth(rows, fig_tag="fig02_synth", suffix="", tier_label="2-tier"):
+    # Paper §4.3.1: "we visualize a summary of the performance ... by looking
+    # at the runtime of the workloads (max FCT)". Match the paper's metric.
+    sub = [r for r in rows if r["fig"] == fig_tag]
     by = group_by(sub, lambda r: (r["algo"], workload_type_size(r["workload"])),
-                  lambda r: r["avg_fct"])
-    # Compute speedup = ECMP_avg / REPS_avg for each (kind, size).
+                  lambda r: r["max_fct"])
     bars = []
     kinds = ["I", "P", "T"]
     sizes = [4, 8, 16]
@@ -96,7 +97,7 @@ def fig2_synth(rows):
                 speedup = by[ecmp_key][0] / by[reps_key][0]
                 bars.append((f"{kind}{sz}", speedup))
     if not bars:
-        print("WARN: no fig02_synth data")
+        print(f"WARN: no {fig_tag} data")
         return
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -105,11 +106,11 @@ def fig2_synth(rows):
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.6)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_ylabel("REPS speedup vs ECMP (×)")
-    ax.set_title("Paper 1 Fig 2 (left) — Synthetic, REPS / ECMP avg-FCT ratio")
+    ax.set_ylabel("REPS speedup vs ECMP (×, max-FCT)")
+    ax.set_title(f"Paper 1 Fig 2 (left) — Synthetic {tier_label}, REPS / ECMP max-FCT (runtime) ratio")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    out = PLOTS / "paper1_fig02_synth.png"
+    out = PLOTS / f"paper1_fig02_synth{suffix}.png"
     fig.savefig(out, dpi=150)
     print(f"wrote {out}  ({len(bars)} bars)")
 
@@ -160,10 +161,11 @@ def fig2_dc(rows):
 # ─────────────────────────────────────────────────────────────────────
 # Fig 4 — Asymmetric speedup vs ECMP
 # ─────────────────────────────────────────────────────────────────────
-def fig4_asym(rows):
-    sub = [r for r in rows if r["fig"] == "fig04_asym"]
+def fig4_asym(rows, fig_tag="fig04_asym", suffix="", tier_label="2-tier"):
+    # Same metric rule as Fig 2: paper §4.3.1 uses max FCT (workload runtime).
+    sub = [r for r in rows if r["fig"] == fig_tag]
     by = group_by(sub, lambda r: (r["algo"], workload_type_size(r["workload"])),
-                  lambda r: r["avg_fct"])
+                  lambda r: r["max_fct"])
     bars = []
     for kind in ["I", "P", "T"]:
         for sz in [4, 8, 16]:
@@ -173,7 +175,7 @@ def fig4_asym(rows):
                 speedup = by[ecmp_key][0] / by[reps_key][0]
                 bars.append((f"{kind}{sz}", speedup))
     if not bars:
-        print("WARN: no fig04_asym data")
+        print(f"WARN: no {fig_tag} data")
         return
 
     fig, ax = plt.subplots(figsize=(7, 4))
@@ -182,11 +184,11 @@ def fig4_asym(rows):
     ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.6)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_ylabel("REPS speedup vs ECMP (×)")
-    ax.set_title("Paper 1 Fig 4 — Asymmetric (4 degraded uplinks)")
+    ax.set_ylabel("REPS speedup vs ECMP (×, max-FCT)")
+    ax.set_title(f"Paper 1 Fig 4 — Asymmetric {tier_label} (4 degraded uplinks, max-FCT ratio)")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
-    out = PLOTS / "paper1_fig04_asym.png"
+    out = PLOTS / f"paper1_fig04_asym{suffix}.png"
     fig.savefig(out, dpi=150)
     print(f"wrote {out}  ({len(bars)} bars)")
 
@@ -288,8 +290,10 @@ def main():
     rows = load_cct()
     print(f"loaded {len(rows)} p1 rows")
     fig2_synth(rows)
+    fig2_synth(rows, fig_tag="fig02_synth3t", suffix="_3t", tier_label="3-tier")
     fig2_dc(rows)
     fig4_asym(rows)
+    fig4_asym(rows, fig_tag="fig04_asym3t", suffix="_3t", tier_label="3-tier")
     fig6_failures(rows)
     fig8_extreme(rows)
 

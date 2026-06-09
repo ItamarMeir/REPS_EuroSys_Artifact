@@ -54,6 +54,9 @@ bool UecSink::_oversubscribed_cc = false; // can only be enabled when receiver_b
 
 UecSrc::Sender_CC UecSrc::_sender_cc_algo = UecSrc::NSCC;
 UecSrc::LoadBalancing_Algo UecSrc::_load_balancing_algo = UecSrc::BITMAP;
+// ===== ADDED (path-rr-order) =====
+UecSrc::PathRRStartMode UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_ZERO;
+// ===== END ADDED (path-rr-order) =====
 int UecSrc::_klb_k_param = 2;
 bool UecSrc::_klb_enable_fixes = false;
 
@@ -138,6 +141,15 @@ UecSrc::LoadBalancing_Algo UecSrc::_parseLBName(const std::string& name) {
     if (name == "klb")         return KLB;
     if (name == "sklb")        return SKLB;
     if (name == "hklb")        return HKLB;
+    // ===== ADDED (path-rr) =====
+    if (name == "path_rr")     return PATH_RR;
+    // ===== END ADDED (path-rr) =====
+    // ===== ADDED (path-random) =====
+    if (name == "path_random") return PATH_RANDOM;
+    // ===== END ADDED (path-random) =====
+    // ===== ADDED (path-static) =====
+    if (name == "path_static") return PATH_STATIC;
+    // ===== END ADDED (path-static) =====
     return (LoadBalancing_Algo)(-1);  // sentinel for "unknown"
 }
 
@@ -174,6 +186,11 @@ void UecSrc::applyHostLBOverride() {
 // REPS-buffer instrumentation file + set of source ids to log. Off by default.
 FILE* UecSrc::_reps_state_log = nullptr;
 std::set<uint32_t> UecSrc::_reps_state_log_srcs;
+
+// ===== ADDED (cwnd-log) =====
+FILE* UecSrc::_cwnd_log = nullptr;
+std::set<uint32_t> UecSrc::_cwnd_log_srcs;
+// ===== END ADDED (cwnd-log) =====
 
 // ===== ADDED (smart-filter) ============================================
 // smartFilterCounter(): returns the active congestion-evidence counter in [0..B],
@@ -259,7 +276,33 @@ void UecSrc::_dispatchLB(LoadBalancing_Algo lb) {
         _hklb_active_list.clear();
         _hklb_ecn_streak.assign(_no_of_paths, 0);
         _ev_quiet_until.assign(_no_of_paths, 0);
+    // ===== ADDED (path-rr) =====
+    // PATH_RR uses full source-routed paths stored in _paths[] (populated by
+    // main_uec.cpp after connectPort).  No entropy-space init is needed here.
+    } else if (lb == PATH_RR) {
+        nextEntropy = &UecSrc::nextEntropy_path_rr;
+        processEv   = &UecSrc::processEv_path_rr;
+        _path_rr_idx = 0;
     }
+    // ===== END ADDED (path-rr) =====
+    // ===== ADDED (path-random) =====
+    // PATH_RANDOM: same source-routing infrastructure as PATH_RR but picks a
+    // uniformly random path on every packet.  _path_rr_idx is used as a scratch
+    // register (set in sendNewPacket/sendRtxPacket before each packet is sent);
+    // no cursor reset is needed here.
+    else if (lb == PATH_RANDOM) {
+        nextEntropy = &UecSrc::nextEntropy_path_random;
+        processEv   = &UecSrc::processEv_path_random;
+    }
+    // ===== END ADDED (path-random) =====
+    // ===== ADDED (path-static) =====
+    // PATH_STATIC: fixed single path assigned at flow setup; _paths.size()==1
+    // so _path_rr_idx % 1 == 0 always.  No reset needed.
+    else if (lb == PATH_STATIC) {
+        nextEntropy = &UecSrc::nextEntropy_path_static;
+        processEv   = &UecSrc::processEv_path_static;
+    }
+    // ===== END ADDED (path-static) =====
 }
 // ===== END ADDED (per-host-lb) =========================================
 
@@ -1441,6 +1484,31 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         // ===== END ADDED (smart-filter) ==================================
 
         (this->*updateCwndOnAck)(cc_ecn_view, delay, newly_recvd_bytes);
+
+        // ===== ADDED (swift-sack-hole-md) =====================================
+        // Paper 2 (Gerstein/Silberstein/Keslassy, arXiv:2509.07907v2) §IV.B:
+        //   "particularly poor performance of the Swift CCA ... reflects Swift's
+        //    aggressive cwnd reduction upon SACK holes following out-of-order
+        //    arrivals."
+        // Their footnote 1 says they had to correct htsim's Swift to do this.
+        // Real Google Swift treats SACK holes as loss signals and MDs; LSwift
+        // is defined as the reordering-resilient variant that does NOT.
+        // We use the per-ACK `ooo` count (already set by the receiver in
+        // UecSink::receivePacket → UecAckPacket::set_ooo) as the hole indicator.
+        // Gate strictly on `_sender_cc_algo == SWIFT` so LSWIFT/MSWIFT/MNSCC/NSCC
+        // are unaffected.
+        if (_sender_cc_algo == SWIFT && ooo > 0) {
+            const simtime_picosec now_sh = eventlist().now();
+            bool can_decrease_sh = (_swift_rtt > 0) &&
+                ((now_sh - _swift_last_decrease) >= (simtime_picosec)_swift_rtt);
+            if (can_decrease_sh) {
+                _cwnd = (mem_b)(_cwnd * (1.0 - _swift_max_mdf));
+                if (_cwnd < (mem_b)_mtu) _cwnd = _mtu;
+                _swift_last_decrease = now_sh;
+                _swift_md_fires++;
+            }
+        }
+        // ===== END ADDED (swift-sack-hole-md) =================================
     }
 
     if (_load_balancing_algo == MPRDMA) {
@@ -1455,6 +1523,17 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     }
     
     (this->*processEv)(pkt.ev(), pkt.ecn_echo() ? PATH_ECN:PATH_GOOD);
+
+    // ===== ADDED (cwnd-log): per-ACK cwnd logger, works with any LB algorithm =====
+    if (_cwnd_log &&
+        (_cwnd_log_srcs.empty() ||
+         _cwnd_log_srcs.find(_node_num) != _cwnd_log_srcs.end())) {
+        fprintf(_cwnd_log, "%.3f,%u,%u\n",
+                (double)eventlist().now() / 1000.0,
+                _node_num,
+                (unsigned)(_cwnd / get_avg_pktsize()));
+    }
+    // ===== END ADDED (cwnd-log) =====
 
     // REPS-state instrumentation: capture per-ACK LB-buffer snapshot for the
     // chosen source ids. Columns: time_us, src_id, ecn, fresh, recycle, cwnd,
@@ -2854,6 +2933,18 @@ void UecSrc::processEv_incremental(uint16_t path_id, PathFeedback feedback) {
     return;
 }
 
+// ===== ADDED (path-rr) =====
+// PATH_RR is a pure round-robin: feedback from the network is intentionally
+// ignored.  The RR cycle always advances regardless of ECN/NACK/timeout.
+void UecSrc::processEv_path_rr(uint16_t /*path_id*/, PathFeedback /*feedback*/) {
+    return;
+}
+// ===== END ADDED (path-rr) =====
+// ===== ADDED (path-random) =====
+void UecSrc::processEv_path_random(uint16_t /*path_id*/, PathFeedback /*feedback*/) {
+    return;  // pure random: no feedback used
+}
+// ===== END ADDED (path-random) =====
 
 uint16_t UecSrc::nextEntropy_bitmap() {
     // _no_of_paths must be a power of 2
@@ -2942,6 +3033,37 @@ uint16_t UecSrc::nextEntropy_mixed(){
 uint16_t UecSrc::nextEntropy_oblivious(){
     return rand() % _no_of_paths;
 }
+
+// ===== ADDED (path-rr) =====
+// Returns the index of the current path in the RR cycle and advances the
+// counter.  The return value is also written as the packet's pathid field
+// (harmless — switches never hash it because the packet carries an explicit
+// full source route set in sendNewPacket / sendRtxPacket).
+// Falls back to 0 if _paths was not populated (e.g. same-ToR flow with
+// a single path that happens to be omitted by get_bidir_paths).
+uint16_t UecSrc::nextEntropy_path_rr() {
+    if (_paths.empty()) return 0;
+    uint16_t idx = static_cast<uint16_t>(_path_rr_idx % _paths.size());
+    _path_rr_idx++;
+    return idx;
+}
+// ===== END ADDED (path-rr) =====
+// ===== ADDED (path-random) =====
+// _path_rr_idx was set to rand()%N in sendNewPacket/sendRtxPacket before this
+// call, so this just returns the already-chosen index (pathid == route used).
+uint16_t UecSrc::nextEntropy_path_random() {
+    if (_paths.empty()) return 0;
+    return static_cast<uint16_t>(_path_rr_idx % _paths.size());
+}
+// ===== END ADDED (path-random) =====
+// ===== ADDED (path-static) =====
+// PATH_STATIC: one path assigned at flow setup; _paths.size()==1, always returns 0.
+uint16_t UecSrc::nextEntropy_path_static() {
+    if (_paths.empty()) return 0;
+    return static_cast<uint16_t>(_path_rr_idx % _paths.size());
+}
+void UecSrc::processEv_path_static(uint16_t /*path_id*/, PathFeedback /*feedback*/) { return; }
+// ===== END ADDED (path-static) =====
 
 // Pick a path not currently held by any slot other than `replacing_slot`,
 // and not currently in cooldown (Fix A — paths that recently signalled ECN are
@@ -3269,7 +3391,27 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     }
     _pull_target = computePullTarget();
 
-    auto* p = UecDataPacket::newpkt(_flow, route, _highest_sent, full_pkt_size, ptype,
+    // ===== ADDED (path-rr) =====
+    // For PATH_RR we use a pre-computed full source route from _paths[] instead
+    // of the NIC-provided host->ToR stub.  _path_rr_idx is read here (pre-
+    // advance) and then incremented inside nextEntropy_path_rr() a few lines
+    // below, so both reads refer to the same packet.  All other LB algorithms
+    // use the original `route` unchanged.
+    // ===== ADDED (path-random) =====
+    // For PATH_RANDOM: roll a fresh random index into _path_rr_idx so that the
+    // effective_route selection and nextEntropy_path_random() both see the same
+    // index (two consistent views of a single per-packet random draw).
+    if (_load_balancing_algo == PATH_RANDOM && !_paths.empty())
+        _path_rr_idx = (uint64_t)(rand() % _paths.size());
+    // ===== END ADDED (path-random) =====
+    const Route& effective_route =
+        ((_load_balancing_algo == PATH_RR || _load_balancing_algo == PATH_RANDOM ||
+          _load_balancing_algo == PATH_STATIC) && !_paths.empty()) // ===== ADDED (path-static) =====
+        ? *_paths[_path_rr_idx % _paths.size()]
+        : route;
+    // ===== END ADDED (path-rr) =====
+
+    auto* p = UecDataPacket::newpkt(_flow, effective_route, _highest_sent, full_pkt_size, ptype,
                                      _pull_target, _dstaddr);
     p->_src_dest = _src_dest_id_hash;
     //printf("%s MPRDMA SEND1 - can send %d - CWND %d - In Flight %d\n",nodename().c_str(), mprdma_can_send, _cwnd, _in_flight);
@@ -3326,8 +3468,21 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     assert(_rtx_backlog >= 0);
     _in_flight += full_pkt_size;
     _pull_target = computePullTarget();
-    
-    auto* p = UecDataPacket::newpkt(_flow, route, seq_no, full_pkt_size, UecDataPacket::DATA_RTX,
+
+    // ===== ADDED (path-rr) =====
+    // Same source-routing override as in sendNewPacket (see comment there).
+    // ===== ADDED (path-random) =====
+    if (_load_balancing_algo == PATH_RANDOM && !_paths.empty())
+        _path_rr_idx = (uint64_t)(rand() % _paths.size());
+    // ===== END ADDED (path-random) =====
+    const Route& effective_route =
+        ((_load_balancing_algo == PATH_RR || _load_balancing_algo == PATH_RANDOM ||
+          _load_balancing_algo == PATH_STATIC) && !_paths.empty()) // ===== ADDED (path-static) =====
+        ? *_paths[_path_rr_idx % _paths.size()]
+        : route;
+    // ===== END ADDED (path-rr) =====
+
+    auto* p = UecDataPacket::newpkt(_flow, effective_route, seq_no, full_pkt_size, UecDataPacket::DATA_RTX,
                                      _pull_target, _dstaddr);
     //printf("MPRDMA SEND2 - can send %d\n", mprdma_can_send);
     uint16_t ev = (this->*nextEntropy)();

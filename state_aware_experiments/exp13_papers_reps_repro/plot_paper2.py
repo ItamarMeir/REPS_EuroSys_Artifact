@@ -24,6 +24,27 @@ PLOTS.mkdir(exist_ok=True)
 # ZQLB for incast: collective lower bound (32 × 8 MB × 8 / 800 Gbps + 3 µs RTT)
 INCAST_ZQLB_US = 32 * 8 * 1024 * 1024 * 8 / (800 * 1e9) * 1e6 + 3.0  # ≈ 2687 µs
 
+# Theoretical sprayed-flow ZQLB per figure (size at line rate + 1 RTT zero-queue).
+# Paper §IV.A: CCT is max FCT across sprayed flows; ZQLB is the zero-queueing lower
+# bound for a single sprayed flow. Elephants are treated as "long-lived" background
+# and are excluded from the sprayed-flow CCT (they would otherwise dominate).
+SPRAYED_SIZE_BY_FIG = {
+    "fig04":  8 * 1024 * 1024,        # 8 MB sprayed (4 ECMP elephants)
+    "fig06":  8 * 1024 * 1024,        # pure permutation, no elephants
+    "fig07":  3344 * 4096,            # HSDP ring, 13.7 MB each
+    "fig08":  8 * 1024 * 1024,        # 250-node baseline, 8 MB sprayed
+    "fig09":  16 * 1024 * 1024,       # 16 MB baseline
+    "fig10":  8 * 1024 * 1024,        # 8 ECMP elephants, 8 MB sprayed
+    "fig11":  8 * 1024 * 1024,        # baseline + 1 % failures, 8 MB sprayed
+    "fig12":  8 * 1024 * 1024,        # MSwift P sweep, 8 MB sprayed
+    # fig14 = incast (special-cased via INCAST_ZQLB_US)
+}
+# 800 Gbps NIC, ~5 µs RTT at 0.5 µs/hop × 5 hops × 2 (paper 3-tier 128n)
+LINKRATE_BPS = 800e9
+BASE_RTT_US  = 5.0
+# 400 Gbps for fig08 (250-node)
+LINKRATE_BPS_FIG08 = 400e9
+
 
 def load_rows():
     rows = []
@@ -49,25 +70,67 @@ def mean_ci(vals):
     return m, 1.96 * se
 
 
-def zqlb_for(fig, rows_for_fig):
-    """Pick the right ZQLB for a figure."""
+def zqlb_for(fig):
+    """Theoretical ZQLB (µs) for the sprayed-flow class of a figure."""
     if fig == "fig14":
         return INCAST_ZQLB_US
-    # Otherwise: empirical ZQLB = min(FCT) across all flows and CCAs (per-flow).
-    # Approximate via the min max_fct then divide by ~something? Use min avg_fct.
-    # Actually use min max_fct directly — this is the "best possible CCT" observed.
-    return min(r["max_fct"] for r in rows_for_fig)
+    sz = SPRAYED_SIZE_BY_FIG.get(fig)
+    if sz is None:
+        return None
+    rate = LINKRATE_BPS_FIG08 if fig == "fig08" else LINKRATE_BPS
+    return sz * 8 / rate * 1e6 + BASE_RTT_US
 
 
-def plot_one_fig(fig_tag, rows, title=None):
+# fcts.csv loaded lazily once; used to compute max FCT over sprayed flows only.
+_FCTS_BY_RUN = None
+def _load_fcts():
+    global _FCTS_BY_RUN
+    if _FCTS_BY_RUN is not None:
+        return _FCTS_BY_RUN
+    _FCTS_BY_RUN = defaultdict(list)
+    if not FCTS.exists():
+        return _FCTS_BY_RUN
+    with FCTS.open() as f:
+        for r in csv.DictReader(f):
+            if r["paper"] != "p2":
+                continue
+            key = (r["fig"], r["algo"], r.get("pct", ""), r["seed"])
+            _FCTS_BY_RUN[key].append((int(r["size_B"]), float(r["fct_us"])))
+    return _FCTS_BY_RUN
+
+
+def max_sprayed_fct(fig, algo, pct, seed):
+    """Max FCT across sprayed flows only (excluding elephants).
+    Sprayed = flows whose size == SPRAYED_SIZE_BY_FIG[fig]. Anything larger is
+    an elephant background flow per Paper 2 §IV-A."""
+    if fig == "fig14":
+        # Incast: all flows are sprayed (32 senders to 1 victim, 8 MB)
+        flows = _load_fcts().get((fig, algo, pct, seed), [])
+        return max((f for _, f in flows), default=None)
+    target = SPRAYED_SIZE_BY_FIG.get(fig)
+    if target is None:
+        return None
+    flows = _load_fcts().get((fig, algo, pct, seed), [])
+    sprayed = [f for sz, f in flows if sz == target]
+    return max(sprayed) if sprayed else None
+
+
+def plot_one_fig(fig_tag, rows, title=None, ylog=False):
     sub = [r for r in rows if r["fig"] == fig_tag]
     if not sub:
         return
-    zqlb = zqlb_for(fig_tag, sub)
+    zqlb = zqlb_for(fig_tag)
+    if zqlb is None:
+        print(f"WARN: no theoretical ZQLB defined for {fig_tag}")
+        return
     by = defaultdict(list)
     for r in sub:
         algo_label = r["algo"] if not r["pct"] else f"mswift_P{r['pct']}"
-        infl = (r["max_fct"] - zqlb) / zqlb * 100.0
+        # Use sprayed-only max FCT (paper metric), not the all-flow max from cct.csv.
+        s_fct = max_sprayed_fct(fig_tag, r["algo"], r["pct"], r["seed"])
+        if s_fct is None:
+            continue
+        infl = (s_fct - zqlb) / zqlb * 100.0
         by[algo_label].append(infl)
 
     ccas_order = ["swift", "lswift", "mswift", "nscc", "mnscc",
@@ -91,13 +154,20 @@ def plot_one_fig(fig_tag, rows, title=None):
     for i, m in enumerate(means):
         ax.annotate(f"{m:.1f}", xy=(i, m), ha="center",
                     va="bottom", fontsize=9)
-    ax.set_ylabel("CCT inflation (%)")
+    ax.set_ylabel("CCT inflation (%)" + ("  [log]" if ylog else ""))
     ax.set_title(title or f"Paper 2 {fig_tag} — REPS column")
-    ax.grid(axis="y", alpha=0.3)
+    if ylog:
+        ax.set_yscale("log")
+        # Make all bars visible on log scale (a 0 bar would collapse). Set a
+        # floor of ~1 % so the smallest bar still renders.
+        ax.set_ylim(bottom=max(1.0, min(m for m in means if m > 0) * 0.5))
+        ax.grid(axis="y", which="both", alpha=0.3)
+    else:
+        ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     out = PLOTS / f"paper2_{fig_tag}.png"
     fig.savefig(out, dpi=150)
-    print(f"wrote {out}  ({len(items)} bars, ZQLB={zqlb:.1f} µs)")
+    print(f"wrote {out}  ({len(items)} bars, ZQLB={zqlb:.1f} µs, ylog={ylog})")
 
 
 def plot_fig5c_cdf():
@@ -134,9 +204,12 @@ def plot_fig5c_cdf():
 def main():
     rows = load_rows()
     print(f"loaded {len(rows)} p2 rows")
+    # Figures with very wide CCT-inflation range (Swift dominates) use log y to
+    # match paper plot style.
+    LOG_Y_FIGS = {"fig04", "fig08", "fig09", "fig11"}
     for fig_tag in ["fig04", "fig06", "fig07", "fig08", "fig09", "fig10",
                     "fig11", "fig12", "fig14"]:
-        plot_one_fig(fig_tag, rows)
+        plot_one_fig(fig_tag, rows, ylog=(fig_tag in LOG_Y_FIGS))
     plot_fig5c_cdf()
 
 

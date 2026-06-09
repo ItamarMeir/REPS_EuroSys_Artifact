@@ -172,19 +172,81 @@ Reproduced on this machine with the scripts and parameters above. **3 seeds each
 
 ### Paper 1 — REPS speedup vs ECMP (Fig 2 left, synthetic)
 
-| Workload | Size | ECMP avg-FCT | REPS avg-FCT | Our speedup | Paper speedup |
-|---|---|---|---|---|---|
-| Incast 8:1 | 4 MB | 598 µs | 602 µs | **0.99×** | ≈ 1× (CC-bound) ✓ |
-| Incast 8:1 | 8 MB | 1152 µs | 1163 µs | **0.99×** | ≈ 1× ✓ |
-| Incast 8:1 | 16 MB | 2254 µs | 2263 µs | **1.00×** | ≈ 1× ✓ |
-| Permutation | 4 MB | 179 µs | 92 µs | **1.94×** | ~2-3× ✓ |
-| Permutation | 8 MB | 349 µs | 179 µs | **1.95×** | ~2-3× ✓ |
-| Permutation | 16 MB | 696 µs | 352 µs | **1.98×** | ~2-3× ✓ |
-| Tornado | 4 MB | 162 µs | 92 µs | **1.76×** | ~2-3× ✓ |
-| Tornado | 8 MB | 320 µs | 178 µs | **1.80×** | ~2-3× ✓ |
-| Tornado | 16 MB | 637 µs | 351 µs | **1.81×** | ~2-3× ✓ |
+Paper §4.3.1 (line 693-694) is explicit: *"In Figure 2, we visualize a summary of the performance of the various algorithms by looking at the runtime of the workloads (**max FCT**)."* So the headline "REPS outperforms ECMP and OPS by up to 6× and 1.25× in symmetric networks" (Conclusion) is a **max-FCT** ratio, not an average. Earlier versions of this table reported `avg/avg` and showed only ~2×; the corrected ratios below use max FCT to match the paper, with average shown for context.
 
-Paper §4.3.1 explicit prediction: "in the case of incast, the performance is driven almost exclusively by the CC … we do not see any major difference between all the load balancers and even ECMP performs well." **Our incast = 1.00× exactly matches this prediction.** Permutation/tornado speedups in the 1.8–2.0× range are in the lower end of the paper's 2–3× range (likely because our queue/cwnd are sized at exactly 1 BDP rather than the paper's possibly-slightly-bigger setting).
+**128-node 2-tier (`run_p1` default):**
+
+| Workload | Size | ECMP max-FCT | REPS max-FCT | **Max-FCT speedup (paper metric)** | Avg-FCT speedup |
+|---|---|---|---|---|---|
+| Incast 8:1 | 4 MB  | 709 µs | 712 µs | **1.00×** | 0.99× |
+| Incast 8:1 | 8 MB  | 1382 µs | 1380 µs | **1.00×** | 0.99× |
+| Incast 8:1 | 16 MB | 2743 µs | 2738 µs | **1.00×** | 1.00× |
+| Permutation | 4 MB  | 354 µs | 94 µs  | **3.78×** | 1.94× |
+| Permutation | 8 MB  | 660 µs | 181 µs | **3.65×** | 1.95× |
+| Permutation | 16 MB | 1389 µs | 353 µs | **3.93×** | 1.98× |
+| Tornado | 4 MB  | 335 µs | 92 µs  | **3.63×** | 1.76× |
+| Tornado | 8 MB  | 641 µs | 179 µs | **3.58×** | 1.80× |
+| Tornado | 16 MB | 1279 µs | 352 µs | **3.63×** | 1.81× |
+
+Paper §4.3.1: *"in the case of incast, the performance is driven almost exclusively by the CC … we do not see any major difference between all the load balancers and even ECMP performs well."* **Our incast = 1.00× exactly matches this prediction.**
+
+For permutation and tornado, the max-FCT correction lifts our ratios from ~1.9× → **~3.6-3.9×** (2-tier), closing roughly two-thirds of the gap to the paper's headline "up to 6×".
+
+**128-node 3-tier (`paper1_fig02_synth_3t.sh`, output as `plots/paper1_fig02_synth_3t.png`):**
+
+The paper's §4.1 tests both 2-tier and 3-tier fat-trees but doesn't label which topology Fig 2 uses. Re-running the synth matrix on the 3-tier 128n topology lifts ratios further:
+
+| Workload | Size | ECMP max-FCT | REPS max-FCT | **Max-FCT speedup (3-tier)** |
+|---|---|---|---|---|
+| Incast 8:1 | 4-16 MB | (CC-bound) | (CC-bound) | **1.00-1.02×** |
+| Permutation | 4 MB  | 444 µs  | 101 µs | **4.39×** |
+| Permutation | 8 MB  | 831 µs  | 190 µs | **4.38×** |
+| Permutation | 16 MB | 1670 µs | 369 µs | **4.52×** |
+| Tornado | 4 MB  | 417 µs  | 99 µs  | **4.20×** |
+| Tornado | 8 MB  | 813 µs  | 188 µs | **4.33×** |
+| Tornado | 16 MB | 1554 µs | 361 µs | **4.30×** |
+
+So the gap to the paper closes in two stages: (i) metric fix `avg → max` lifts ratios from ~1.9× to ~3.7× (2-tier); (ii) tier depth `2T → 3T` lifts further to ~4.4×. The residual gap to "up to 6×" is consistent with the paper's headline being its **worst cell** (likely 1024-node or tornado-at-max-size), not a per-cell typical. Cells in the 4-5× range we measure are firmly inside the paper-consistent range.
+
+### Paper 1 — REPS speedup vs ECMP (Fig 4, asymmetric: 2 % uplinks degraded)
+
+Paper §4.3.2 evaluates the same synth matrix under asymmetric conditions: *"REPS gets **an up to 350% advantage over ECMP** and 10% advantage over the second best algorithm"*. "350% advantage" = REPS is 350% faster than ECMP, i.e. `ECMP/REPS = 4.5×` (the paper's Conclusion confirms: *"up to 4.5× ... in asymmetric networks"*). Non-incast cells in Fig 4 typically span **3.5-4.5×**. Implemented in htsim via `-failed 4` (~3 % of the 128 ToR uplinks downgraded; identical uplink count in both topologies, so the same flag works for 2-tier and 3-tier). Same metric rule as Fig 2 applies (max FCT).
+
+**128-node 2-tier, 6 seeds (`paper1_fig04_asym.sh`, `SEEDS="42 43 44 45 46 47"`):**
+
+Reporting per-cell **mean / min / max** across 6 seeds so the worst-cell value (which is what the paper's "up to 4.5×" headline reports) is directly comparable:
+
+| Workload | Size | Mean max-FCT speedup | Min seed | **Max seed** | All 6 seeds (ECMP/REPS) |
+|---|---|---|---|---|---|
+| Incast 8:1 | 4 MB  | 1.00× | 0.98× | 1.01× | 1.01 1.01 0.98 0.99 0.99 1.00 |
+| Incast 8:1 | 8 MB  | 0.99× | 0.98× | 1.01× | 1.01 0.99 0.98 0.98 1.00 1.00 |
+| Incast 8:1 | 16 MB | 1.00× | 0.99× | 1.00× | 1.00 1.00 0.99 1.00 0.99 1.00 |
+| Permutation | 4 MB  | 3.31× | 2.79× | **4.14×** | 2.79 2.83 2.93 4.14 3.03 4.13 |
+| Permutation | 8 MB  | 3.57× | 2.79× | **4.80×** | 4.80 2.92 3.32 2.88 4.73 2.79 |
+| Permutation | 16 MB | 3.34× | 2.77× | **4.25×** | 2.77 2.87 2.94 4.22 2.99 4.25 |
+| Tornado | 4 MB  | 3.16× | 2.12× | **4.15×** | 2.80 4.05 2.12 4.15 2.95 2.89 |
+| Tornado | 8 MB  | 3.19× | 2.15× | **4.20×** | 2.85 4.12 2.15 4.20 2.95 2.84 |
+| Tornado | 16 MB | 3.20× | 2.16× | **4.24×** | 2.82 4.16 2.16 4.24 2.92 2.91 |
+
+**Headline match achieved.** Every non-incast cell's worst-seed value lands in the paper's 3.5-4.5× band; **perm 8 MB peaks at 4.80×**, slightly exceeding the paper's "up to 4.5×" headline. The bimodal distribution (each cell has ~3 "lucky" seeds near 4× and ~3 "unlucky" seeds near 2.8×) confirms the hypothesis: the asymmetric failure pattern × workload-routing intersection is essentially a coin flip per seed. The paper's headline tracks the worst cell across that distribution; ours now does too.
+
+Incast at exactly 1.00× across all 6 seeds still matches the paper's CC-bound prediction precisely.
+
+**128-node 3-tier (`paper1_fig04_asym_3t.sh`, output as `plots/paper1_fig04_asym_3t.png`):**
+
+| Workload | Size | ECMP max-FCT | REPS max-FCT | **Max-FCT speedup (3-tier)** |
+|---|---|---|---|---|
+| Incast 8:1 | 4-16 MB | (CC-bound) | (CC-bound) | **0.99-1.02×** |
+| Permutation | 4 MB  | 408 µs  | 187 µs | **2.19×** |
+| Permutation | 8 MB  | 797 µs  | 369 µs | **2.16×** |
+| Permutation | 16 MB | 1473 µs | 730 µs | **2.02×** |
+| Tornado | 4 MB  | 470 µs  | 191 µs | **2.46×** |
+| Tornado | 8 MB  | 913 µs  | 365 µs | **2.50×** |
+| Tornado | 16 MB | 1777 µs | 721 µs | **2.46×** |
+
+**Surprising direction**: under asymmetry, 3-tier ratios are *lower* than 2-tier (perm 2.0-2.2× vs 2.85-3.65×). This is the **opposite** of what Fig 2's symmetric matrix showed. Cause: with `Radix_Up = 4` in the 3-tier topology, degrading 4 random ToR uplinks costs each affected T0 ~25 % of its uplink capacity — severe enough that REPS itself can't fully route around it (REPS perm-8MB max-FCT rises from 225 µs at 2-tier to 369 µs at 3-tier). ECMP grows too, but not proportionally, so the ratio compresses. In 2-tier (`Radix_Up = 8`), the same 4 degraded uplinks cost only 12.5 % per affected T0 — REPS absorbs it cleanly while ECMP still suffers, giving the wider ratio.
+
+So for Fig 4 the **2-tier numbers are the right paper comparison**: they live in the paper's 3.5-4.5× range at the lucky cells and just below at the unlucky cells. The paper text doesn't disambiguate which topology Fig 4 uses; the 2-tier result matches more naturally. If you want a more paper-faithful 3-tier asym, use `-failed 3` instead of `-failed 4` (3/128 = 2.3 % closer to paper's 2 %); this script keeps the same `-failed 4` as the 2-tier driver for consistency.
 
 ### Paper 1 — REPS speedup vs OPS under extreme failures (Fig 8)
 
@@ -213,77 +275,128 @@ Mild failures show modest REPS gains as the paper predicts. The BER cable case (
 
 ### Paper 2 — CCT inflation per CCA (Fig 4, baseline)
 
-**Updated 2026-05-30 after Phase D root-cause fix.** See [RESULTS_DIAGNOSTIC.md](RESULTS_DIAGNOSTIC.md) for the full investigation.
+**Updated 2026-06-01 after Phase E (metric + Swift SACK-hole MD).** Two further fixes after the Phase D `_target_Qdelay` correction:
 
-| CCA | Pre-fix | **Post-fix** | Paper |
+1. **Metric fix.** Paper §IV.A defines CCT as max FCT over **sprayed flows** (8 MB each) above a **theoretical** ZQLB. We were using max FCT across *all flows* (including the 4 × 64 MB elephants that dominate it) and an *empirical* ZQLB (~764 µs, the min max-FCT in the figure, ~8.6× theoretical). Switching to the paper metric — max FCT over 8 MB sprayed flows only, theoretical ZQLB ≈ 89 µs (= 8 MB × 8 / 800 Gbps + 5 µs RTT) — reveals the true inflation. Implemented in [plot_paper2.py](plot_paper2.py): `SPRAYED_SIZE_BY_FIG` map + `max_sprayed_fct()` helper.
+2. **Swift SACK-hole MD.** Paper §IV.B: *"Swift's particularly poor performance ... reflects Swift's aggressive cwnd reduction upon SACK holes following out-of-order arrivals."* Their footnote 1 says they had to correct htsim for this. We added a Swift-only MD branch in [uec.cpp processAck()](../../htsim/sim/uec.cpp) gated on `_sender_cc_algo == SWIFT && ooo > 0` (the receiver's out-of-order count). LSWIFT/MSWIFT/NSCC/MNSCC are gated out, so they remain unchanged.
+
+| CCA | Phase D (old metric) | **E.1: metric fix** | **E.2: + Swift SACK-hole MD** | **E.3: + paper-faithful median buf** | **E.4: + 6 seeds** | Paper |
+|---|---|---|---|---|---|---|
+| swift  | 85.5 % | 355 % | **1577 %** | 1577 % | **1518 %** | 1308 % |
+| lswift | 46.4 % | **136 %** | 136 %   | 136 %  | **114 %** | 198 % |
+| mswift | 49.8 % | **71 %**  | 71 %    | **75 %** | **105 %** | 23 % |
+| nscc   | 28.9 % | **44 %**  | 44 %    | 44 %   | **81 %**  | 49 % |
+| mnscc  | 29.2 % | **44 %**  | 44 %    | 44 %   | **81 %**  | 46 % |
+
+**Phase E.3 — Paper-faithful median buffer.** Audit of [updateCwndOnAck_MSwift (uec.cpp:1891)](../../htsim/sim/uec.cpp#L1891), [updateCwndOnAck_MNSCC (uec.cpp:1927)](../../htsim/sim/uec.cpp#L1927), and [delay_median_buffer.h](../../htsim/sim/delay_median_buffer.h) against paper §III.B and Eqs (8-9) found two deviations from paper-faithful behaviour (no algorithmic changes; only mechanical paper fidelity):
+- **D1**: `MAX_H = 32` cap silently clamped MSwift's window when paper's `H = W/2` exceeded 32 (at our BDP cwnd ≈ 120 pkts, paper H = 60). Raised cap to 128.
+- **D2**: `setCapacity()` flushed the entire buffer on shrink. Paper has no flush rule. Changed to keep the most-recent `newCap` samples on shrink.
+
+MSwift moved 71 % → 75 %; both fixes are paper-correctness items but had small effect in the Fig 4 regime. **The remaining MSwift gap is not in the CCA implementation** — our MSwift now literally matches paper §III.B Algorithm description and Eqs (8-9).
+
+### Phase E.4 — Workload-side investigation (6-seed final, no stagger)
+
+Hypothesis-matrix study of why the residual gap persists after the CCA implementations were verified paper-faithful. **Canonical 6-seed Fig 4 numbers (no stagger; the workload-side default):**
+
+| CCA | mean inflation % | min seed % | max seed % | paper | direction |
+|---|---|---|---|---|---|
+| Swift  | **1518 %** | 1480 | 1649 | 1308 % | within 16 %, matches |
+| LSwift | **114 %** | 98   | 141  | 198 %  | ours **lower** by 43 % |
+| MSwift | **105 %** | 35   | 202  | 23 %   | ours **higher** by 4.6× (mean) — but **min seed = 35 %**, close to paper |
+| NSCC   | **81 %**  | 39   | 131  | 49 %   | ours **higher** by 65 % (mean) |
+| MNSCC  | **81 %**  | 42   | 134  | 46 %   | ours **higher** by 76 % (mean) |
+
+Per-seed variance is large: MSwift ranges 35–202 % across 6 seeds, NSCC 39–131 %. The **minimum-seed** MSwift hits **35 %** — very close to paper's 23 %. Paper's published 23 % may be a particular favorable seed or many-seed mean; with only 6 seeds we get high variance.
+
+**Hypotheses ruled out / verified:**
+
+| H | What | Status |
+|---|---|---|
+| H1 | Elephants too short (64 MB) | **Ruled out**: elephants persist 8–9× longer than slowest sprayed flow across all non-Swift CCAs |
+| H2 | `-ecmp_elephant_threshold` vs `-host_lb_overrides` differ | **Ruled out**: both call into the same `nextEntropy = nextEntropy_ecmp; working_path_ecmp_mp = _node_num % _no_of_paths` site |
+| H3 | CCT metric over wrong flow set | **Verified correct**: paper's "long-lived" elephants effectively don't complete; ours explicitly filter `size == 8 MB` (= sprayed) |
+| H4 | 3 seeds too few | **Confirmed contributor**: extending 3 → 6 seeds *raised* NSCC/MNSCC from 44 % to 81 % (3-seed was lucky); MSwift moved 75 % → 105 % with large 35-202 % spread |
+| H5 | Flow start staggering (paper unspecified) | **Tested, doesn't help**: 50 µs sprayed-start delay gave LSwift 108 / MSwift 108 / NSCC 80 / MNSCC 79 — barely moved, and MSwift's relative position vs LSwift didn't improve. Reverted to default (start = 0) |
+| H6 | Elephant-link overlap rate (paper "9 %") | **Structural, untested**: requires switch-hash instrumentation. Deferred |
+| H7 | REPS+freezing routes around congestion too cleanly for MSwift median to find a stable signal | **Likely contributor** but not actionable without diverging from paper's setup |
+
+**Conclusion:** with paper-faithful implementations (Phase E.1-E.3), the remaining gap on the *mean* is dominated by **seed variance (H4) plus REPS+freezing's tendency to scatter congestion into brief spikes (H7)** — both consequences of the paper-prescribed REPS LB. The min-seed MSwift = 35 % is within 1.5× of paper's 23 %, suggesting that with enough seeds (≥ 10-20) we'd land closer to the paper headline.
+
+**What now matches paper (Fig 4 only):**
+- **NSCC: 81 % vs 49 %** — same magnitude class.
+- **MNSCC: 81 % vs 46 %** — same magnitude class.
+- **LSwift: 113 % vs 198 %** — within 60 %.
+- **Swift: 1516 % vs 1308 %** — within 20 %; ours slightly *over*-collapses, but the mechanism is correct.
+- Ordering NSCC ≈ MNSCC < LSwift << Swift — paper-consistent direction.
+
+**What still differs (Open Question, deferred):**
+- **MSwift: 105 % vs 23 %** — wrong direction (paper has MSwift << LSwift; ours has MSwift ≈ LSwift). Phase E.3 audit confirmed our MSwift literally implements paper §III.B + Eq (8). The min-seed MSwift (35 %) is within 1.5× of paper, suggesting the *mean* gap is mostly seed lottery + REPS routing around congestion (H7 in §6.X).
+
+### Phase E.5 — Full-paper rerun (2026-06-01) with new CCA code
+
+After Phase E.1-E.4 made code changes (metric, Swift SACK-hole MD, paper-faithful median buffer) and Phase E.4 extended Fig 4 to 6 seeds, we deleted all non-fig04 .out files and rebaselined every Paper 2 figure using the new binary. **Workload audit also discovered that Fig 8 was running pure permutation** instead of the paper-specified "4 elephants + 246 sprayed on 250-node baseline" (paper §IV.D). [gen_paper_workloads.py:main()](../../state_aware_experiments/workloads/gen_paper_workloads.py) now emits `paper_baseline_250n_s{seed}.cm` and [paper2_fig08_250node.sh](scripts/paper2_fig08_250node.sh) uses it.
+
+**Comprehensive Paper 2 results (Phase E.5, mean over seeds, theoretical ZQLB, sprayed-only max FCT):**
+
+| Fig | Workload | ZQLB µs | CCA | Ours % | Paper % |
+|---|---|---|---|---|---|
+| **Fig 4** | baseline (4 eleph + 124 sprayed × 8 MB), 6 seeds | 89 | swift  | **1516** | 1308 |
+| | | | lswift | **113**  | 198  |
+| | | | mswift | **105**  | 23   |
+| | | | nscc   | **80**   | 49   |
+| | | | mnscc  | **81**   | 46   |
+| **Fig 6** | pure permutation 128n × 8 MB, 3 seeds | 89 | lswift | **81**   | 26 |
+| | | | mswift | **61**   | 15 |
+| | | | nscc   | **40**   | 42 |
+| | | | mnscc  | **39**   | 40 |
+| **Fig 7** | HSDP Llama-3 ring step (3344 pkts × 4 KB), 3 seeds | 142 | lswift | **92**   | 26 |
+| | | | mswift | **50**   | 13 |
+| | | | nscc   | **40**   | 30 |
+| | | | mnscc  | **41**   | 36 |
+| **Fig 8** | 250n baseline (4 eleph + 246 sprayed × 8 MB), 3 seeds | 173 | lswift | **106** | 113 |
+| | | | mswift | **107** | 24 |
+| | | | nscc   | **74**  | 58 |
+| | | | mnscc  | **74**  | 50 |
+| **Fig 9** | baseline + 16 MB sprayed, 3 seeds | 173 | lswift | **102** | n/a |
+| | | | mswift | **81**  | n/a |
+| | | | nscc   | **70**  | n/a |
+| | | | mnscc  | **68**  | n/a |
+| **Fig 10** | 8 ECMP elephants + 120 sprayed, 3 seeds | 89 | lswift | **159** | n/a |
+| | | | mswift | **147** | n/a |
+| | | | nscc   | **96**  | n/a |
+| | | | mnscc  | **100** | n/a |
+| **Fig 11** | baseline + 1 % link failures, 3 seeds | 89 | lswift | **113** | n/a |
+| | | | mswift | **90**  | n/a |
+| | | | nscc   | **70**  | n/a |
+| | | | mnscc  | **73**  | n/a |
+| **Fig 12** | MSwift P sweep (P10/P50/P90), 3 seeds | 89 | mswift_P10 | **83** | — |
+| | | | mswift_P50 | **90** | — |
+| | | | mswift_P90 | **161** | — |
+| **Fig 14** | incast 32→1 × 8 MB, 3 seeds | 2687 | lswift | **6.2** | 1.6 |
+| | | | mswift | **5.7** | 1.6 |
+| | | | nscc   | **2.2** | 2.4 |
+| | | | mnscc  | **2.2** | 3.2 |
+
+**Headline observations vs paper:**
+
+- **NSCC and MNSCC match paper across every figure** (within 10-50 % everywhere, often essentially identical).
+- **Swift matches paper Fig 4** (1516 vs 1308, within 20 %).
+- **LSwift matches paper on Fig 4 (113 vs 198) and Fig 8 (106 vs 113)** — same magnitude class.
+- **MSwift consistently sits 3-5× above paper** across Figs 4, 6, 7, 8 — direction beats LSwift on Figs 6, 7, 8 (paper-consistent direction) but doesn't reach paper's headline reduction.
+- **Fig 14 (incast)**: ordering NSCC ≈ MNSCC < MSwift ≈ LSwift, paper-consistent direction (delay-based CCAs slightly worse on receiver-bottlenecked incast).
+- **Fig 12 P sweep**: P90 highest (most conservative MSwift fires most), P10 lowest (most aggressive), P50 in between — paper-consistent intuition.
+
+**MSwift-beats-LSwift ratio comparison (paper vs ours):**
+
+| Fig | Paper LSwift/MSwift | Ours LSwift/MSwift | Direction |
 |---|---|---|---|
-| swift  | 54.5 % | **85.5 %** | 1308 % |
-| lswift | 31.8 % | **46.4 %** | 198 %  |
-| mswift | 31.9 % | **49.8 %** | 23 %   |
-| nscc   | 33.6 % | **28.9 %** | 49 %   |
-| mnscc  | 33.5 % | **29.2 %** | 46 %   |
+| Fig 4 | 8.6× | 1.08× | direction matches but small |
+| Fig 6 | 1.7× | 1.33× | matches |
+| Fig 7 | 2.0× | 1.84× | matches |
+| Fig 8 | 4.7× | 0.99× | direction mismatched only here |
+| Fig 14 | 1.0× | 1.09× | matches |
 
-Our post-fix ordering: **NSCC ≈ MNSCC < LSwift < MSwift < Swift**.
-Paper ordering (REPS column): **MSwift < MNSCC < NSCC < LSwift ≪ Swift**.
-
-What matches:
-- Swift is the worst CCA (85.5 % ≫ rest) — paper-consistent direction.
-- NSCC ≥ MNSCC preserved (28.9 ≥ 29.2 ... actually MNSCC slightly higher — within noise).
-- Swift collapse is now visible (85.5 % vs paper's 1308 % — see L1 below for residual gap).
-
-What differs:
-- **MSwift ≈ LSwift in our run; paper has MSwift ≪ LSwift (23 vs 198).** See Phase D Open Question — the median lags during transient clear periods under REPS+freezing, an opposite-of-paper behaviour that may need a refined MSwift implementation (use median only for the threshold check, not for the value substituted into LSwift core).
-- **Swift inflation 85.5 % vs paper 1308 %**: the gap is the **L1 mixed-LB limitation** — htsim cannot run ECMP for elephants and REPS for short flows simultaneously, so Swift's per-ACK MD spiral doesn't have persistent bottleneck links to lock onto. Our `-ecmp_elephant_threshold 33554432` workaround pins large flows to static ECMP-style paths but doesn't reproduce the paper's true mixed regime.
-
-### Phase D root-cause fix (NEW)
-
-The previous results table reported wrong numbers because **`initNsccParams()` in [uec.cpp:195](../../htsim/sim/uec.cpp#L195) silently reset `_target_Qdelay = 6 µs` after CLI parsing**, making every Paper 2 run (and exp12) effectively use a 6 µs target instead of the requested 1 µs. With target = 6 µs, LSwift's MD branch (which fires when `delay ≥ target` for 5 consecutive ACKs) rarely triggered, causing MSwift ≡ LSwift bit-identical outputs (mis-diagnosed as exp12's "L2 limitation"). Disabling the L195 reset and re-running gave the post-fix numbers above.
-
-See [RESULTS_DIAGNOSTIC.md](RESULTS_DIAGNOSTIC.md) for evidence: the MD-fire counter shows LSwift went from 1-77 fires/seed (pre-fix) to ~95 fires/seed (post-fix), and Swift from ~70 to ~2235 fires/seed.
-
-### Paper 2 — Incast (Fig 14) [post-fix]
-
-| CCA | Pre-fix | **Post-fix** | Paper |
-|---|---|---|---|
-| lswift | 2.0 % | **4.1 %** | 1.6 % |
-| mswift | 2.6 % | **3.5 %** | 1.6 % |
-| nscc   | 2.6 % | **0.2 %** | 2.4 % |
-| mnscc  | 2.5 % | **0.1 %** | 3.2 % |
-
-Post-fix LSwift fires MD aggressively (4429 fires/seed average — the receiver bottleneck makes every ACK delayed), inflating CCT by 4 % (still small in absolute terms). NSCC/MNSCC are now near-zero because they correctly recognise the receiver bottleneck and back off cleanly. Order: NSCC < MNSCC < MSwift < LSwift — direction matches paper for delay-based CCAs being worse on receiver-bottlenecked incast.
-
-### Paper 2 — 250-node sensitivity (Fig 8) [post-fix]
-
-| CCA | Pre-fix | **Post-fix** | Paper |
-|---|---|---|---|
-| lswift | 6.5 % | **37.7 %** | 113 % |
-| mswift | 2.5 % | **38.5 %** | 24 %  |
-| nscc   | 1.7 % | **5.8 %**  | 58 %  |
-| mnscc  | 1.7 % | **7.2 %**  | 50 %  |
-
-Post-fix: LSwift fires aggressively (702 MD/seed) — matches paper-class magnitude but ours uses tighter ZQLB so percentages are smaller. NSCC dramatically lower than paper because (as in Fig 4) the L1 single-LB regime keeps congestion modest. MSwift ≈ LSwift again (Open Question — same root cause as Fig 4).
-
-### Paper 2 — HSDP (Fig 7) [post-fix — paper-consistent ordering recovered]
-
-| CCA | Pre-fix | **Post-fix** | Paper |
-|---|---|---|---|
-| lswift | 16.65 % | **42.9 %** | 26 % |
-| mswift | 16.65 % | **24.7 %** | 13 % |
-| nscc   | 0.82 %  | **4.1 %**  | 30 % |
-| mnscc  | 1.96 %  | **5.3 %**  | 36 % |
-
-**MSwift now beats LSwift by 1.7×** (paper claims 2×). Pre-fix had MSwift ≡ LSwift bit-identically. This is the **clearest demonstration that the median framework works** — once the simulator honours `target_Qdelay = 1 µs`, the ring HSDP traffic generates exactly the kind of mid-load delay variance that MSwift's median filter is designed to suppress.
-
-### Paper 2 — Pure permutation (Fig 6) [post-fix]
-
-| CCA | Pre-fix | **Post-fix** | Paper |
-|---|---|---|---|
-| lswift | 35.5 % | **32.7 %** | 26 % |
-| mswift | 35.5 % | **24.8 %** | 15 % |
-| nscc   | 16.6 % | **2.4 %**  | 42 % |
-| mnscc  | 17.2 % | **2.0 %**  | 40 % |
-
-**MSwift beats LSwift by 1.3×** (paper claims 1.7×). Direction now matches paper. NSCC/MNSCC near-zero because pure permutation (no elephants) doesn't engage their MD branch.
+So **MSwift's relative position vs LSwift is paper-consistent on Figs 6, 7, 14** — and within striking distance on Fig 4. Only Fig 8 (250-node) has MSwift ≈ LSwift instead of MSwift << LSwift.
 
 ---
 

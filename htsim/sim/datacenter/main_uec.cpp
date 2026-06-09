@@ -77,6 +77,78 @@ private:
     int _state;
 };
 
+// ===== ADDED (path-random queue logging) =====
+// Samples agg→core uplink queue depths every interval_us µs and writes
+// time_us,agg,core,bytes rows to a CSV. Gated by -log_core_queues <file>.
+class CoreQueueSampler : public EventSource {
+public:
+    CoreQueueSampler(EventList& el, FatTreeTopology* topo,
+                     const std::string& outpath, double interval_us)
+        : EventSource(el, "core_queue_sampler"),
+          _topo(topo),
+          _interval((simtime_picosec)(interval_us * 1e6)) {
+        _f = fopen(outpath.c_str(), "w");
+        if (_f) fprintf(_f, "time_us,agg,core,bytes\n");
+        eventlist().sourceIsPending(*this, _interval);
+    }
+    ~CoreQueueSampler() { if (_f) fclose(_f); }
+    void doNextEvent() override {
+        if (!_f) return;
+        double t = timeAsUs(eventlist().now());
+        for (uint32_t agg = 0; agg < _topo->getNAGG(); agg++) {
+            if (agg >= _topo->queues_nup_nc.size()) continue;
+            for (uint32_t core = 0; core < _topo->no_of_cores(); core++) {
+                if (core >= _topo->queues_nup_nc[agg].size()) continue;
+                if (_topo->queues_nup_nc[agg][core].empty()) continue;
+                BaseQueue* q = _topo->queues_nup_nc[agg][core][0];
+                if (q) fprintf(_f, "%.3f,%u,%u,%ld\n", t, agg, core,
+                               (long)q->queuesize());
+            }
+        }
+        eventlist().sourceIsPending(*this, eventlist().now() + _interval);
+    }
+private:
+    FatTreeTopology* _topo;
+    simtime_picosec _interval;
+    FILE* _f = nullptr;
+};
+// ===== END ADDED (path-random queue logging) =====
+
+// ===== ADDED (tor-queue logging) =====
+// Samples ToR→Agg uplink queue depths every interval_us µs and writes
+// time_us,tor,agg,bytes rows to a CSV. Gated by -log_tor_queues <file>.
+class TorQueueSampler : public EventSource {
+public:
+    TorQueueSampler(EventList& el, FatTreeTopology* topo,
+                    const std::string& outpath, double interval_us)
+        : EventSource(el, "tor_queue_sampler"),
+          _topo(topo),
+          _interval((simtime_picosec)(interval_us * 1e6)) {
+        _f = fopen(outpath.c_str(), "w");
+        if (_f) fprintf(_f, "time_us,tor,agg,bytes\n");
+        eventlist().sourceIsPending(*this, _interval);
+    }
+    ~TorQueueSampler() { if (_f) fclose(_f); }
+    void doNextEvent() override {
+        if (!_f) return;
+        double t = timeAsUs(eventlist().now());
+        for (uint32_t tor = 0; tor < _topo->queues_nlp_nup.size(); tor++) {
+            for (uint32_t agg = 0; agg < _topo->queues_nlp_nup[tor].size(); agg++) {
+                if (_topo->queues_nlp_nup[tor][agg].empty()) continue;
+                BaseQueue* q = _topo->queues_nlp_nup[tor][agg][0];
+                if (q) fprintf(_f, "%.3f,%u,%u,%ld\n", t, tor, agg,
+                               (long)q->queuesize());
+            }
+        }
+        eventlist().sourceIsPending(*this, eventlist().now() + _interval);
+    }
+private:
+    FatTreeTopology* _topo;
+    simtime_picosec _interval;
+    FILE* _f = nullptr;
+};
+// ===== END ADDED (tor-queue logging) =====
+
 void exit_error(char* progr) {
     cout << "Usage " << progr << " [-nodes N]\n\t[-conns C]\n\t[-cwnd cwnd_size]\n\t[-q queue_size]\n\t[-recv_oversub_cc] Use receiver-driven AIMD to reduce total window when trims are not last hop\n\t[-queue_type composite|random|lossless|lossless_input|]\n\t[-tm traffic_matrix_file]\n\t[-strat route_strategy (single,rand,perm,pull,ecmp,\n\tecmp_host path_count,ecmp_ar,ecmp_rr,\n\tecmp_host_ar ar_thresh)]\n\t[-log log_level]\n\t[-seed random_seed]\n\t[-end end_time_in_usec]\n\t[-mtu MTU]\n\t[-hop_latency x] per hop wire latency in us,default 1 \n\t[-disable_fd] disable fair decrease to get higher throught, \n\t[-target_q_delay x] target_queuing_delay in us, default is 6us \n\t[-switch_latency x] switching latency in us, default 0\n\t[-host_queue_type  swift|prio|fair_prio]\n\t[-logtime dt] sample time for sinklogger, etc" << endl;
     exit(1);
@@ -114,6 +186,8 @@ int main(int argc, char **argv) {
     bool log_switches = false;
     bool log_queue_usage = false;
     double ecn_thresh = 0.5; // default marking threshold for ECN load balancing
+    std::string log_core_queues_file = "";   // ===== ADDED (path-random queue logging) =====
+    std::string log_tor_queues_file  = "";   // ===== ADDED (tor-queue logging) =====
 
     bool param_ecn_set = false;
     bool ecn = true;
@@ -171,6 +245,10 @@ int main(int argc, char **argv) {
     // Re-applied after the auto-compute at main_uec.cpp:~L1018.
     int min_rto_us_override = -1;
     // ===== END ADDED =====
+
+    // ===== ADDED (path-rr-npaths): per-host PATH_RR path-count cap =====
+    std::map<uint32_t, uint32_t> path_rr_npaths_override;
+    // ===== END ADDED (path-rr-npaths) =====
 
     while (i<argc) {
         if (!strcmp(argv[i], "-data_collection_config")) {
@@ -314,6 +392,37 @@ int main(int argc, char **argv) {
                  << " hosts" << endl;
             i++;
         // ===== END ADDED (per-host-lb) =====
+        // ===== ADDED (path-rr-order) =====
+        } else if (!strcmp(argv[i], "-path_rr_start_mode")) {
+            const char* m = argv[i+1];
+            if (!strcmp(m, "zero"))
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_ZERO;
+            else if (!strcmp(m, "src_mod"))
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_SRC;
+            else if (!strcmp(m, "dst_mod"))
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_DST;
+            else if (!strcmp(m, "srcdst_hash"))
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_SRCDST_HASH;
+            else if (!strcmp(m, "src_mod2")) // ===== ADDED (path-rr-startslot) =====
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_SRC2;
+            else { cerr << "Unknown -path_rr_start_mode: " << m << "\n"; exit(1); }
+            cout << "PATH_RR start mode: " << m << "\n";
+            i++;
+        } else if (!strcmp(argv[i], "-path_rr_npaths_override")) { // ===== ADDED (path-rr-npaths) =====
+            std::string spec(argv[++i]);
+            std::istringstream ss(spec);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                auto colon = tok.find(':');
+                if (colon != std::string::npos) {
+                    uint32_t host = (uint32_t)std::stoul(tok.substr(0, colon));
+                    uint32_t np   = (uint32_t)std::stoul(tok.substr(colon + 1));
+                    path_rr_npaths_override[host] = np;
+                    cout << "path_rr_npaths_override: host " << host << " -> max " << np << " paths\n";
+                }
+            }
+        // ===== END ADDED (path-rr-npaths) =====
+        // ===== END ADDED (path-rr-order) =====
         } else if (!strcmp(argv[i],"-sender_cc_only")) {
             UecSrc::_sender_based_cc = true;
             UecSrc::_receiver_based_cc = false;
@@ -459,6 +568,24 @@ int main(int argc, char **argv) {
                 UecSrc::_load_balancing_algo = UecSrc::SKLB;
             } else if (!strcmp(argv[i+1], "hklb")) {
                 UecSrc::_load_balancing_algo = UecSrc::HKLB;
+            // ===== ADDED (path-rr) =====
+            // PATH_RR: true round-robin over distinct physical paths via source
+            // routing.  Requires get_bidir_paths() path population per flow
+            // (done below in the per-flow connectPort loop).
+            } else if (!strcmp(argv[i+1], "path_rr")) {
+                UecSrc::_load_balancing_algo = UecSrc::PATH_RR;
+            // ===== END ADDED (path-rr) =====
+            // ===== ADDED (path-random) =====
+            // PATH_RANDOM: same source-routing as PATH_RR but picks a fresh
+            // random path index on every packet instead of cycling.
+            } else if (!strcmp(argv[i+1], "path_random")) {
+                UecSrc::_load_balancing_algo = UecSrc::PATH_RANDOM;
+            // ===== END ADDED (path-random) =====
+            // ===== ADDED (path-static) =====
+            // PATH_STATIC: collision-free precomputed single path per flow.
+            } else if (!strcmp(argv[i+1], "path_static")) {
+                UecSrc::_load_balancing_algo = UecSrc::PATH_STATIC;
+            // ===== END ADDED (path-static) =====
             } else {
                 cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps or reps2" << endl;
                 exit_error(argv[0]);
@@ -689,6 +816,19 @@ int main(int argc, char **argv) {
                  << " to REPS-state log (total tracked="
                  << UecSrc::_reps_state_log_srcs.size() << ")" << endl;
             i++;
+        } else if (!strcmp(argv[i],"-log_cwnd")) { // ===== ADDED (cwnd-log) =====
+            UecSrc::_cwnd_log = fopen(argv[i+1], "w");
+            if (!UecSrc::_cwnd_log) {
+                cerr << "Could not open cwnd log: " << argv[i+1] << endl; exit(1);
+            }
+            fprintf(UecSrc::_cwnd_log, "time_us,src_id,cwnd_pkts\n");
+            cout << "Logging per-ACK cwnd to " << argv[i+1] << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_cwnd_src")) { // ===== ADDED (cwnd-log) =====
+            UecSrc::_cwnd_log_srcs.insert((uint32_t)atoi(argv[i+1]));
+            cout << "Filtering cwnd log to src " << argv[i+1] << endl;
+            i++;
+        // ===== END ADDED (cwnd-log) =====
         } else if (!strcmp(argv[i],"-fail_link_time")){
             fail_link_fail_us    = atof(argv[i+1]);
             fail_link_recover_us = atof(argv[i+2]);
@@ -822,6 +962,16 @@ int main(int argc, char **argv) {
                 FatTreeSwitch::set_strategy(FatTreeSwitch::RR);
             }
             i++;
+        // ===== ADDED (path-random queue logging) =====
+        } else if (!strcmp(argv[i], "-log_core_queues")) {
+            log_core_queues_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (path-random queue logging) =====
+        // ===== ADDED (tor-queue logging) =====
+        } else if (!strcmp(argv[i], "-log_tor_queues")) {
+            log_tor_queues_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (tor-queue logging) =====
         } else {
             cout << "Unknown parameter " << argv[i] << endl;
             exit_error(argv[0]);
@@ -1191,6 +1341,9 @@ int main(int argc, char **argv) {
                              std::to_string(ecn_high),
                              std::to_string(UecSrc::_load_balancing_algo)});
 
+    // ===== ADDED (path-static-greedy) =====
+    std::map<PacketSink*, int> path_static_edge_load;
+    // ===== END ADDED (path-static-greedy) =====
     for (size_t c = 0; c < all_conns->size(); c++){
         connection* crt = all_conns->at(c);
         int src = crt->src;
@@ -1325,6 +1478,123 @@ int main(int argc, char **argv) {
                     assert(topo[p]->switches_lp[topo[p]->HOST_POD_SWITCH(src)]);
                     topo[p]->switches_lp[topo[p]->HOST_POD_SWITCH(src)]->addHostPort(src,uec_snk->flowId(),uec_src->getPort(p));
                     topo[p]->switches_lp[topo[p]->HOST_POD_SWITCH(dest)]->addHostPort(dest,uec_src->flowId(),uec_snk->getPort(p));
+
+                    // ===== ADDED (path-rr) =====
+                    // Populate the source-route buffer for PATH_RR.  This must
+                    // happen after connectPort() (so _srcaddr/_dstaddr are set)
+                    // and uses the topology's pre-computed end-to-end routes.
+                    // get_bidir_paths() is a read-only topology query; it is
+                    // safe to call for every flow at setup time.
+                    // The number of distinct routes depends on placement:
+                    //   same ToR  → 1 path
+                    //   same pod  → K/2 paths  (different Agg switches)
+                    //   diff pod  → (K/2)^2 paths  (all Agg+Core combos)
+                    //
+                    // IMPORTANT: get_bidir_paths() routes end at the last pipe
+                    // to the destination host.  In normal switch-based routing,
+                    // FatTreeSwitch::addHostPort() appends the UecSink transport
+                    // port as the final FibEntry element.  For source routing we
+                    // must append it manually; we use Route(orig, dst) which
+                    // copies the route and pushes the sink port as the last hop.
+                    if (UecSrc::_load_balancing_algo == UecSrc::PATH_RR ||
+                        UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ||
+                        UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC) { // ===== ADDED (path-static) =====
+                        auto* paths = topo[p]->get_bidir_paths(src, dest, true); // true = also build reverse routes (needed for PATH_STATIC ACK/PULL routing)
+                        if (paths && !paths->empty()) {
+                            PacketSink* sink_port = uec_snk->getPort(p);
+                            vector<const Route*> full_paths;
+                            full_paths.reserve(paths->size());
+                            for (const Route* r : *paths) {
+                                // Append sink_port as the final delivery hop.
+                                full_paths.push_back(new Route(*r, *sink_port));
+                            }
+                            // ===== ADDED (path-static) =====
+                            if (UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC) {
+                                // ===== ADDED (path-static-greedy) =====
+                                // Pick the path whose maximum-loaded edge has minimum load.
+                                // Route is iterable over PacketSink*; shared pointers = shared physical links.
+                                size_t best_idx = 0;
+                                const Route* best = full_paths[0];
+                                int best_max = 0x7fffffff;
+                                for (size_t ri = 0; ri < full_paths.size(); ri++) {
+                                    const Route* rc = full_paths[ri];
+                                    int max_load = 0;
+                                    for (PacketSink* hop : *rc) {
+                                        auto it = path_static_edge_load.find(hop);
+                                        if (it != path_static_edge_load.end())
+                                            max_load = std::max(max_load, it->second);
+                                    }
+                                    if (max_load < best_max) {
+                                        best_max = max_load;
+                                        best = rc;
+                                        best_idx = ri;
+                                    }
+                                }
+                                for (PacketSink* hop : *best) path_static_edge_load[hop]++;
+                                uec_src->setPaths({best});
+                                // ===== END ADDED (path-static-greedy) =====
+                                // ===== ADDED (path-static-revroute) =====
+                                // Override the sink's port route with the full reverse path so
+                                // ACK/PULL credits return on the same physical path as data.
+                                // The NIC calls sink->getPortRoute(port) to route control packets;
+                                // by default it holds only the first hop (dst→ToR) and uses ECMP.
+                                // Replacing it with the full reverse path avoids ECMP hash
+                                // collisions in bidirectional tornado and similar workloads.
+                                // paths->at(best_idx) is the pre-copy route from get_bidir_paths
+                                // which has _reverse populated; the copy used in full_paths does not.
+                                const Route* orig_r = (*paths)[best_idx];
+                                if (orig_r->reverse()) {
+                                    Route* rev = new Route(*orig_r->reverse(), *uec_src->getPort(p));
+                                    // Cross-link forward↔reverse so bounced packets (trims) can
+                                    // traverse both ways without hitting a null-reverse assert.
+                                    const_cast<Route*>(best)->set_reverse(rev);
+                                    rev->set_reverse(const_cast<Route*>(best));
+                                    uec_snk->getPort(p)->setRoute(*rev);
+                                }
+                                // ===== END ADDED (path-static-revroute) =====
+                                cout << "PATH_STATIC: " << src << "->" << dest
+                                     << " plane=" << p << " max_edge_load=" << best_max << "\n";
+                            } else {
+                            // ===== END ADDED (path-static) =====
+                            // ===== ADDED (path-rr-npaths): truncate path list for constrained hosts =====
+                            {
+                                auto it = path_rr_npaths_override.find((uint32_t)src);
+                                if (it != path_rr_npaths_override.end() && full_paths.size() > it->second) {
+                                    cout << "path_rr_npaths_override: host " << src
+                                         << " capped from " << full_paths.size()
+                                         << " to " << it->second << " paths\n";
+                                    full_paths.resize(it->second);
+                                }
+                            }
+                            // ===== END ADDED (path-rr-npaths) =====
+                            uec_src->setPaths(full_paths);
+                            // ===== ADDED (path-rr-order) =====
+                            {
+                                uint32_t np = (uint32_t)full_paths.size();
+                                uint32_t start_idx = 0;
+                                switch (UecSrc::_path_rr_start_mode) {
+                                    case UecSrc::PATH_RR_START_SRC:         start_idx = src % np; break;
+                                    case UecSrc::PATH_RR_START_DST:         start_idx = dest % np; break;
+                                    case UecSrc::PATH_RR_START_SRCDST_HASH: start_idx = (src * 7 + dest * 3) % np; break;
+                                    case UecSrc::PATH_RR_START_SRC2:        start_idx = (src * 2) % np; break; // ===== ADDED (path-rr-startslot) =====
+                                    default: start_idx = 0; break;
+                                }
+                                uec_src->setPathRRStartIdx(start_idx);
+                            }
+                            // ===== END ADDED (path-rr-order) =====
+                            cout << (UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ? "PATH_RANDOM" : "PATH_RR")
+                                 << ": " << src << "->" << dest
+                                 << " plane=" << p
+                                 << " distinct_paths=" << full_paths.size() << "\n";
+                            } // ===== ADDED (path-static) =====
+                        } else {
+                            cerr << (UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ? "PATH_RANDOM" : "PATH_RR")
+                                 << " WARNING: no paths found for "
+                                 << src << "->" << dest << " plane=" << p
+                                 << "; flow will fall back to entropy=0\n";
+                        }
+                    }
+                    // ===== END ADDED (path-rr) =====
                     break;
                 }
             default:
@@ -1387,6 +1657,19 @@ int main(int argc, char **argv) {
                  << " recover@" << fail_link_recover_us << "us" << endl;
         }
     }
+
+    // ===== ADDED (path-random queue logging) =====
+    if (!log_core_queues_file.empty() && !topo.empty() && topo[0] != nullptr) {
+        new CoreQueueSampler(eventlist, topo[0], log_core_queues_file, 1.0 /* µs */);
+        cout << "[core_queue_sampler] logging to " << log_core_queues_file << endl;
+    }
+    // ===== END ADDED (path-random queue logging) =====
+    // ===== ADDED (tor-queue logging) =====
+    if (!log_tor_queues_file.empty() && !topo.empty() && topo[0] != nullptr) {
+        new TorQueueSampler(eventlist, topo[0], log_tor_queues_file, 1.0 /* µs */);
+        cout << "[tor_queue_sampler] logging to " << log_tor_queues_file << endl;
+    }
+    // ===== END ADDED (tor-queue logging) =====
 
     // GO!
     cout << "Starting simulation" << endl;
