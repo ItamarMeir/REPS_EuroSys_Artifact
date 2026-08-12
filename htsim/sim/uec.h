@@ -370,6 +370,9 @@ public:
     static FILE* _cwnd_log;
     static std::set<uint32_t> _cwnd_log_srcs; // empty = log all sources
     // ===== END ADDED (cwnd-log) =====
+    // ===== ADDED (buffer-contents-log) =====
+    static bool _log_buffer_contents;  // append buf_contents column to reps_state_log
+    // ===== END ADDED (buffer-contents-log) =====
 
     enum Sender_CC {
         DCTCP,
@@ -394,7 +397,22 @@ public:
     // routing (bypasses per-hop ECMP).  Each UecSrc gets a pre-computed buffer
     // of Route* objects via setPaths(); packets cycle through them in order.
     // ===== END ADDED (path-rr) =====
-    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB, PATH_RR, PATH_RANDOM, PATH_STATIC }; // ===== ADDED (path-random) (path-static) =====
+    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB, PATH_RR, PATH_RANDOM, PATH_STATIC, FREEZING_PXR }; // ===== ADDED (path-random) (path-static) (freezing-pxr) =====
+
+    // ===== ADDED (srv6) =====
+    // Master toggle for SRv6 source routing. When true, every sendNewPacket/
+    // sendRtxPacket call converts the selected EV into a path index
+    // (ev % _paths.size()) and uses the corresponding pre-computed Route* from
+    // _paths[] instead of relying on per-hop ECMP hashing. Orthogonal to the LB
+    // algorithm: any existing algo can be paired with -use_srv6.
+    static bool _use_srv6;
+    // ===== END ADDED (srv6) =====
+
+    // ===== ADDED (freezing-pxr) =====
+    // Sliding-window timer for FREEZING_PXR (picoseconds). Settable via
+    // -pxr_window_us <N>. Default 200 ms.
+    static simtime_picosec _pxr_window;
+    // ===== END ADDED (freezing-pxr) =====
     // ===== ADDED (path-rr-order) =====
     // Controls the starting index in the RR cycle per flow.  zero = all start
     // at index 0 (synchronized); src/dst/srcdst_hash = staggered per flow.
@@ -469,9 +487,11 @@ public:
     vector <UecSrcPort*> _ports;
     struct sendRecord {
         // need a constructor to be able to put this in a map
-        sendRecord(mem_b psize, simtime_picosec stime) : pkt_size(psize), send_time(stime){};
+        sendRecord(mem_b psize, simtime_picosec stime, uint16_t ev = 0)
+            : pkt_size(psize), send_time(stime), sent_ev(ev) {}
         mem_b pkt_size;
         simtime_picosec send_time;
+        uint16_t sent_ev; // EV used when this packet was sent (for RTO freeze attribution)
     };
     UecLogger* _logger;
     TrafficLogger* _pktlogger;
@@ -494,7 +514,7 @@ public:
     mem_b sendNewPacket(const Route& route);
     mem_b sendRtxPacket(const Route& route);
     void sendRTS();
-    void createSendRecord(UecDataPacket::seq_t seqno, mem_b pkt_size);
+    void createSendRecord(UecDataPacket::seq_t seqno, mem_b pkt_size, uint16_t ev = 0);
     void queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size);
     void recalculateRTO();
     void startRTO(simtime_picosec send_time);
@@ -590,6 +610,9 @@ public:
     // ===== ADDED (path-static) =====
     uint16_t nextEntropy_path_static();
     // ===== END ADDED (path-static) =====
+    // ===== ADDED (freezing-pxr) =====
+    uint16_t nextEntropy_freezing_pxr();
+    // ===== END ADDED (freezing-pxr) =====
 
     void processEv_bitmap(uint16_t path_id, PathFeedback feedback);
     void processEv_REPS(uint16_t path_id, PathFeedback feedback);
@@ -614,6 +637,9 @@ public:
     // ===== ADDED (path-static) =====
     void processEv_path_static(uint16_t path_id, PathFeedback feedback);
     // ===== END ADDED (path-static) =====
+    // ===== ADDED (freezing-pxr) =====
+    void processEv_freezing_pxr(uint16_t path_id, PathFeedback feedback);
+    // ===== END ADDED (freezing-pxr) =====
     uint16_t klb_pick_fresh_path(int exclude_slot) const;
 
     inline EvState ev_state(uint16_t path) const { 
@@ -683,6 +709,9 @@ public:
     // Phase D investigation of paper 2 Fig 4 gap (REPS+freezing → MD never fires?).
     uint64_t         _swift_md_fires      = 0;
     // ===== END ADDED (swift-cc) per-source fields ============================
+    // ===== ADDED (ecn-counter) =====
+    uint64_t         _ecn_ack_count       = 0;  // exact count of ECN-marked ACKs received
+    // ===== END ADDED (ecn-counter) =====
 
 public:
     static linkspeed_bps _reference_network_linkspeed; 
@@ -818,6 +847,24 @@ private:
     // sent packet (new or retransmit).  Wraps modulo _paths.size().
     uint32_t _path_rr_idx = 0;
     // ===== END ADDED (path-rr) =====
+
+    // ===== ADDED (srv6) =====
+    // Scratch register: holds the EV pre-drawn in the SRv6 pre-draw block inside
+    // sendNewPacket/sendRtxPacket. The actual nextEntropy() dispatch in those
+    // functions returns this value instead of calling the LB algorithm a second
+    // time, so the algorithm's state machine advances exactly once per packet.
+    uint16_t _srv6_pending_ev = 0;
+    // ===== END ADDED (srv6) =====
+
+    // ===== ADDED (freezing-pxr) =====
+    // FREEZING_PXR ("Path-eXcluding REPS") state. On RTO, the EV that triggered
+    // the timeout is added to _pxr_excluded_evs and the sliding-window deadline
+    // is pushed to now + _pxr_window. nextEntropy_freezing_pxr filters draws and
+    // buffer pops against this set. When eventlist().now() > _pxr_clear_deadline,
+    // the entire set is cleared (single shared timer).
+    std::set<uint16_t> _pxr_excluded_evs;
+    simtime_picosec    _pxr_clear_deadline = 0;
+    // ===== END ADDED (freezing-pxr) =====
 
     // Per-EV cooldown — paths recently signalled ECN are excluded from selection
     // until eventlist().now() >= _ev_quiet_until[ev] (Fix A). Size = _no_of_paths.

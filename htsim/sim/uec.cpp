@@ -127,6 +127,19 @@ uint64_t UecSrc::_ecmp_elephant_threshold = 0;   // 0 = disabled
 // ===== ADDED (per-host-lb) =============================================
 std::map<uint32_t, UecSrc::LoadBalancing_Algo> UecSrc::_per_host_lb_override;
 
+// ===== ADDED (srv6) ====================================================
+// Off by default; enabled by -use_srv6.  When true, sendNewPacket/sendRtxPacket
+// convert the LB algorithm's selected EV to a physical-path index and use the
+// corresponding Route* from _paths[] (source routing, bypasses ECMP).
+bool UecSrc::_use_srv6 = false;
+// ===== END ADDED (srv6) ================================================
+
+// ===== ADDED (freezing-pxr) ============================================
+// Sliding-window timer for FREEZING_PXR. Default 200 ms (matches FREEZING's
+// exit_freeze_after). Overridable via -pxr_window_us.
+simtime_picosec UecSrc::_pxr_window = 200000000000ULL; // 200 ms in picoseconds
+// ===== END ADDED (freezing-pxr) ========================================
+
 UecSrc::LoadBalancing_Algo UecSrc::_parseLBName(const std::string& name) {
     if (name == "bitmap")      return BITMAP;
     if (name == "reps")        return REPS;
@@ -150,6 +163,9 @@ UecSrc::LoadBalancing_Algo UecSrc::_parseLBName(const std::string& name) {
     // ===== ADDED (path-static) =====
     if (name == "path_static") return PATH_STATIC;
     // ===== END ADDED (path-static) =====
+    // ===== ADDED (freezing-pxr) =====
+    if (name == "freezing_pxr") return FREEZING_PXR;
+    // ===== END ADDED (freezing-pxr) =====
     return (LoadBalancing_Algo)(-1);  // sentinel for "unknown"
 }
 
@@ -191,6 +207,9 @@ std::set<uint32_t> UecSrc::_reps_state_log_srcs;
 FILE* UecSrc::_cwnd_log = nullptr;
 std::set<uint32_t> UecSrc::_cwnd_log_srcs;
 // ===== END ADDED (cwnd-log) =====
+// ===== ADDED (buffer-contents-log) =====
+bool UecSrc::_log_buffer_contents = false;
+// ===== END ADDED (buffer-contents-log) =====
 
 // ===== ADDED (smart-filter) ============================================
 // smartFilterCounter(): returns the active congestion-evidence counter in [0..B],
@@ -240,6 +259,14 @@ void UecSrc::_dispatchLB(LoadBalancing_Algo lb) {
         nextEntropy = &UecSrc::nextEntropy_freezing;
         processEv = &UecSrc::processEv_freezing;
         _crt_path = 0;
+    // ===== ADDED (freezing-pxr) =====
+    } else if (lb == FREEZING_PXR) {
+        nextEntropy = &UecSrc::nextEntropy_freezing_pxr;
+        processEv   = &UecSrc::processEv_freezing_pxr;
+        _crt_path   = 0;
+        _pxr_excluded_evs.clear();
+        _pxr_clear_deadline = 0;
+    // ===== END ADDED (freezing-pxr) =====
     } else if (lb == ECMP){
         nextEntropy = &UecSrc::nextEntropy_ecmp;
         processEv = &UecSrc::processEv_ecmp;
@@ -1159,6 +1186,7 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              << " in_flight now " << _in_flight << " cwnd " << _cwnd << " sim time " << timeAsUs(eventlist().now()) <<
              " bg traffic " << background_traffic <<
              " swift_md_fires " << _swift_md_fires <<  // ===== ADDED (swift-md-counter) =====
+             " ecn_acks " << _ecn_ack_count <<         // ===== ADDED (ecn-counter) =====
              endl;
         _speculating = false;
         
@@ -1299,6 +1327,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
 
     if (pkt.ecn_echo()) {
         last_ecn = eventlist().now();
+        _ecn_ack_count++;   // ===== ADDED (ecn-counter) =====
         if (_collect_data) {
             _list_ecn_received.push_back(std::make_pair(eventlist().now() / 1000, 1));
         }
@@ -1554,31 +1583,46 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         // ===== ADDED (wtd-in-nscc) =============================================
         int wtd_can_decrease = (_exp_avg_ecn >= _wtd_threshold) ? 1 : 0;
         // ===== END ADDED (wtd-in-nscc) =========================================
+        // ===== ADDED (buffer-contents-log) =====================================
+        std::string buf_str;
+        if (_log_buffer_contents) {
+            auto evs = circular_buffer_reps->getValidEntropies();
+            for (size_t bi = 0; bi < evs.size(); ++bi) {
+                if (bi) buf_str += '|';
+                buf_str += std::to_string(evs[bi]);
+            }
+        }
+        // ===== END ADDED (buffer-contents-log) =================================
+        // ===== ADDED (frozen-ev-log) ============================================
+        int _frozen_mode = circular_buffer_reps->isFrozenMode() ? 1 : 0;
+        int _frozen_ev   = circular_buffer_reps->getFrozenEv(); // -1 if not frozen
+        // ===== END ADDED (frozen-ev-log) ========================================
+        // ===== ADDED (freezing-pxr) =============================================
+        std::string pxr_str;
+        if (_log_buffer_contents) {
+            for (auto it = _pxr_excluded_evs.begin(); it != _pxr_excluded_evs.end(); ++it) {
+                if (it != _pxr_excluded_evs.begin()) pxr_str += '|';
+                pxr_str += std::to_string(*it);
+            }
+        }
+        int _pxr_count = (int)_pxr_excluded_evs.size();
+        // ===== END ADDED (freezing-pxr) =========================================
         fprintf(_reps_state_log,
-                "%.3f,%u,%d,%d,%zu,%u,%u,%.4f,%d,%d,%d,%d,%d,%d,%.4f,%d,%d,%d,%d\n",
+                "%.3f,%u,%d,%u,%d,%u,%d,%d,%d,%s,%d,%d,%d,%s\n",
                 (double)eventlist().now() / 1000.0,          // time_us
                 _node_num,                                    // src_id
                 pkt.ecn_echo() ? 1 : 0,                      // ecn
+                (unsigned)pkt.ev(),                           // ack_ev
                 _sf_fresh,                                    // fresh
-                _next_pathid.size(),                          // recycle
                 (unsigned)(_cwnd / get_avg_pktsize()),        // cwnd_pkts
-                (unsigned)(_in_flight / get_avg_pktsize()),   // in_flight_pkts
-                _exp_avg_ecn,                                 // exp_avg_ecn
-                // ===== ADDED (smart-filter) columns ==========================
                 _sf_buf_size,                                 // buf_size
-                _ecn_buffer_counter,                          // ecn_counter
-                _sf_buf_size - _sf_fresh,                     // fresh_inv = B - fresh
-                (int)_smart_filter_mode,                      // sf_mode (0/1/2)
-                (int)smartFilterCounter(),                    // sf_counter_used
-                (int)smartFilterEcnThresh(),                  // sf_ecn_thresh (resolved)
-                _sf_md_gain,                                  // sf_gain
                 _network_is_asymmetric ? 1 : 0,              // sa_asym
                 cc_ecn_log ? 1 : 0,                          // cc_ecn_view
-                // ===== END ADDED (smart-filter) ==============================
-                // ===== ADDED (wtd-in-nscc) columns ===========================
-                _nscc_wtd_enabled ? 1 : 0,                   // wtd_enabled
-                wtd_can_decrease);                            // wtd_can_decrease (1 if exp_avg_ecn>=thresh)
-                // ===== END ADDED (wtd-in-nscc) ================================
+                buf_str.c_str(),                              // buf_contents
+                _frozen_mode,                                 // frozen_mode
+                _frozen_ev,                                   // frozen_ev (-1 = not frozen)
+                _pxr_count,                                   // pxr_excluded_count
+                pxr_str.c_str());                             // pxr_excluded_evs
     }
 
     if (_debug_src) {
@@ -3292,6 +3336,82 @@ void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
     }
 }
 
+// ===== ADDED (freezing-pxr) ==================================================
+// FREEZING_PXR ("Path-eXcluding REPS"): like FREEZING but never enters frozen
+// mode. On RTO (in simulateRTO), the EV that triggered the timeout is added
+// to _pxr_excluded_evs and the sliding-window deadline is pushed forward.
+// nextEntropy_freezing_pxr filters both random draws and buffer pops against
+// the excluded set. When the deadline elapses, the entire set is cleared.
+uint16_t UecSrc::nextEntropy_freezing_pxr() {
+    // Sliding-timer expiry check.
+    if (!_pxr_excluded_evs.empty() && eventlist().now() > _pxr_clear_deadline) {
+        printf("%s FREEZING_PXR cleared excluded set at %lu us (was |excluded|=%zu)\n",
+               _name.c_str(), eventlist().now() / 1000, _pxr_excluded_evs.size());
+        _pxr_excluded_evs.clear();
+        if (_state_aware_ecn_enabled) {
+            _network_is_asymmetric = false;
+            printf("[state-aware] %s FREEZING_PXR asymmetric=false at %lu us\n",
+                   _name.c_str(), eventlist().now() / 1000);
+        }
+    }
+    // Saturation guard: if every EV is excluded, we'd starve. Clear and continue.
+    if ((int)_pxr_excluded_evs.size() >= _no_of_paths) {
+        _pxr_excluded_evs.clear();
+        if (_state_aware_ecn_enabled) _network_is_asymmetric = false;
+    }
+
+    // Explore burst: random draws, skipping excluded EVs (with retry cap).
+    if (circular_buffer_reps->explore_counter > 0) {
+        circular_buffer_reps->explore_counter--;
+        for (int tries = 0; tries < 32; ++tries) {
+            uint16_t ev = rand() % _no_of_paths;
+            if (_pxr_excluded_evs.count(ev) == 0) return ev;
+        }
+        return rand() % _no_of_paths; // give up, accept whatever
+    }
+
+    // Empty / no-fresh: random draw (filtered).
+    if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
+        for (int tries = 0; tries < 32; ++tries) {
+            uint16_t ev = rand() % _no_of_paths;
+            if (_pxr_excluded_evs.count(ev) == 0) return _crt_path = ev;
+        }
+        return _crt_path = rand() % _no_of_paths;
+    }
+
+    // Normal REPS pop: keep popping until we find a non-excluded EV, else random.
+    int max_pops = circular_buffer_reps->getNumberFreshEntropies();
+    for (int pops = 0; pops < max_pops; ++pops) {
+        uint16_t ev = circular_buffer_reps->remove_earliest_fresh();
+        if (_pxr_excluded_evs.count(ev) == 0) return ev;
+        if (circular_buffer_reps->getNumberFreshEntropies() == 0) break;
+    }
+    for (int tries = 0; tries < 32; ++tries) {
+        uint16_t ev = rand() % _no_of_paths;
+        if (_pxr_excluded_evs.count(ev) == 0) return ev;
+    }
+    return rand() % _no_of_paths;
+}
+
+void UecSrc::processEv_freezing_pxr(uint16_t path_id, PathFeedback feedback) {
+    // Sliding-timer expiry check (same as in nextEntropy, in case processEv runs first).
+    if (!_pxr_excluded_evs.empty() && eventlist().now() > _pxr_clear_deadline) {
+        printf("%s FREEZING_PXR cleared excluded set at %lu us (was |excluded|=%zu)\n",
+               _name.c_str(), eventlist().now() / 1000, _pxr_excluded_evs.size());
+        _pxr_excluded_evs.clear();
+        if (_state_aware_ecn_enabled) {
+            _network_is_asymmetric = false;
+            printf("[state-aware] %s FREEZING_PXR asymmetric=false at %lu us\n",
+                   _name.c_str(), eventlist().now() / 1000);
+        }
+    }
+    // Only add good EVs that are not currently excluded.
+    if (feedback == PATH_GOOD && _pxr_excluded_evs.count(path_id) == 0) {
+        circular_buffer_reps->add(path_id);
+    }
+}
+// ===== END ADDED (freezing-pxr) ==============================================
+
 uint16_t UecSrc::nextEntropy_plb(){
     int plb_n = 1;
     int plb_m = 1;
@@ -3404,10 +3524,25 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     if (_load_balancing_algo == PATH_RANDOM && !_paths.empty())
         _path_rr_idx = (uint64_t)(rand() % _paths.size());
     // ===== END ADDED (path-random) =====
+    // ===== ADDED (srv6) =====
+    // SRv6 pre-draw: call nextEntropy() early so we can convert the EV to a
+    // physical-path index BEFORE effective_route is selected (route is locked
+    // at newpkt() time, but nextEntropy() is normally called after).  Store the
+    // EV in _srv6_pending_ev; the nextEntropy() call below returns that value
+    // without re-advancing the LB algorithm's state.
+    // route_path_idx defaults to _path_rr_idx for PATH_RR/PATH_STATIC paths;
+    // the SRv6 block overwrites it when -use_srv6 is active.
+    uint64_t route_path_idx = _path_rr_idx;
+    if (_use_srv6 && !_paths.empty()) {
+        uint16_t ev_pre = (this->*nextEntropy)();
+        _srv6_pending_ev = ev_pre;
+        route_path_idx = (uint64_t)(ev_pre % _paths.size());
+    }
+    // ===== END ADDED (srv6) =====
     const Route& effective_route =
         ((_load_balancing_algo == PATH_RR || _load_balancing_algo == PATH_RANDOM ||
-          _load_balancing_algo == PATH_STATIC) && !_paths.empty()) // ===== ADDED (path-static) =====
-        ? *_paths[_path_rr_idx % _paths.size()]
+          _load_balancing_algo == PATH_STATIC || _use_srv6) && !_paths.empty()) // ===== ADDED (path-static) (srv6) =====
+        ? *_paths[route_path_idx % _paths.size()]
         : route;
     // ===== END ADDED (path-rr) =====
 
@@ -3415,7 +3550,8 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
                                      _pull_target, _dstaddr);
     p->_src_dest = _src_dest_id_hash;
     //printf("%s MPRDMA SEND1 - can send %d - CWND %d - In Flight %d\n",nodename().c_str(), mprdma_can_send, _cwnd, _in_flight);
-    uint16_t ev = (this->*nextEntropy)();
+    // ===== ADDED (srv6): EV already drawn in pre-draw block; return stored value =====
+    uint16_t ev = _use_srv6 ? _srv6_pending_ev : (this->*nextEntropy)();
     p->set_pathid(ev);
     if (_mixed_lb_traffic && _node_num % 10 == 0) {
         p->no_bg = false;
@@ -3429,10 +3565,10 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
 
     p->flow().logTraffic(*p, *this, TrafficLogger::PKT_CREATESEND);
 
-    if (_backlog == 0 || (_receiver_based_cc && _credit < 0) || ( _sender_based_cc &&  _in_flight >= _cwnd )) 
+    if (_backlog == 0 || (_receiver_based_cc && _credit < 0) || ( _sender_based_cc &&  _in_flight >= _cwnd ))
         p->set_ar(true);
-    
-    createSendRecord(_highest_sent, full_pkt_size);
+
+    createSendRecord(_highest_sent, full_pkt_size, ev);
     if (_debug_src)
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " sending pkt " << _highest_sent
              << " size " << full_pkt_size << " pull target " << _pull_target << " ack request " << p->ar()
@@ -3475,17 +3611,26 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     if (_load_balancing_algo == PATH_RANDOM && !_paths.empty())
         _path_rr_idx = (uint64_t)(rand() % _paths.size());
     // ===== END ADDED (path-random) =====
+    // ===== ADDED (srv6): same pre-draw pattern as sendNewPacket =====
+    uint64_t route_path_idx = _path_rr_idx;
+    if (_use_srv6 && !_paths.empty()) {
+        uint16_t ev_pre = (this->*nextEntropy)();
+        _srv6_pending_ev = ev_pre;
+        route_path_idx = (uint64_t)(ev_pre % _paths.size());
+    }
+    // ===== END ADDED (srv6) =====
     const Route& effective_route =
         ((_load_balancing_algo == PATH_RR || _load_balancing_algo == PATH_RANDOM ||
-          _load_balancing_algo == PATH_STATIC) && !_paths.empty()) // ===== ADDED (path-static) =====
-        ? *_paths[_path_rr_idx % _paths.size()]
+          _load_balancing_algo == PATH_STATIC || _use_srv6) && !_paths.empty()) // ===== ADDED (path-static) (srv6) =====
+        ? *_paths[route_path_idx % _paths.size()]
         : route;
     // ===== END ADDED (path-rr) =====
 
     auto* p = UecDataPacket::newpkt(_flow, effective_route, seq_no, full_pkt_size, UecDataPacket::DATA_RTX,
                                      _pull_target, _dstaddr);
     //printf("MPRDMA SEND2 - can send %d\n", mprdma_can_send);
-    uint16_t ev = (this->*nextEntropy)();
+    // ===== ADDED (srv6): EV already drawn in pre-draw block; return stored value =====
+    uint16_t ev = _use_srv6 ? _srv6_pending_ev : (this->*nextEntropy)();
     p->_src_dest = _src_dest_id_hash;
     p->set_pathid(ev);
     hashmap_entropy[p->epsn()] = ev;
@@ -3495,7 +3640,7 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
         p->no_bg = false;
     }
 
-    createSendRecord(seq_no, full_pkt_size);
+    createSendRecord(seq_no, full_pkt_size, ev);
 
     if (_debug_src)
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " sending rtx pkt " << seq_no
@@ -3526,13 +3671,13 @@ void UecSrc::sendRTS() {
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " sendRTS, flow " << _flow.str()
              << " epsn " << _highest_sent << " last RTS " << timeAsUs(_last_rts)
              << " in_flight " << _in_flight << " pull_target " << _pull_target << " pull " << _pull << endl;
-    createSendRecord(_highest_sent, _hdr_size);
     auto* p =
         UecRtsPacket::newpkt(_flow, NULL, _highest_sent, _pull_target, _dstaddr);
     p->_src_dest = _src_dest_id_hash;
     p->set_dst(_dstaddr);
     uint16_t ev = (this->*nextEntropy)();
     p->set_pathid(ev);
+    createSendRecord(_highest_sent, _hdr_size, ev);
 
     // p->sendOn();
     _nic.sendControlPacket(p, this, NULL);
@@ -3543,13 +3688,13 @@ void UecSrc::sendRTS() {
     startRTO(eventlist().now());
 }
 
-void UecSrc::createSendRecord(UecBasePacket::seq_t seqno, mem_b full_pkt_size) {
+void UecSrc::createSendRecord(UecBasePacket::seq_t seqno, mem_b full_pkt_size, uint16_t ev) {
     // assert(full_pkt_size > 64);
     if (_debug_src)
         cout << _flow.str() << " " << _nodename << " createSendRecord seqno: " << seqno << " size " << full_pkt_size
              << endl;
     assert(_tx_bitmap.find(seqno) == _tx_bitmap.end());
-    _tx_bitmap.emplace(seqno, sendRecord(full_pkt_size, eventlist().now()));
+    _tx_bitmap.emplace(seqno, sendRecord(full_pkt_size, eventlist().now(), ev));
     _send_times.emplace(eventlist().now(), seqno);
 }
 
@@ -3694,6 +3839,9 @@ void UecSrc::rtxTimerExpired() {
     if (_flow.flow_id() == _debug_flowid)
         cout << _nodename << " rtx timer expired for seqno " << seqno << " flow " << _flow.str() << " packet sent at " << timeAsUs(send_record->second.send_time) << " now time is " << timeAsUs(eventlist().now()) << endl;
 
+    // ===== ADDED (frozen-ev-log): save triggering EV before erasing the record =====
+    uint16_t rto_trigger_ev = send_record->second.sent_ev;
+    // ===== END ADDED (frozen-ev-log) =====
     _tx_bitmap.erase(send_record);
     recalculateRTO();
 
@@ -3709,7 +3857,7 @@ void UecSrc::rtxTimerExpired() {
                 printf("[state-aware] %s FREEZING freeze + asymmetric=true at %lu us\n",
                        _name.c_str(), eventlist().now() / 1000);
             }
-            printf("%s started freezing mode1 at %lu (can exit at %lu) - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize());
+            printf("%s started freezing mode1 at %lu (can exit at %lu) - %d - Size Buffer %d - trigger_ev %u\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize(), (unsigned)rto_trigger_ev);
             printf("Last Max RTT %lu - RTO Start %lu - Time is %lu - Base RTT is %lu -- Max %lu at %lu\n", _last_rto_max_rtt/1000, _last_rto_start/1000, eventlist().now()/1000, _base_rtt/1000, _max_rtt_seen/1000, _when__max_rtt_seen/1000);
         } else if (!_trim_disbled) {
             circular_buffer_reps->setFrozenMode(true);
@@ -3720,9 +3868,28 @@ void UecSrc::rtxTimerExpired() {
                 printf("[state-aware] %s FREEZING freeze + asymmetric=true at %lu us\n",
                        _name.c_str(), eventlist().now() / 1000);
             }
-            printf("%s started freezing mode2 at %lu (can exit at %lu) - Explore Counter %d - %d - Size Buffer %d\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->explore_counter, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize());
+            printf("%s started freezing mode2 at %lu (can exit at %lu) - Explore Counter %d - %d - Size Buffer %d - trigger_ev %u\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->explore_counter, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize(), (unsigned)rto_trigger_ev);
         }
     }
+
+    // ===== ADDED (freezing-pxr) =====
+    // FREEZING_PXR: on RTO, add the triggering EV to the excluded set and refresh
+    // the sliding-window deadline. Never enters frozen mode.
+    if (_load_balancing_algo == FREEZING_PXR && circular_buffer_reps &&
+        circular_buffer_reps->explore_counter == 0) {
+        bool was_empty = _pxr_excluded_evs.empty();
+        _pxr_excluded_evs.insert(rto_trigger_ev);
+        _pxr_clear_deadline = eventlist().now() + _pxr_window;
+        if (_state_aware_ecn_enabled && was_empty) {
+            _network_is_asymmetric = true;
+            printf("[state-aware] %s FREEZING_PXR asymmetric=true at %lu us\n",
+                   _name.c_str(), eventlist().now() / 1000);
+        }
+        printf("%s FREEZING_PXR excluded EV %u at %lu us (clear at %lu us, |excluded|=%zu)\n",
+               _name.c_str(), (unsigned)rto_trigger_ev, eventlist().now() / 1000,
+               _pxr_clear_deadline / 1000, _pxr_excluded_evs.size());
+    }
+    // ===== END ADDED (freezing-pxr) =====
 
     // State-Aware NSCC+REPS: on RTO under REPS, treat it as evidence the network
     // became asymmetric. Freeze REPS to stop exploring (cycle known-good EVs only)

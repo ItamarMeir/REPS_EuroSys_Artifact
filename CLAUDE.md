@@ -18,6 +18,42 @@ The experiments for both live in `state_aware_experiments/`.
 
 ---
 
+## Base artifact: setup, build, run, test
+
+Python env (from repo root, in a clean venv):
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+./reps_pkg_install.sh
+```
+
+Full clean rebuild of `htsim` (equivalent to the `## Building` section below, but from clean):
+```bash
+cd htsim/sim
+make clean && cd datacenter/ && make clean && cd ..
+make -j 8 && cd datacenter/ && make -j 8 && cd ..
+```
+
+Reproducing the paper's figures (from `artifact_scripts/`, run after building `htsim_uec`):
+```bash
+cd artifact_scripts
+./reps_quick.sh    # <2h, Figures 1,3,5,6,8,9,10,11,12,13,14
+./reps_medium.sh   # ~4-6h, adds Figure 2
+./reps_full.sh     # ~10h+, all figures
+```
+Or run a single figure's Python script directly (e.g. `python fig_1_symmetric_micro.py`). Results land in `artifact_results/<experiment>/`. **Never modify `artifact_scripts/` or `artifact_results/`** — they are the paper's original, unmodified artifact.
+
+`traffic_gen/` unit tests (connection-matrix generator, independent of `htsim`):
+```bash
+cd traffic_gen
+python -m unittest test_traffic_gen_utils.py
+python -m unittest test_custom_random_number_generator.py
+```
+
+There is no test suite for `htsim/sim/` itself or for `state_aware_experiments/` — correctness there is validated by running experiments and inspecting output (grep for `enable on tor downlink 1`, event-count sanity checks, etc. — see `state_aware_experiments/RUNNING_EXPERIMENTS.md`).
+
+---
+
 ## Directory map
 
 ```
@@ -454,3 +490,58 @@ Results: [`state_aware_experiments/exp17_cwnd_corrected_v17/`](state_aware_exper
 | `htsim/sim/uec.h` | `PATH_STATIC` appended to `LoadBalancing_Algo` enum; `nextEntropy_path_static` / `processEv_path_static` declarations | `-load_balancing_algo path_static` |
 | `htsim/sim/uec.cpp` | `_parseLBName` entry; `_dispatchLB` case; `processEv_path_static` (no-op); `nextEntropy_path_static` (`_path_rr_idx % 1` → always 0); `effective_route` guard extended to cover `PATH_STATIC` | `-load_balancing_algo path_static` |
 | `htsim/sim/datacenter/main_uec.cpp` | CLI: `path_static` parsed; `path_static_edge_load` map; greedy selection; `get_bidir_paths` called with `reverse=true`; reverse route built and registered via `uec_snk->getPort(p)->setRoute(*rev)`; cross-linked with `set_reverse` for trim safety | `-load_balancing_algo path_static` |
+
+### `[ADDED: srv6]` — gated by `-use_srv6`
+
+SRv6 source routing substrate: orthogonal to the LB algorithm. When `-use_srv6` is passed, the
+sender converts the EV chosen by whatever LB algorithm is active into a physical-path index
+(`ev % _paths.size()`) and uses the corresponding pre-computed `Route*` from `_paths[]` instead
+of relying on per-hop ECMP hashing. Switches simply follow the explicit hop list.
+
+**EV-to-path mapping faithfulness**: for the 3-tier K=4 fat tree, `get_bidir_paths` enumerates
+inter-pod paths in Agg-major, Core-minor order. `ev % 4` maps EV bit[0]=Core choice (= paper
+"plane") and bit[1]=Agg choice (= paper "T0 uplink") — exactly the SRv6 uSID bit decomposition
+described in MRC §2.3 (Fig. 3).
+
+**Timing constraint**: `effective_route` must be determined before `newpkt()` locks the route,
+but `nextEntropy()` is normally called after packet creation. Solution: SRv6 pre-draw block calls
+`nextEntropy()` early in `sendNewPacket`/`sendRtxPacket`, stores the EV in `_srv6_pending_ev`,
+and sets `route_path_idx`. The original `nextEntropy()` dispatch is then replaced by returning
+the cached value — the LB state machine advances exactly once per packet.
+
+Can be combined with any existing LB algorithm: `-load_balancing_algo freezing -use_srv6`,
+`-load_balancing_algo ecmp -use_srv6`, etc.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `_use_srv6` static bool; `_srv6_pending_ev` per-source scratch field | `-use_srv6` |
+| `htsim/sim/uec.cpp` | static def; SRv6 pre-draw block + `route_path_idx` local + `effective_route` condition extended + `nextEntropy` guard in `sendNewPacket` and `sendRtxPacket` | `-use_srv6` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI `-use_srv6`; path-population condition extended to include `_use_srv6` | `-use_srv6` |
+
+**Verification tests**: `state_aware_experiments/test_srv6/scripts/run_tests.sh` — 13/13 pass.
+Tests verify: (1) FREEZING+SRv6 smoke, (2) PATH_RR FCT identical with/without SRv6 (within 0.1%),
+(3) 1-path SRv6 stalls when path[0]=(agg=0,core=0) is failed, (4) 1-path SRv6 unaffected when
+other links fail, (5) 4-path SRv6 shows ≥3× FCT degradation when each path's (agg,core) link fails,
+(6) ECMP+SRv6 completes tornado workload.
+
+### `[ADDED: freezing-pxr]` — gated by `-load_balancing_algo freezing_pxr`
+
+Path-eXcluding REPS. On RTO, adds the triggering EV (captured from `sendRecord::sent_ev`) to a
+per-source **excluded set** and refreshes a sliding deadline (`now + _pxr_window`). Normal REPS
+sampling continues but skips excluded EVs on every draw. When the deadline elapses with no new
+RTO, the entire excluded set is cleared atomically. Never enters frozen mode.
+
+Unlike FREEZING, there is no frozen-mode cycling of stale buffer entries. The sender simply keeps
+drawing from the remaining healthy EVs, giving ~31% P99 FCT improvement over FREEZING B=8 under
+51 failed links (exp23).
+
+`sendRecord` was extended to store `sent_ev` so the RTO handler can identify which EV caused
+the timeout. `createSendRecord` updated to accept and forward `ev` at all 3 call sites.
+
+Experiment + results: [`state_aware_experiments/exp23_freezing_pxr_v23/README.md`](state_aware_experiments/exp23_freezing_pxr_v23/README.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `FREEZING_PXR` in `LoadBalancing_Algo` enum; `_pxr_excluded_evs` + `_pxr_clear_deadline` per-source fields; `_pxr_window` public static; `nextEntropy_freezing_pxr` / `processEv_freezing_pxr` declarations; `sent_ev` added to `sendRecord`; `createSendRecord` declaration updated | `-load_balancing_algo freezing_pxr` |
+| `htsim/sim/uec.cpp` | `_pxr_window` static def (200 ms default); `_parseLBName` entry; `_dispatchLB` case; `nextEntropy_freezing_pxr` (timer check + saturation guard + filtered REPS draw); `processEv_freezing_pxr` (filtered buffer add); RTO branch (exclusion + sliding deadline); `createSendRecord` stores `ev`; `rto_trigger_ev` captured before erase; `pxr_excluded_count` + `pxr_excluded_evs` CSV columns | `-load_balancing_algo freezing_pxr` |
+| `htsim/sim/datacenter/main_uec.cpp` | `freezing_pxr` in `-load_balancing_algo` handler; `-pxr_window_us <N>` flag; CSV header update | own flags |

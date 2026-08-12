@@ -46,6 +46,15 @@ template <typename T> class CircularBufferREPS {
     // rather than scanning all _no_of_paths EVs with containsEntropy().
     std::vector<T> getValidEntropies() const;
     // ===== END ADDED (ev-health-counter) ================================
+    // ===== ADDED (frozen-ev-log) ========================================
+    // Returns the EV at the current frozen-mode read pointer, or -1 if not
+    // in frozen mode or the buffer is empty.  Used to log the active frozen
+    // EV in the per-ACK CSV without exposing head_forzen_mode externally.
+    int getFrozenEv() const {
+        if (!frozen_mode || count == 0) return -1;
+        return static_cast<int>(buffer[head_forzen_mode].value);
+    }
+    // ===== END ADDED (frozen-ev-log) ====================================
     int mostValidIdx() const;
     bool isEmpty() const;
     bool isFull() const;

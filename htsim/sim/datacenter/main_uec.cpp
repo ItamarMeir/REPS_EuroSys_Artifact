@@ -307,6 +307,13 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i], "-exit_freeze")) {
             CircularBufferREPS<int>::exit_freeze_after = std::stod(argv[i + 1]);
             i++;
+        // ===== ADDED (freezing-pxr) =====
+        } else if (!strcmp(argv[i], "-pxr_window_us")) {
+            // Sliding-window timer (in microseconds) for FREEZING_PXR.
+            UecSrc::_pxr_window = (simtime_picosec)atoll(argv[i + 1]) * 1000000ULL;
+            printf("FREEZING_PXR sliding window set to %s us\n", argv[i + 1]);
+            i++;
+        // ===== END ADDED (freezing-pxr) =====
         } else if (!strcmp(argv[i], "-skip_asy")) {
             FatTreeTopology::skip_asy = true;
         } else if (!strcmp(argv[i],"-mixed_lb_traffic")) {
@@ -423,6 +430,11 @@ int main(int argc, char **argv) {
             }
         // ===== END ADDED (path-rr-npaths) =====
         // ===== END ADDED (path-rr-order) =====
+        // ===== ADDED (srv6) =====
+        } else if (!strcmp(argv[i], "-use_srv6")) {
+            UecSrc::_use_srv6 = true;
+            cout << "SRv6 source routing enabled: EV -> _paths[ev % N] (bypasses ECMP)" << endl;
+        // ===== END ADDED (srv6) =====
         } else if (!strcmp(argv[i],"-sender_cc_only")) {
             UecSrc::_sender_based_cc = true;
             UecSrc::_receiver_based_cc = false;
@@ -586,6 +598,11 @@ int main(int argc, char **argv) {
             } else if (!strcmp(argv[i+1], "path_static")) {
                 UecSrc::_load_balancing_algo = UecSrc::PATH_STATIC;
             // ===== END ADDED (path-static) =====
+            // ===== ADDED (freezing-pxr) =====
+            // FREEZING_PXR: REPS-like LB with persistent excluded-EV set on RTO.
+            } else if (!strcmp(argv[i+1], "freezing_pxr")) {
+                UecSrc::_load_balancing_algo = UecSrc::FREEZING_PXR;
+            // ===== END ADDED (freezing-pxr) =====
             } else {
                 cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps or reps2" << endl;
                 exit_error(argv[0]);
@@ -804,10 +821,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
             fprintf(UecSrc::_reps_state_log,
-                    "time_us,src_id,ecn,fresh,recycle,cwnd_pkts,in_flight_pkts,exp_avg_ecn,"
-                    "buf_size,ecn_counter,fresh_inv,sf_mode,sf_counter_used,sf_ecn_thresh,"
-                    "sf_gain,sa_asym,cc_ecn_view,"
-                    "wtd_enabled,wtd_can_decrease\n");
+                    "time_us,src_id,ecn,ack_ev,fresh,cwnd_pkts,buf_size,sa_asym,cc_ecn_view,buf_contents,frozen_mode,frozen_ev,pxr_excluded_count,pxr_excluded_evs\n");
             cout << "Logging REPS-buffer state to " << argv[i+1] << endl;
             i++;
         } else if (!strcmp(argv[i],"-log_reps_state_src")){
@@ -816,6 +830,9 @@ int main(int argc, char **argv) {
                  << " to REPS-state log (total tracked="
                  << UecSrc::_reps_state_log_srcs.size() << ")" << endl;
             i++;
+        } else if (!strcmp(argv[i],"-log_buffer_contents")) { // ===== ADDED (buffer-contents-log) =====
+            UecSrc::_log_buffer_contents = true;
+            cout << "Buffer contents logging enabled (appends buf_contents column to reps_state_log)" << endl;
         } else if (!strcmp(argv[i],"-log_cwnd")) { // ===== ADDED (cwnd-log) =====
             UecSrc::_cwnd_log = fopen(argv[i+1], "w");
             if (!UecSrc::_cwnd_log) {
@@ -1498,7 +1515,8 @@ int main(int argc, char **argv) {
                     // copies the route and pushes the sink port as the last hop.
                     if (UecSrc::_load_balancing_algo == UecSrc::PATH_RR ||
                         UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ||
-                        UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC) { // ===== ADDED (path-static) =====
+                        UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC ||
+                        UecSrc::_use_srv6) { // ===== ADDED (path-static) (srv6) =====
                         auto* paths = topo[p]->get_bidir_paths(src, dest, true); // true = also build reverse routes (needed for PATH_STATIC ACK/PULL routing)
                         if (paths && !paths->empty()) {
                             PacketSink* sink_port = uec_snk->getPort(p);
@@ -1582,10 +1600,13 @@ int main(int argc, char **argv) {
                                 uec_src->setPathRRStartIdx(start_idx);
                             }
                             // ===== END ADDED (path-rr-order) =====
-                            cout << (UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ? "PATH_RANDOM" : "PATH_RR")
+                            // ===== ADDED (srv6) =====
+                            cout << (UecSrc::_use_srv6 ? "SRv6" :
+                                     (UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ? "PATH_RANDOM" : "PATH_RR"))
                                  << ": " << src << "->" << dest
                                  << " plane=" << p
                                  << " distinct_paths=" << full_paths.size() << "\n";
+                            // ===== END ADDED (srv6) =====
                             } // ===== ADDED (path-static) =====
                         } else {
                             cerr << (UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ? "PATH_RANDOM" : "PATH_RR")
