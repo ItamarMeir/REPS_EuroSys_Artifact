@@ -30,6 +30,42 @@ No specialized hardware is required, no GPUs or accelerators. All experiments we
 ### Software
 All experiments were run locally on Ubuntu 22.04 LTS using WSL 2. The project requires a C++17-capable compiler and Python 3.8 (or newer) to build `htsim` and to execute the accompanying analysis scripts. If you’re on a comparable Linux environment, the setup should behave the same. Different Python versions might require some manual tuning and handling of dependencies.
 
+# Running in Docker
+A `Dockerfile` at the repo root builds a self-contained Ubuntu 22.04 image with the C++17 toolchain, `libgraphviz-dev`, Python 3, and all `requirements.txt` packages preinstalled, and compiles `htsim` (including `htsim_uec`) during the image build. This is the fastest way to get a known-good environment without touching your host system.
+
+Build the image (from the repo root):
+```bash
+docker build -t reps-artifact .
+```
+
+Run it interactively, with the repo checked out in `/workspace` inside the image (built during `docker build`, no host mount needed):
+```bash
+docker run -it --rm reps-artifact
+```
+
+To iterate on the code from your host editor and have changes reflected inside the container, bind-mount the repo over `/workspace`:
+```bash
+docker run -it --rm -v "$(pwd):/workspace" reps-artifact
+```
+**Important:** bind-mounting overlays your host's `htsim/sim` tree — including any `.o`/binary files already built on the host — on top of the ones baked into the image. If those were built outside the container (e.g. on WSL/a different Ubuntu version), the container's `libstdc++`/`glibc` may be older and running the host-built `htsim_uec` will fail with a `GLIBCXX_*`/`GLIBC_*` "version not found" error. Fix by rebuilding inside the container after mounting:
+```bash
+cd htsim/sim && make clean && cd datacenter && make clean && cd .. \
+  && make -j$(nproc) && cd datacenter && make -j$(nproc)
+```
+
+From inside the container, everything works exactly as described above — `htsim_uec` is at `htsim/sim/datacenter/htsim_uec`, and `artifact_scripts/*.sh` / `*.py` can be run directly since the Python environment is already installed (no `venv` needed).
+
+## Using docker-compose
+
+A `docker-compose.yml` at the repo root wraps the bind-mount workflow above so you don't have to retype the `docker run` flags. It builds the same image, bind-mounts the repo root over `/workspace`, and gives you an interactive shell:
+
+```bash
+docker compose build
+docker compose run --rm reps-artifact-dev
+```
+
+The same bind-mount caveat applies: after starting the container, rebuild `htsim` inside it before running anything (see the `make clean && ... && make -j$(nproc)` commands above). To open a second shell into an already-running container, use `docker exec -it reps-artifact-dev bash`.
+
 
 # Testing the artifacts
 To test the artifacts we provide a series of Bash files that can be run from the ```artifact_scripts/``` directory of the project.

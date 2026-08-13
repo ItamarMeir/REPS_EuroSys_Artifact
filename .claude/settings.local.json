@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git config *)",
+      "Bash(git fsck *)",
+      "Bash(docker build *)",
+      "Bash(Get-Content *)",
+      "Bash(docker run *)"
+    ]
+  }
+}

@@ -54,6 +54,44 @@ There is no test suite for `htsim/sim/` itself or for `state_aware_experiments/`
 
 ---
 
+## Docker environment
+
+A `Dockerfile` (repo root) builds a self-contained Ubuntu 22.04 image with the C++17 toolchain,
+`libgraphviz-dev`, Python 3 + `requirements.txt`, and a pre-built `htsim_uec`. Prefer this over
+ad-hoc host setup when the host environment is unknown/dirty.
+
+```bash
+docker build -t reps-artifact .
+docker run -it --rm reps-artifact                              # self-contained, image's own copy of the repo
+docker run -it --rm -v "$(pwd):/workspace" reps-artifact        # live bind-mount for editing from the host
+```
+
+**Gotcha:** bind-mounting overlays the host's `htsim/sim` build artifacts (`.o` files, `htsim_uec`)
+on top of the image's. If those were built on the host (different glibc/libstdc++), the container
+will fail to run them with a `GLIBCXX_*`/`GLIBC_*` "version not found" error. Always rebuild inside
+the container after mounting:
+```bash
+cd htsim/sim && make clean && cd datacenter && make clean && cd .. \
+  && make -j$(nproc) && cd datacenter && make -j$(nproc)
+```
+`.o`/binary files are gitignored, so this never touches tracked files. Full instructions: README.md
+§"Running in Docker".
+
+### docker-compose
+
+`docker-compose.yml` (repo root) wraps the bind-mount workflow above into a single service
+(`reps-artifact-dev`, image `reps-artifact`, `.` mounted at `/workspace`):
+```bash
+docker compose build
+docker compose run --rm reps-artifact-dev
+```
+Same rebuild-after-mount gotcha applies — rebuild `htsim/sim` inside the container before running
+anything. `docker exec -it reps-artifact-dev bash` opens a second shell into an already-running
+container. Verified end-to-end (build → compose run → in-container rebuild → single-flow sim on
+`fat_tree_16_1os_3t_400g.topo`) on 2026-08-13.
+
+---
+
 ## Directory map
 
 ```

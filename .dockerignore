@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+**/*.o
+**/*.a
+**/parse_output
+**/htsim_*
+**/*.dat
+**/*.csv
+**/*.pdf
+**/*.png
+**/*.cm
+state_aware_experiments/**/runs.tar.gz
+state_aware_experiments/**/runs/
+artifact_results_backup

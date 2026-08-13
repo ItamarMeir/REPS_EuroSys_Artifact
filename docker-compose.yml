@@ -1,0 +1,10 @@
+services:
+  reps-artifact-dev:
+    build: .
+    image: reps-artifact
+    container_name: reps-artifact-dev
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    volumes:
+      - .:/workspace
