@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 460" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <filter id="glowCyan" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="glowPurple" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 700; font-size: 16px; fill: #f8fafc; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #94a3b8; }
+    .tier-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 700; font-size: 11px; fill: #64748b; letter-spacing: 1px; }
+    .switch-text { font-family: "SFMono-Regular", Consolas, Menlo, monospace; font-size: 11px; fill: #e2e8f0; font-weight: 600; text-anchor: middle; }
+    .host-text { font-family: "SFMono-Regular", Consolas, Menlo, monospace; font-size: 11px; fill: #38bdf8; font-weight: 600; text-anchor: middle; }
+    .legend-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #cbd5e1; }
+
+    /* Keyframe Packet Pulse Animations */
+    @keyframes flowPath1 {
+      0% { offset-distance: 0%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+    @keyframes flowPath2 {
+      0% { offset-distance: 0%; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { offset-distance: 100%; opacity: 0; }
+    }
+
+    .packet-cyan {
+      offset-path: path("M 155 390 L 155 320 L 220 230 L 290 130 L 640 230 L 705 320 L 705 390");
+      animation: flowPath1 3.2s linear infinite;
+    }
+    .packet-purple {
+      offset-path: path("M 155 390 L 155 320 L 220 230 L 570 130 L 640 230 L 705 320 L 705 390");
+      animation: flowPath2 3.2s linear infinite 1.6s;
+    }
+  </style>
+
+  <!-- Background -->
+  <rect width="860" height="460" rx="12" fill="url(#bgGrad)" stroke="#334155" stroke-width="1.5" />
+
+  <!-- Header -->
+  <text x="30" y="36" class="title">3-Tier Fat-Tree (K=4) Multi-Path Traversal</text>
+  <text x="30" y="56" class="subtitle">Packets choose distinct paths via ECMP hashing or explicit SRv6 source routing</text>
+
+  <!-- Legend -->
+  <g transform="translate(540, 26)">
+    <circle cx="10" cy="10" r="5" fill="#38bdf8" />
+    <text x="22" y="14" class="legend-text">Path 1 (EV=0, Core 0)</text>
+    <circle cx="170" cy="10" r="5" fill="#a855f7" />
+    <text x="182" y="14" class="legend-text">Path 2 (EV=2, Core 2)</text>
+  </g>
+
+  <!-- Tier Labels -->
+  <text x="30" y="135" class="tier-label">CORE TIER</text>
+  <text x="30" y="235" class="tier-label">AGGREGATION</text>
+  <text x="30" y="325" class="tier-label">TOR / LEAF</text>
+  <text x="30" y="405" class="tier-label">HOSTS</text>
+
+  <!-- Background Topology Links (Grey) -->
+  <g stroke="#334155" stroke-width="1.5">
+    <!-- ToR to Hosts -->
+    <line x1="155" y1="320" x2="155" y2="390" />
+    <line x1="340" y1="320" x2="340" y2="390" />
+    <line x1="520" y1="320" x2="520" y2="390" />
+    <line x1="705" y1="320" x2="705" y2="390" />
+
+    <!-- Agg to ToR Links -->
+    <line x1="220" y1="230" x2="155" y2="320" />
+    <line x1="220" y1="230" x2="340" y2="320" />
+    <line x1="360" y1="230" x2="155" y2="320" />
+    <line x1="360" y1="230" x2="340" y2="320" />
+    <line x1="500" y1="230" x2="520" y2="320" />
+    <line x1="500" y1="230" x2="705" y2="320" />
+    <line x1="640" y1="230" x2="520" y2="320" />
+    <line x1="640" y1="230" x2="705" y2="320" />
+
+    <!-- Core to Agg Links -->
+    <line x1="290" y1="130" x2="220" y2="230" />
+    <line x1="290" y1="130" x2="500" y2="230" />
+    <line x1="380" y1="130" x2="220" y2="230" />
+    <line x1="380" y1="130" x2="500" y2="230" />
+    <line x1="480" y1="130" x2="360" y2="230" />
+    <line x1="480" y1="130" x2="640" y2="230" />
+    <line x1="570" y1="130" x2="360" y2="230" />
+    <line x1="570" y1="130" x2="640" y2="230" />
+  </g>
+
+  <!-- Active Highlighted Paths -->
+  <!-- Path 1 (Cyan) -->
+  <path d="M 155 390 L 155 320 L 220 230 L 290 130 L 640 230 L 705 320 L 705 390" fill="none" stroke="#0284c7" stroke-width="2.5" stroke-opacity="0.6" />
+  <!-- Path 2 (Purple) -->
+  <path d="M 155 390 L 155 320 L 220 230 L 570 130 L 640 230 L 705 320 L 705 390" fill="none" stroke="#7c3aed" stroke-width="2.5" stroke-opacity="0.6" />
+
+  <!-- Animated Flowing Packets -->
+  <circle cx="0" cy="0" r="6" fill="#38bdf8" filter="url(#glowCyan)" class="packet-cyan" />
+  <circle cx="0" cy="0" r="6" fill="#c084fc" filter="url(#glowPurple)" class="packet-purple" />
+
+  <!-- Core Switches (Top) -->
+  <g transform="translate(250, 110)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">Core 0</text>
+  </g>
+  <g transform="translate(340, 110)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">Core 1</text>
+  </g>
+  <g transform="translate(440, 110)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">Core 2</text>
+  </g>
+  <g transform="translate(530, 110)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#a855f7" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">Core 3</text>
+  </g>
+
+  <!-- Aggregation Switches (Middle) -->
+  <g transform="translate(180, 210)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#0284c7" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">Agg 0.0</text>
+  </g>
+  <g transform="translate(320, 210)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">Agg 0.1</text>
+  </g>
+  <g transform="translate(460, 210)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">Agg 1.0</text>
+  </g>
+  <g transform="translate(600, 210)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#7c3aed" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">Agg 1.1</text>
+  </g>
+
+  <!-- ToR Switches (Lower) -->
+  <g transform="translate(115, 300)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#0284c7" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">ToR 0</text>
+  </g>
+  <g transform="translate(300, 300)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">ToR 1</text>
+  </g>
+  <g transform="translate(480, 300)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1.2" />
+    <text x="40" y="25" class="switch-text">ToR 2</text>
+  </g>
+  <g transform="translate(665, 300)">
+    <rect width="80" height="40" rx="6" fill="#1e293b" stroke="#7c3aed" stroke-width="1.5" />
+    <text x="40" y="25" class="switch-text">ToR 3</text>
+  </g>
+
+  <!-- Hosts (Bottom) -->
+  <g transform="translate(115, 380)">
+    <rect width="80" height="34" rx="6" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5" />
+    <text x="40" y="22" class="host-text">Host 0 (Src)</text>
+  </g>
+  <g transform="translate(665, 380)">
+    <rect width="80" height="34" rx="6" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5" />
+    <text x="40" y="22" class="host-text">Host 15 (Dst)</text>
+  </g>
+</svg>
