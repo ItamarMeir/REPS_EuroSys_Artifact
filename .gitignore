@@ -43,3 +43,8 @@ state_aware_experiments/**/runs/
 # already-tracked .cm files in the index are not affected by adding this rule.
 *.cm
 !**/validation/**/*.cm
+
+# === Private / local-only agent scratch (added) ===
+AGENTS.md
+code-review.md
+.history/
