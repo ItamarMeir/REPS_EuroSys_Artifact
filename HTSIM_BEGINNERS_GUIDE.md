@@ -134,12 +134,29 @@ graph TD
 
 ### The Core Class Hierarchy
 
+> [!NOTE]
+> `EventSource` and `PacketSink` are *capabilities*, not roles. They describe what an object can
+> do (schedule a future action / receive a packet), not what kind of network element it is. A
+> sending host, a receiving host, a switch queue, and a cable all implement one or both — see the
+> examples below each entry.
+
 1. **`EventSource`** ([`htsim/sim/eventlist.h`](./htsim/sim/eventlist.h)):
    - Base class for any simulation object that can trigger an action in the future.
    - Requires implementing `virtual void doNextEvent() = 0`.
+   - **Example**: `UecSrc` (the sending host) is an `EventSource` — at the flow's `start_time_ps`,
+     the `EventList` calls its `doNextEvent()`, which sends packets up to `_cwnd`. Queues and
+     pipes are `EventSource`s too — a `BaseQueue` schedules its own `doNextEvent()` to drain the
+     next packet once transmission delay elapses.
 2. **`PacketSink`** ([`htsim/sim/network.h`](./htsim/sim/network.h)):
    - Base interface representing any entity capable of receiving a packet.
    - Requires implementing `virtual void receivePacket(Packet& pkt) = 0`.
+   - **Example**: `UecSink` (the receiving host) is a `PacketSink` — it receives the data packet
+     and generates a `UecAckPacket` in response. But `UecSrc` is *also* a `PacketSink` (via its
+     `UecSrcPort`), since the sender has to receive the ACK packets coming back. `Pipe`,
+     `BaseQueue`, and `Switch` implement it too — anything that can be the target of
+     `pkt.sendOn()` at some hop. In `uec.h`, `UecSrcPort` and `UecSinkPort` are the concrete
+     `PacketSink` implementations for the sender's ACK-receiving side and the receiver's
+     data-receiving side, respectively — same interface, opposite roles.
 3. **`Pipe`** ([`htsim/sim/pipe.h`](./htsim/sim/pipe.h)):
    - Represents a physical cable. Inherits from both `PacketSink` (receives a packet at one end) and `EventSource` (delivers it at the other end after propagation delay).
 4. **`Queue` / `BaseQueue`** ([`htsim/sim/queue.h`](./htsim/sim/queue.h)):
@@ -159,7 +176,31 @@ graph TD
 
 In high-throughput simulations, millions of packets are created and destroyed every second. Calling standard `new` and `delete` continuously would cause severe heap fragmentation and CPU overhead.
 
-HTSIM solves this with a **memory pool / free-list** pattern called `PacketDB`:
+HTSIM solves this with a **memory pool / free-list** pattern called `PacketDB` (`htsim/sim/network.h:277`):
+
+**What a "free list" actually is**: just a `vector<P*> _freelist` member of `PacketDB` — a plain
+array of pointers to packet objects that currently aren't in use by anyone. One `PacketDB<P>` is
+instantiated per concrete packet type (`UecDataPacket`, `UecAckPacket`, etc. each get their own
+pool), so a freed `UecAckPacket` is only ever handed back out as a `UecAckPacket`.
+
+**Why `pkt->free()` beats `delete pkt`**: `delete` returns memory to the *OS allocator*, which has
+to walk its own bookkeeping structures, coalesce freed blocks, and will most likely hand back a
+completely different address next `new` — cold in cache, and the allocator's internal locking/
+bookkeeping cost is paid on every single call. `pkt->free()` instead calls `PacketDB::freePacket()`,
+which does a **reference-count decrement** (packets are shared — e.g. a packet in flight on a
+`Pipe` and referenced by a retransmit timer both hold it) and, only once the count hits zero,
+`_freelist.push_back(pkt)` — an O(1) vector append, no OS involvement, no address churn. The C++
+object itself (and its memory) is never actually freed by the OS until the simulation exits.
+
+**Why reuse beats fresh allocation**: `allocPacket()` first checks `_freelist` — if a recycled
+object is sitting there, it pops one off (`_freelist.back()` + `pop_back()`, again O(1)) and reuses
+that memory in place, only calling `new P()` the very first time the pool runs dry. Since packets
+of the same type are all `sizeof(P)` bytes, a recycled block is guaranteed to fit — no
+fragmentation is possible, because nothing of a different size is ever carved out of that pool.
+
+So "the DB" isn't a database in the SQL sense — it's a per-type object pool: a cache of
+already-allocated, currently-unused packet objects, so the simulator pays the cost of `new` once
+per type per pool-growth event instead of once per packet.
 
 ```mermaid
 graph LR
@@ -244,6 +285,23 @@ HTSIM strips networking down to the bare essentials:
 - **Flow Identity**: Flows are identified by an integer `_flow_id`.
 - **Sequence Numbers**: The transport protocol uses `_epsn` (Expected Packet Sequence Number) instead of byte-based TCP sequence numbers.
 
+> [!NOTE]
+> **What `pkt.size()` actually is — slim, not byte-accurate.** The number a `Queue` plugs into
+> `drainTime = size / bitrate` is a lightweight simulator stand-in for a real packet's wire size,
+> not a byte-for-byte reconstruction of Ethernet + IP + UDP + transport headers. For UEC
+> (`htsim/sim/uec.cpp:37-39`):
+> ```cpp
+> uint16_t UecSrc::_hdr_size = 64;          // one flat header, not a stacked real one
+> uint16_t UecSrc::_mss = 4096;
+> uint16_t UecSrc::_mtu = _mss + _hdr_size; // 4160 bytes total on the wire
+> ```
+> A full data packet's simulated size is `_mtu` (4160 B); the flow's last, partial packet uses
+> whatever backlog remains (`uec.cpp:3494-3496`, `full_pkt_size`). That value becomes `pkt.size()`
+> and is what transmission-delay math uses — so HTSIM's throughput/FCT numbers reflect a
+> simplified 64-byte flat header overhead, not the real UEC/RoCEv2 header stack's actual byte
+> count. ACKs/NACKs/pull packets are thinner still — just `_hdr_size` (64 B), no payload
+> (`uec.cpp:3680`).
+
 ---
 
 ### 2. Multi-Path Topology: 3-Tier Fat-Tree (K=4)
@@ -263,6 +321,98 @@ Below is an animated view of packets traversing multiple redundant bisection pat
 
 > [!NOTE]
 > **SRv6 Implementation Note**: The SRv6 explicit source routing mechanism and `path_rr` were implemented independently in this repository (not part of the original REPS EuroSys paper) to enable precise, hash-collision-free path testing.
+
+> [!IMPORTANT]
+> **What "hop-by-hop resolution" actually means in code**: a packet's `Route` (`route.h`) is
+> always a fully-resolved `vector<PacketSink*>` — the complete queue/pipe chain from source host
+> to destination host. `Packet::sendOn()` (`network.cpp:56`) just walks it: `_route->at(_nexthop++)`.
+> There is no lookup or hashing happening *inside* a switch at send time — switches never rewrite
+> or re-resolve a packet's route hop-by-hop.
+>
+> So real ECMP hashing is not literally simulated hop-by-hop. Instead, the topology builder
+> (`FatTreeTopology::get_bidir_paths()`, `fat_tree_topology.cpp:1216`) precomputes **every**
+> distinct full physical `Route` between a given src/dst pair up front (one per Agg/Core
+> combination). At send time, `nextEntropy()` picks an Entropy Value, and that EV selects *which*
+> of those precomputed full Routes gets attached to the packet (`pkt.set_route(...)`) — mimicking
+> what a real switch's ECMP hash of `(src, dst, ev)` would land on, but computed **once, at the
+> sender**, instead of independently re-hashed at each switch along the way.
+>
+> Under this lens, ECMP and SRv6/`path_rr` are mechanically almost identical in HTSIM: both attach
+> one fully-populated `Route*` chosen from a precomputed candidate list before the packet is sent.
+> They differ only in *selection policy* — ECMP's EV comes from REPS/FREEZING's
+> random/recycled-entropy state (Part 8), while SRv6/`path_rr` picks deterministically
+> (`ev % paths.size()`, round-robin). The "Switch Behavior" column above describes what a real
+> ECMP switch does conceptually, not a literal per-hop operation in this codebase.
+
+---
+
+### 4. UEC Packet Structure — What's Actually Inside
+
+There's no byte-serialized wire format here — a "packet" is just a C++ object (`htsim/sim/uecpacket.h`)
+whose member fields stand in for header fields, and whose `_size` (set at construction, see Part 5 §1's
+note above) is what `Queue`/`Pipe` use for transmission/propagation math. Nothing is ever packed into
+an actual byte buffer. Class hierarchy: `Packet` → `UecBasePacket` → `{UecDataPacket, UecAckPacket,
+UecNackPacket, UecPullPacket}` (`UecRtsPacket` further extends `UecDataPacket`).
+
+**`UecDataPacket`** (`uecpacket.h:36`) — the flow's payload carrier, size = `_mtu` (4160 B) or less for
+the flow's final packet:
+
+```text
+┌─────────────────────────────── UecDataPacket ────────────────────────────────┐
+│ Inherited from Packet (network.h):                                            │
+│   _flow_id      flowid_t     which flow this belongs to                       │
+│   _size         uint16_t     simulated wire size (drives drainTime = size/BW) │
+│   _pathid       uint32_t     Entropy Value (EV) used for this hop's ECMP hash │
+│   _flags        uint32_t     ECN_CE / ECN_CA marks, set by a congested Queue  │
+│   _route        Route*       pointer to the hop-by-hop PacketSink* chain      │
+│   _dst          uint32_t     destination host id (plain integer, no IP)       │
+│                                                                                 │
+│ Inherited from UecBasePacket:                                                 │
+│   _eqsrcid/_eqtgtid  uint16_t   vestigial — always set 0, never read (dead)   │
+│                                                                                 │
+│ UecDataPacket-specific:                                                       │
+│   _epsn          seq_t (u64)  Expected Packet Sequence Number (not byte-based)│
+│   _packet_type   enum         DATA_PULL / DATA_SPEC / DATA_RTX                │
+│   _pull_target   pull_quanta  receiver-driven credit target                  │
+│   _syn/_fin/_ar  bool         flow start/end/ACK-request flags                │
+│   _trim_hop      int32_t      hop at which this packet got trimmed (if any)   │
+│   _trim_direction packet_direction                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+       ├── header portion (_hdr_size = 64 B, flat, not a real stacked header) ──┤
+       └────────────── payload portion (up to _mss = 4096 B) ──────────────────┘
+```
+
+**`UecAckPacket`** (`uecpacket.h:188`) — feedback carrier, fixed size = `ACKSIZE` (64 B, header only,
+**no payload at all**):
+
+```text
+┌──────────────────────────────── UecAckPacket ─────────────────────────────────┐
+│ Inherited from Packet: _flow_id, _size(=64), _pathid, _flags, _route, _dst    │
+│                                                                                 │
+│ UecAckPacket-specific:                                                        │
+│   _cumulative_ack  seq_t     highest in-order packet received                 │
+│   _ref_ack         seq_t     base sequence number of the SACK bitmap          │
+│   _acked_psn       seq_t     PSN of the data packet that triggered this ACK   │
+│   _sack_bitmap     uint64_t  which of the next 64 packets arrived OOO         │
+│   _ev              uint16_t  path id of the data packet being acked           │
+│   _ecn_echo        bool      "the data packet that triggered me was ECN-marked"│
+│   _recvd_bytes     uint64_t  receiver's running received-byte counter         │
+│   _rcv_cwnd_pen    uint8_t   receive-window congestion penalty                │
+│   _out_of_order_count uint32_t                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key takeaways**:
+- Only `UecDataPacket` has a real payload; every other UEC packet type (`UecAckPacket`,
+  `UecNackPacket`, `UecPullPacket`) is exactly `ACKSIZE` = 64 B — header-only, matching a real
+  UEC/RoCEv2 ACK's small on-wire footprint without simulating its actual bit layout.
+- `_flags` is where the ECN dance from Part 8 lives — a `Queue` sets `ECN_CE` on this
+  field, `UecSink` reads it back out as `ecn`, and it gets echoed into `UecAckPacket::_ecn_echo`
+  for the return trip. By default this real bit reaches both LB and CC ungated; only
+  `-state_aware_ecn` (our extension) gates what the CC sees (Part 8).
+- `_pathid` is the field the whole REPS/FREEZING load-balancing story (Part 8) revolves around —
+  it's the packet's Entropy Value, read and rewritten every hop for ECMP hashing, or used directly
+  as a path index under SRv6/`path_rr` (§3 above).
 
 ---
 
@@ -374,16 +524,66 @@ graph TD
 
     ACK["<b>Incoming ACK Packet</b><br/>(Carries ECN Echo, SACK, RTT)"]:::ack
     
-    LB["<b>Load Balancer (REPS)</b><br/>Solves Spatial Collisions<br/>(Evicts congested path EV)"]:::lb
+    LB["<b>Load Balancer (REPS-family)</b><br/>Solves Spatial Collisions"]:::lb
     CC["<b>Congestion Controller (NSCC)</b><br/>Solves Temporal Overload<br/>(Adjusts cwnd based on rate/ECN)"]:::cc
 
     ACK -->|"Feeds Real ECN"| LB
-    ACK -->|"Feeds Gated ECN"| CC
+    ACK -->|"Feeds Real ECN (default) / Gated ECN (state-aware)"| CC
 ```
+
+> [!IMPORTANT]
+> **ECN gating to the CC is NOT original REPS/htsim behavior — it's this repo's own
+> `-state_aware_ecn` extension**, off by default. Verified at `uec.cpp:94,1495-1515`:
+> ```cpp
+> bool UecSrc::_state_aware_ecn_enabled = false;   // uec.cpp:94, default off
+> ...
+> bool cc_ecn_view = pkt.ecn_echo();                // uec.cpp:1495 — real ECN, unconditional
+> if (_state_aware_ecn_enabled) {
+>     cc_ecn_view = pkt.ecn_echo() && _network_is_asymmetric;  // uec.cpp:1501 — gate only here
+> }
+> (this->*updateCwndOnAck)(cc_ecn_view, delay, newly_recvd_bytes);  // uec.cpp:1515
+> ```
+> In the **default/original path** the CC (NSCC) sees the exact same real, ungated ECN bit as
+> the LB — no gating at all. Gating only kicks in when `-state_aware_ecn` is passed, at which
+> point the CC ignores ECN unless the sender's `_network_is_asymmetric` flag is set (see the
+> "State-Aware NSCC + REPS extension" section of `CLAUDE.md` / Part 13's comparison matrix).
+> `htsim/README.md`'s own list of REPS-paper changes to `uec.cpp` mentions LB/CC interaction and
+> logging, not ECN gating — confirming this is our repo's addition, not upstream REPS's.
+
+> [!NOTE]
+> HTSIM ships **two** REPS-family load-balancing algorithms, selected via `-load_balancing_algo`:
+> `freezing` (paper-accurate, bounded 8-slot buffer) and plain `reps` (a thinner, unbounded
+> sibling, retained mostly for archaeology). They are described separately below — "REPS" the
+> paper concept is not one single code path.
 
 ---
 
-### The REPS / FREEZING 8-Slot Circular Buffer
+### How a Load-Balancing Algorithm Gets Wired Up: `_dispatchLB`
+
+Every `UecSrc` picks its load-balancing behavior once, at setup, through a pair of **function
+pointers**: `nextEntropy` (called when a packet is about to be sent — returns the EV to use)
+and `processEv` (called on every ACK/NACK/timeout feedback event — updates LB state). Both are
+assigned by `UecSrc::_dispatchLB(LoadBalancing_Algo lb)` (`htsim/sim/uec.cpp:223`), a big
+`if`/`else if` chain — e.g. the REPS branch is just:
+
+```cpp
+} else if (lb == REPS){
+    nextEntropy = &UecSrc::nextEntropy_REPS;
+    processEv = &UecSrc::processEv_REPS;
+    _crt_path = 0;
+}
+```
+
+`_dispatchLB` is called from two places: once in the `UecSrc` constructor (`uec.cpp:839`,
+using the global `-load_balancing_algo`), and again from `applyHostLBOverride()`
+(`uec.cpp:195-199`) for the `-host_lb_overrides` feature, which lets individual hosts run a
+different algorithm than the rest of the simulation. The subsections below just describe what
+`nextEntropy_*` and `processEv_*` do for each algorithm — keep in mind they're always reached
+through this same pair of function pointers, never called directly by name.
+
+---
+
+### The FREEZING Variant (paper-accurate REPS, `-load_balancing_algo freezing`)
 
 The core REPS algorithm (`-load_balancing_algo freezing`) maintains a small bounded buffer of active Entropy Values (default 8 slots):
 
@@ -391,7 +591,54 @@ The core REPS algorithm (`-load_balancing_algo freezing`) maintains a small boun
 
 1. **Clean ACK**: The path has no queue buildup. The EV is recycled to the tail of the buffer to continue using this good path.
 2. **ECN-Marked ACK**: A switch along this path is congested. The EV is immediately **evicted**, and a brand new random EV is drawn to explore an alternate path.
-3. **Entropy Lifetime Bounding (`-reps_entropy_lifetime`)**: In the extended REPS implementation, an EV is forcefully refreshed after $N$ uses to prevent permanent path lock-in when network state shifts.
+3. **Entropy Lifetime Bounding (`repsMaxLifetimeEntropy`)**: In the extended REPS implementation, an EV is forcefully refreshed after $N$ uses to prevent permanent path lock-in when network state shifts (Note: currently gated off in code and lacks a CLI flag).
+
+---
+
+### The Plain REPS Variant (`-load_balancing_algo reps`) — a Thinner, Unbounded Sibling
+
+Instead of a fixed-size buffer, plain REPS keeps a single `list<uint16_t> _next_pathid`
+(`uec.h:899`) — an unbounded recycle pool. The invariant is simple: **one pop per packet sent,
+one push per cleanly-ACKed packet**, so any EV is at all times in exactly one of {in flight,
+sitting in `_next_pathid`}.
+
+- **`nextEntropy_REPS()`** (`uec.cpp:3032-3061`) pops the front of `_next_pathid` when a
+  packet needs an EV; if the pool is empty it falls back to `random() % _no_of_paths`. At flow
+  start, while `_mss * _highest_sent < min(_cwnd, _mss * _no_of_paths)`, it instead
+  round-robins `_crt_path` through every path once (a first-window sweep) before recycling
+  kicks in. Note the sibling implementation in `EqdsSrc::nextEntropy()` (`eqds.cpp:1220`) uses
+  `max(_maxwnd, allpathssizes)` for the equivalent condition — the two REPS-family
+  implementations in this codebase sweep the initial entropy space differently.
+- **`processEv_REPS()`** (`uec.cpp:2948-2970`) only has a branch for `feedback == PATH_GOOD`
+  — a clean ACK pushes the EV to the back of `_next_pathid`. ECN-marked ACKs and NACKs are
+  still routed to this same function (every feedback event goes through the `processEv`
+  function pointer, e.g. `uec.cpp:1554` for ECN, `uec.cpp:2604` for NACK), but since there's
+  no `else` branch, they're a no-op: the EV is neither evicted nor penalized, it simply isn't
+  re-queued this round.
+- **RTO/timeout**: `hashmap_entropy` (`uec.h:437`, one entry per packet sent, written at
+  `uec.cpp:3560`/`3636`) is only ever read inside the `BITMAP || MIXED` branch of
+  `rtxTimerExpired` (`uec.cpp:3920-3922`) to feed a `PATH_TIMEOUT` event. Plain REPS has no
+  `PATH_TIMEOUT` handling at all, so a timed-out EV already queued in `_next_pathid` from an
+  earlier good ACK is not removed and can be redrawn immediately.
+- **`sendRTS()`** (`uec.cpp:3663-3689`, the pull-request control packet sent on stall) draws
+  an EV through the same `nextEntropy` pointer and advances `_highest_sent` — but an RTS never
+  produces a matching `processEv` call, so it's a pure draw against the recycle pool with no
+  return path.
+- `uec.h:900` also declares `list<uint16_t> _knowngood_pathid` — present in the class but not
+  referenced anywhere else in the tree.
+
+| | FREEZING (`freezing`) | Plain REPS (`reps`) |
+|---|---|---|
+| Structure | Bounded 8-slot `CircularBufferREPS` | Unbounded `list<uint16_t>` (`_next_pathid`) |
+| On clean ACK | Recycled to buffer tail | Pushed to `_next_pathid` |
+| On ECN | EV evicted, frozen-mode gating | No-op — EV simply not re-queued |
+| On RTO | Buffer-level freeze/cycle | No effect — `_next_pathid` untouched |
+| Recommended use | Paper-comparable / state-aware work | Retained for archaeology (see CLAUDE.md) |
+
+Flow reuse under `-connections_mapping` persists FREEZING's `circular_buffer_reps` and several
+other per-connection fields across reused flows via the `ConnectionInfo` struct (`uec.h:39-49`)
+— but `_next_pathid` is not one of the persisted fields. So a reused flow under plain REPS
+always starts with an empty recycle pool, regardless of `-connections_mapping`.
 
 ---
 
@@ -595,6 +842,54 @@ void UecSrc::updateCwndOnAck_NSCC(const UecAckPacket& pkt, bool ecn) {
 
 ---
 
+### Code Snippet 5: The REPS Recycle Pool — `nextEntropy_REPS` / `processEv_REPS` in [`uec.cpp`](./htsim/sim/uec.cpp)
+This pair of functions (assigned as the `nextEntropy`/`processEv` function pointers by `_dispatchLB` for `-load_balancing_algo reps`) implements plain REPS's pop-on-send, push-on-good-ack recycling:
+
+```cpp
+uint16_t UecSrc::nextEntropy_REPS(){
+    uint64_t allpathssizes = _mss * _no_of_paths;
+    if (_mss * _highest_sent < min((uint64_t)_cwnd, allpathssizes)) {
+        // 1. First-window sweep: round-robin every path once before recycling starts
+        _crt_path++;
+        if (_crt_path == _no_of_paths) {
+            _crt_path = 0;
+        }
+        // ...
+    } else {
+        if (_next_pathid.empty()) {
+            // 2. Pool empty: fall back to a random EV
+            assert(_no_of_paths > 0);
+            _crt_path = random() % _no_of_paths;
+            // ...
+        } else {
+            // 3. Pop the front of the recycle pool
+            _crt_path = _next_pathid.front();
+            _next_pathid.pop_front();
+            // ...
+        }
+    }
+    return _crt_path;
+}
+
+void UecSrc::processEv_REPS(uint16_t path_id, PathFeedback feedback) {
+    // ... (state-aware auto-exit block, gated by -state_aware_ecn, omitted here)
+
+    if (feedback == PATH_GOOD){
+        // 4. Only PATH_GOOD pushes — there is no else branch
+        _next_pathid.push_back(path_id);
+        // ...
+    }
+    // PATH_ECN / PATH_NACK reach this function via the same processEv pointer
+    // (uec.cpp:1554, uec.cpp:2604) but fall through with no effect.
+}
+```
+
+**Why this matters**: line 4 is the crux of the FREEZING-vs-REPS behavioral gap described in
+Part 8 — plain REPS's state machine has no reaction to congestion or loss signals beyond
+simply not re-queuing the EV that just carried a clean ACK.
+
+---
+
 ## Part 11: Practical Developer Guide & Adding New Features
 
 ### 1. Developing using Docker (Highly Recommended)
@@ -693,14 +988,14 @@ Flow 1 finished at 92100000 ps, FCT 91100000 ps (91.1 us)
 | **Load Balancing** | `-load_balancing_algo ecmp` | Static flow hashing (all packets of flow take 1 path) | Base Simulator |
 | | `-load_balancing_algo random` | Per-packet uniform random entropy | Base Simulator |
 | | `-load_balancing_algo freezing` | REPS paper bounded circular buffer (8-slot EV recycling) | REPS Paper |
+| | `-load_balancing_algo reps` | Plain unbounded REPS (`_next_pathid` list) — thinner sibling of `freezing`, no ECN/RTO reaction, retained for archaeology (see Part 8) | Base Simulator |
 | | `-load_balancing_algo path_rr` | True round-robin over distinct physical paths (SRv6-based) | Our Repo |
 | | `-load_balancing_algo path_random`| Random path selection over pre-computed physical routes | Our Repo |
 | | `-load_balancing_algo path_static`| Pinned physical path per flow | Our Repo |
 | **Routing Substrate** | `-use_srv6` | Source-routed SRv6 uSID path selection (bypasses switch ECMP) | Our Repo |
 | **State-Aware Extensions** | `-state_aware_ecn` | Gated CC response: ignores ECN on symmetric networks | Our Repo |
-| | `-smart_filter_mode <1-3>` | Multi-mode ECN filter (drop-all, drop-single, drop-periodic)| Our Repo |
+| | `-smart_filter_mode <none|md_gain|rtt_blend_ecn_thresh>` | Multi-mode ECN filter (None, MD-gain, RTT-blend)| Our Repo |
 | | `-wtd_in_nscc` | Waiting-Time Drop rate adjustments in NSCC | Our Repo |
-| | `-reps_entropy_lifetime <N>`| Maximum packet usage before an EV is forcefully refreshed | Our Repo |
 | **Fabric Type** | `LosslessQueue` | Priority Flow Control (PFC pause frames on `_high_threshold`) | Base Simulator |
 
 ---
@@ -711,6 +1006,7 @@ Flow 1 finished at 92100000 ps, FCT 91100000 ps (91.1 us)
 3. **Never `sleep()`**: Never use system sleep or wall-clock timers in simulation code; always schedule an `EventSource` with `eventlist.sourceIsPending(...)`.
 4. **Memory Management**: Packets are constantly allocated and freed. Always call `pkt->free()` instead of `delete pkt` to return objects to `PacketDB`.
 5. **Mutually Exclusive Flags**: `-state_aware_ecn`, `-smart_filter_mode`, and `-wtd_in_nscc` are mutually exclusive. Enabling more than one at a time will cause a runtime assertion failure.
+6. **Prefer `freezing` over `reps`**: for any paper-comparable or state-aware work, use `-load_balancing_algo freezing`. Plain `reps` (see Part 8) has no ECN or RTO reaction at all — it's kept around mainly for historical comparison, not as a tuning option.
 
 ---
 

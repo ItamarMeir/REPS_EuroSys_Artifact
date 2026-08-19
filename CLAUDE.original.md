@@ -1,50 +1,61 @@
+# CLAUDE.original.md — uncompressed source of truth for CLAUDE.md
+
+This is the full, human-readable, uncompressed version of the project guide. **This file is
+not auto-loaded as context** (its name doesn't match `CLAUDE.md`). `CLAUDE.md` is the
+compressed (`/caveman-compress`) version actually loaded into agent context.
+
+**Workflow for future agents:** when adding/editing project guidance, edit *this* file first,
+then regenerate `CLAUDE.md` by running `/caveman-compress CLAUDE.original.md` (or manually
+compressing this file's prose into `CLAUDE.md`, preserving all code blocks/tables/paths
+exactly). Never hand-edit `CLAUDE.md` directly — edits there get overwritten on the next
+regeneration and drift from this source.
+
+---
+
 # CLAUDE.md — Project guide for Claude Code agents
 
-> **Maintainer note:** `CLAUDE.original.md` is uncompressed source of truth. Edit that
-> file, not this one — this file regenerated from it via `/caveman-compress`.
-
-First-read doc for any Claude Code session in this repo. What built, where things live, what gotchas are. No rediscover from scratch.
+This file is the first-read document for any Claude Code session in this repo. It captures what has been built, where everything lives, and what the gotchas are, so you don't have to rediscover them from scratch.
 
 ---
 
 ## What this repo is
 
-**REPS EuroSys artifact** — research simulator plus analysis code for paper "REPS: Recycled Entropy Packet Spraying for Adaptive Load Balancing and Failure Mitigation". Simulator is `htsim`, extended with REPS.
+This is the **REPS EuroSys artifact** — a research simulator plus analysis code for the paper "REPS: Recycled Entropy Packet Spraying for Adaptive Load Balancing and Failure Mitigation". The simulator is `htsim`, extended with REPS.
 
-On top of paper artifact we built several independent extensions, all gated behind CLI flags, all live in `htsim/sim/`:
+On top of the paper artifact we built several independent extensions, all gated behind CLI flags and living entirely in `htsim/sim/`:
 1. **State-aware NSCC + REPS** (`-state_aware_ecn`) — binary ECN gate driven by REPS freeze/unfreeze events + dynamic link-failure machinery. Experiments: exp01–03.
 2. **Smart filter** (`-smart_filter_mode`) — continuous, evidence-based dampening of NSCC's MD step using REPS buffer saturation. Mutually exclusive with state-aware. Experiments: exp06.
 3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
-4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline vs entropy-spray algorithms.
+4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
 
-Experiments for both live in `state_aware_experiments/`.
+The experiments for both live in `state_aware_experiments/`.
 
 ---
 
 ## Base artifact: setup, build, run, test
 
-Python env (from repo root, clean venv):
+Python env (from repo root, in a clean venv):
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ./reps_pkg_install.sh
 ```
 
-Full clean rebuild of `htsim` (same as `## Building` below, but from clean):
+Full clean rebuild of `htsim` (equivalent to the `## Building` section below, but from clean):
 ```bash
 cd htsim/sim
 make clean && cd datacenter/ && make clean && cd ..
 make -j 8 && cd datacenter/ && make -j 8 && cd ..
 ```
 
-Reproduce paper figures (from `artifact_scripts/`, run after building `htsim_uec`):
+Reproducing the paper's figures (from `artifact_scripts/`, run after building `htsim_uec`):
 ```bash
 cd artifact_scripts
 ./reps_quick.sh    # <2h, Figures 1,3,5,6,8,9,10,11,12,13,14
 ./reps_medium.sh   # ~4-6h, adds Figure 2
 ./reps_full.sh     # ~10h+, all figures
 ```
-Or run single figure's Python script direct (e.g. `python fig_1_symmetric_micro.py`). Results land in `artifact_results/<experiment>/`. **Never modify `artifact_scripts/` or `artifact_results/`** — paper's original, unmodified artifact.
+Or run a single figure's Python script directly (e.g. `python fig_1_symmetric_micro.py`). Results land in `artifact_results/<experiment>/`. **Never modify `artifact_scripts/` or `artifact_results/`** — they are the paper's original, unmodified artifact.
 
 `traffic_gen/` unit tests (connection-matrix generator, independent of `htsim`):
 ```bash
@@ -53,15 +64,15 @@ python -m unittest test_traffic_gen_utils.py
 python -m unittest test_custom_random_number_generator.py
 ```
 
-No test suite for `htsim/sim/` itself or `state_aware_experiments/` — correctness validated by running experiments and inspecting output (grep for `enable on tor downlink 1`, event-count sanity checks, etc. — see `state_aware_experiments/RUNNING_EXPERIMENTS.md`).
+There is no test suite for `htsim/sim/` itself or for `state_aware_experiments/` — correctness there is validated by running experiments and inspecting output (grep for `enable on tor downlink 1`, event-count sanity checks, etc. — see `state_aware_experiments/RUNNING_EXPERIMENTS.md`).
 
 ---
 
 ## Docker environment
 
-`Dockerfile` (repo root) builds self-contained Ubuntu 22.04 image with C++17 toolchain,
-`libgraphviz-dev`, Python 3 + `requirements.txt`, prebuilt `htsim_uec`. Prefer over
-ad-hoc host setup when host environment unknown/dirty.
+A `Dockerfile` (repo root) builds a self-contained Ubuntu 22.04 image with the C++17 toolchain,
+`libgraphviz-dev`, Python 3 + `requirements.txt`, and a pre-built `htsim_uec`. Prefer this over
+ad-hoc host setup when the host environment is unknown/dirty.
 
 ```bash
 docker build -t reps-artifact .
@@ -69,28 +80,28 @@ docker run -it --rm reps-artifact                              # self-contained,
 docker run -it --rm -v "$(pwd):/workspace" reps-artifact        # live bind-mount for editing from the host
 ```
 
-**Gotcha:** bind-mount overlays host's `htsim/sim` build artifacts (`.o` files, `htsim_uec`)
-on top of image's. If those built on host (different glibc/libstdc++), container
-fails to run them with `GLIBCXX_*`/`GLIBC_*` "version not found" error. Always rebuild inside
-container after mounting:
+**Gotcha:** bind-mounting overlays the host's `htsim/sim` build artifacts (`.o` files, `htsim_uec`)
+on top of the image's. If those were built on the host (different glibc/libstdc++), the container
+will fail to run them with a `GLIBCXX_*`/`GLIBC_*` "version not found" error. Always rebuild inside
+the container after mounting:
 ```bash
 cd htsim/sim && make clean && cd datacenter && make clean && cd .. \
   && make -j$(nproc) && cd datacenter && make -j$(nproc)
 ```
-`.o`/binary files gitignored, so this never touches tracked files. Full instructions: README.md
+`.o`/binary files are gitignored, so this never touches tracked files. Full instructions: README.md
 §"Running in Docker".
 
 ### docker-compose
 
-`docker-compose.yml` (repo root) wraps bind-mount workflow above into single service
+`docker-compose.yml` (repo root) wraps the bind-mount workflow above into a single service
 (`reps-artifact-dev`, image `reps-artifact`, `.` mounted at `/workspace`):
 ```bash
 docker compose build
 docker compose run --rm reps-artifact-dev
 ```
-Same rebuild-after-mount gotcha — rebuild `htsim/sim` inside container before running
-anything. `docker exec -it reps-artifact-dev bash` opens second shell into already-running
-container. Verified end-to-end (build, compose run, in-container rebuild, single-flow sim on
+Same rebuild-after-mount gotcha applies — rebuild `htsim/sim` inside the container before running
+anything. `docker exec -it reps-artifact-dev bash` opens a second shell into an already-running
+container. Verified end-to-end (build → compose run → in-container rebuild → single-flow sim on
 `fat_tree_16_1os_3t_400g.topo`) on 2026-08-13.
 
 ---
@@ -131,7 +142,7 @@ cd ../../..
 test -x htsim/sim/datacenter/htsim_uec || echo "BUILD FAILED"
 ```
 
-Binary is `htsim/sim/datacenter/htsim_uec`. Build warnings safe to ignore.
+The binary is `htsim/sim/datacenter/htsim_uec`. Warnings during build are safe to ignore.
 
 ---
 
@@ -139,19 +150,19 @@ Binary is `htsim/sim/datacenter/htsim_uec`. Build warnings safe to ignore.
 
 ### What it does
 
-Every incoming ACK carries ECN bit. Architecture splits how bit consumed:
+Every incoming ACK carries an ECN bit. The architecture splits how that bit is consumed:
 
-- **Load Balancer (REPS or FREEZING)** — always sees real ECN bit. ECN-marked ACKs rotate out EV naturally.
-- **Congestion Controller (NSCC)** — sees *gated* ECN bit. CC honors ECN only when sender's internal flag `_network_is_asymmetric` set. Else CC sees ECN=0, holds rate, lets LB handle spatial collisions.
+- **Load Balancer (REPS or FREEZING)** — always sees the real ECN bit. ECN-marked ACKs rotate out the EV naturally.
+- **Congestion Controller (NSCC)** — sees a *gated* ECN bit. The CC honors ECN only when the sender's internal flag `_network_is_asymmetric` is set. Otherwise the CC sees ECN=0, holds rate, and lets the LB handle spatial collisions.
 
-`_network_is_asymmetric` flag set organically when LB enters frozen mode (triggered by RTO, which fires when link failure kills ACKs), cleared when LB exits frozen mode. No control-plane broadcast needed.
+The `_network_is_asymmetric` flag is set organically when the LB enters frozen mode (triggered by RTO, which fires when a link failure kills ACKs), and cleared when the LB exits frozen mode. No control-plane broadcast required.
 
 ### CLI flags added
 
 | Flag | Effect |
 |---|---|
 | `-state_aware_ecn` | Master toggle (off by default). Enables CC gate + asymmetric-flag wiring. Forces `repsUseFreezing = true`. |
-| `-disable_tor_ecn` | Enables leaf exception (`force_disable_tor_ecn = true`). **Required whenever `-sender_cc_only` also passed.** |
+| `-disable_tor_ecn` | Enables leaf exception (`force_disable_tor_ecn = true`). **Required whenever `-sender_cc_only` is also passed.** |
 | `-fail_link_time <fail_us> <recover_us>` | Schedules dynamic Agg↔Core pipe failure and recovery. |
 | `-fail_link_target <agg> <core>` | Repeatable. Selects which Agg↔Core link(s) to fail. |
 | `-log_reps_state <file>` + `-log_reps_state_src <id>` | Per-ACK CSV diagnostic log. |
@@ -177,24 +188,24 @@ Every incoming ACK carries ECN bit. Architecture splits how bit consumed:
 
 **Always use `-load_balancing_algo freezing` (= paper-REPS, 8-slot bounded buffer)** for any paper-comparable or state-aware work.
 
-`-load_balancing_algo reps` is code-only simpler variant (unbounded `_next_pathid` list). Kept for archaeology. Buffer instrumentation column to track: `fresh` (FREEZING) vs `recycle` (REPS).
+`-load_balancing_algo reps` is a code-only simpler variant (unbounded `_next_pathid` list). It's retained for archaeology. The buffer instrumentation column to track is `fresh` (FREEZING) vs `recycle` (REPS).
 
 ---
 
 ## The critical `-disable_tor_ecn` gotcha
 
-**Burned us once, will burn you again if you forget.**
+**This has burned us once and will burn you again if you forget.**
 
 At `main_uec.cpp:739`:
 ```cpp
 bool ecn_on_tor_dl = !receiver_driven && !force_disable_tor_ecn;
 ```
 
-`-sender_cc_only` sets `receiver_driven = false`. Without `-disable_tor_ecn`, this **re-enables ECN on ToR downlinks**, flooding mice flows with spurious CE marks and inflating FCTs. Leaf exception needs `force_disable_tor_ecn = true`, set only by `-disable_tor_ecn`.
+Passing `-sender_cc_only` sets `receiver_driven = false`. Without `-disable_tor_ecn`, this **re-enables ECN on ToR downlinks**, flooding mice flows with spurious CE marks and inflating FCTs. The leaf exception requires `force_disable_tor_ecn = true`, which is set only by `-disable_tor_ecn`.
 
-**Rule:** any command with `-sender_cc_only` MUST also include `-disable_tor_ecn`.
+**Rule:** any command that includes `-sender_cc_only` MUST also include `-disable_tor_ecn`.
 
-Detect bug in output: grep for `enable on tor downlink 1` in simulator stdout. See it, you forgot flag.
+How to detect the bug in output: grep for `enable on tor downlink 1` in the simulator stdout. If you see it, you forgot the flag.
 
 ---
 
@@ -209,7 +220,7 @@ EV set not predictive of ECN (`corr(recycle, ECN) ≈ 0`) → triggered switch t
 
 Raw outputs lost; findings in `exp02_lb_dynamics_freezing_v2/README.md`. Key finding:
 `fresh = 0 ⇒ P(next ACK ECN-marked) ≈ 1.0` in every workload — bounded 8-slot buffer emptiness
-is near-deterministic congestion signal. Motivated v4 future idea (gate CC on `fresh ≤ 1`).
+is a near-deterministic congestion signal. Motivated v4 future idea (gate CC on `fresh ≤ 1`).
 
 ### exp03 — Matrix sweep (primary result, full artifacts preserved)
 
@@ -217,7 +228,7 @@ is near-deterministic congestion signal. Motivated v4 future idea (gate CC on `f
 - **Full artifacts**: 16 plots, 2 CSVs (~44k flow rows, 200 event rows), 3 scripts, `runs.tar.gz`.
 - All in `state_aware_experiments/exp03_matrix_sweep_v3/`.
 
-**Headline**: once `-disable_tor_ecn` correctly in place, state-aware mode FCT impact on synthetic workloads is **small**. Strongest signal: incast p99 improves ~14 μs in healthy composite. Architecture wires correctly (SA flag flips exactly equal FREEZING entries; zero false positives in 40 healthy-state runs), but FCT win narrow.
+**Headline**: once `-disable_tor_ecn` is correctly in place, state-aware mode's FCT impact on synthetic workloads is **small**. Strongest signal: incast p99 improves ~14 μs in healthy composite. The architecture wires correctly (SA flag flips exactly equal FREEZING entries; zero false positives in 40 healthy-state runs), but the FCT win is narrow.
 
 **Event-count validation** (state-aware wiring correctness check):
 - `SA asymmetric-flag flips == SA FREEZING_starts` at every single cell.
@@ -228,25 +239,25 @@ is near-deterministic congestion signal. Motivated v4 future idea (gate CC on `f
 ## Future directions (not implemented)
 
 1. **v4 buffer-fill gate**: change CC ECN-masking from `cc_ecn = ecn && asymmetric` to `cc_ecn = ecn && (asymmetric || fresh ≤ 1)`. One-line change at `uec.cpp:~1209`. Justified by exp02's `fresh=0 ⇒ P(ECN)≈1.0` finding.
-2. **Long-failure stress**: all experiments use 150 μs failure window (50→200 μs). 1-10 ms window would exercise freeze-expiry / auto-thaw path, currently never reached.
-3. **Real-CDF workloads**: Datamining/Hadoop/Websearch CDFs (used in paper) instead of synthetic permutations.
+2. **Long-failure stress**: all experiments use a 150 μs failure window (50→200 μs). A 1-10 ms window would exercise the freeze-expiry / auto-thaw path, which is currently never reached.
+3. **Real-CDF workloads**: Datamining/Hadoop/Websearch CDFs (used in the paper) instead of synthetic permutations.
 4. **Topology sweep**: extend exp03 to k=8 2-tier and 1024-host 3-tier topologies.
-5. **EV-lifetime sweep**: implement buffer-cache idea via `-reps_lifetime N`, re-run exp02-style instrumentation. Mechanism already exists (`repsMaxLifetimeEntropy`) but gated off. See project memory `reps_buffer_cache_idea.md`.
+5. **EV-lifetime sweep**: implement the buffer-cache idea via `-reps_lifetime N` and re-run exp02-style instrumentation. The mechanism already exists (`repsMaxLifetimeEntropy`) but is gated off. See project memory `reps_buffer_cache_idea.md`.
 
 ---
 
 ## How to run a new experiment
 
-Full recipe in `state_aware_experiments/RUNNING_EXPERIMENTS.md`. Short version:
+The full recipe is in `state_aware_experiments/RUNNING_EXPERIMENTS.md`. Short version:
 
 1. Create `state_aware_experiments/expNN_short_name/` with subdirs `plots/`, `data/`, `scripts/`.
-2. Write bash driver that iterates design matrix, is idempotent, always passes `-disable_tor_ecn`.
-3. Write Python aggregator that outputs tidy CSV (columns: `workload`, `mode`, `sev`, `seed`, `flow_id`, `fct_us`, `size`, `flow_class`).
-4. Write Python plotter emitting PNGs to `plots/` with 95% CI error bars (t-distribution, not naive ±SE).
+2. Write a bash driver that iterates the design matrix, is idempotent, and always passes `-disable_tor_ecn`.
+3. Write a Python aggregator that outputs a tidy CSV (columns: `workload`, `mode`, `sev`, `seed`, `flow_id`, `fct_us`, `size`, `flow_class`).
+4. Write a Python plotter that emits PNGs to `plots/` with 95% CI error bars (t-distribution, not naive ±SE).
 5. Compress runs: `tar -czf expNN/runs.tar.gz -C expNN/runs . && rm -rf expNN/runs/`.
 6. Write `README.md` with required sections; use relative image paths (`plots/foo.png`, never `/tmp/`).
-7. Add row to `state_aware_experiments/README.md` lineage table.
-8. Run quick checklist from `RUNNING_EXPERIMENTS.md § 11`.
+7. Add a row to `state_aware_experiments/README.md` lineage table.
+8. Run the quick checklist from `RUNNING_EXPERIMENTS.md § 11`.
 
 ---
 
@@ -254,48 +265,50 @@ Full recipe in `state_aware_experiments/RUNNING_EXPERIMENTS.md`. Short version:
 
 | Pitfall | Symptom | Fix |
 |---|---|---|
-| Forgot `-disable_tor_ecn` | Mice FCT inflated; `enable on tor downlink 1` in stdout | Add flag; re-run |
-| `df.mode` in pandas | Returns dtype, not column | Use `df["mode"]` |
+| Forgot `-disable_tor_ecn` | Mice FCT inflated; `enable on tor downlink 1` in stdout | Add the flag; re-run |
+| `df.mode` in pandas | Returns dtype, not the column | Use `df["mode"]` |
 | Hardcoded `/tmp/` paths in scripts | Works locally, breaks on re-run | Resolve from `__file__` / `${BASH_SOURCE[0]}` |
-| Forgot `-sender_cc_algo nscc` | Mysteriously slow flows | Default sender CC not NSCC |
+| Forgot `-sender_cc_algo nscc` | Mysteriously slow flows | Default sender CC isn't NSCC |
 | Used `-load_balancing_algo reps` for state-aware | `fresh` column stuck at 0 | Use `freezing` (= paper-REPS) |
-| Single seed, claiming trend | Differences vanish on rerun | Sweep ≥ 3–5 seeds, plot 95% CI |
+| Single seed, claiming a trend | Differences vanish on rerun | Sweep ≥ 3–5 seeds, plot 95% CI |
 | Committed raw `runs/` dir | Repo bloat (200+ files, 45 MB) | Compress to `runs.tar.gz` first |
-| Modifying `artifact_scripts/` or `artifact_results/` | Corrupts paper's original artifact | Leave those dirs alone |
+| Modifying `artifact_scripts/` or `artifact_results/` | Corrupts the paper's original artifact | Leave those directories alone |
 
 ---
 
 ## Project memory
 
-Long-term design hypotheses saved under:
+Long-term design hypotheses are saved under:
 ```text
 /root/.claude/projects/-home-itamar-WSL-Clones-REPS-EuroSys-Artifact/memory/
 ```
 
 Current entries (see `MEMORY.md` in that directory):
-- `reps_buffer_cache_idea.md` — hypothesis that REPS' bounded buffer should cache known-good EVs (lifetime > 1) across draws, not invalidate per use. `repsMaxLifetimeEntropy` mechanism already in code but gated off.
+- `reps_buffer_cache_idea.md` — hypothesis that REPS' bounded buffer should cache known-good EVs (lifetime > 1) across draws, rather than invalidating per use. The `repsMaxLifetimeEntropy` mechanism already exists in the code but is gated off.
 
-Experiment reveals new design hypothesis worth keeping across sessions: save there with standard frontmatter (`name`, `description`, `metadata.type`), add line to `MEMORY.md`, link to it from experiment's README.
+If an experiment reveals a new design hypothesis worth keeping across sessions, save it there with the standard frontmatter (`name`, `description`, `metadata.type`), add a line to `MEMORY.md`, and link to it from the experiment's README.
 
 ---
 
 ## What has NOT been changed
 
-- No original lines deleted from `htsim/sim/`. Every modification is addition or wrap.
-- `artifact_scripts/` and `artifact_results/` untouched (paper's original artifact).
-- With all new flags absent, binary produces byte-identical behavior to vanilla NSCC + REPS/FREEZING.
+- No original lines deleted from `htsim/sim/`. Every modification is an addition or a wrap.
+- `artifact_scripts/` and `artifact_results/` are untouched (paper's original artifact).
+- With all new flags absent, the binary produces byte-identical behavior to vanilla NSCC + REPS/FREEZING.
 
 ---
 
 ## Modifications inventory
 
-**Repo-wide original-vs-ours map**: [`PROVENANCE.md`](PROVENANCE.md) — top-level dirs/files,
-verified against first commit `e19b8d0`. Use for anything outside `htsim/sim/`.
+**Repo-wide original-vs-ours map**: [`PROVENANCE.md`](PROVENANCE.md) — which top-level
+directories/files are the paper's original artifact vs our additions, verified against the
+first commit (`e19b8d0`). Use that file for anything outside `htsim/sim/`.
 
-Full detail for `htsim/sim/`: [`state_aware_experiments/MODIFICATIONS.md`](state_aware_experiments/MODIFICATIONS.md)
-— source of truth for original-vs-added boundary. Index below.
-**Rule for future additions:** every new mechanism MUST have (i) `// ===== ADDED (<name>) =====`
-banner at every modification site, (ii) row in MODIFICATIONS.md, (iii) ARCHITECTURE doc under
+Full detail for `htsim/sim/` itself moved to [`state_aware_experiments/MODIFICATIONS.md`](state_aware_experiments/MODIFICATIONS.md)
+— source of truth for original-vs-added boundary in `htsim/sim/`. Index below; consult that
+file for exact lines, rationale, and per-entry results.
+**Rule for future additions:** every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====`
+banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCHITECTURE doc under
 `state_aware_experiments/`.
 
 `[ORIGINAL]` — all of `htsim/sim/` except rows below; `artifact_scripts/`/`artifact_results/` untouched.
