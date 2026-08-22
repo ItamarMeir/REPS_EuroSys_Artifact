@@ -883,6 +883,11 @@ private:
     // ====================================================================
 
     CircularBufferREPS<int> *circular_buffer_reps;
+    // ===== ADDED (circular-buffer-reps-leak-fix) =====
+    // true only when this UecSrc allocated circular_buffer_reps itself (not borrowed
+    // from CONNECTION_INFO_MAP under -connections_mapping) — see startFlow().
+    bool _owns_circular_buffer_reps = false;
+    // ===== END ADDED (circular-buffer-reps-leak-fix) =====
 
     simtime_picosec _last_eta_time = 0;
     

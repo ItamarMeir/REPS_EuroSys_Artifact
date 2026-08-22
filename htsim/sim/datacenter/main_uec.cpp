@@ -149,6 +149,53 @@ private:
 };
 // ===== END ADDED (tor-queue logging) =====
 
+// ===== ADDED (core-downlink-queue-log) =====
+// Samples core→agg DOWNlink queue depths (queues_nc_nup, opposite direction
+// from CoreQueueSampler's agg→core uplink) for the first num_cores core
+// switches only, every interval_us µs, writing time_us,core,agg,bytes rows
+// to a CSV. Built for exp25 (state_aware_experiments/exp25_queue_dynamics_v25/)
+// to check whether REPS's first-window round-robin (see exp24) produces a
+// synchronized queue spike at flow start that FREEZING does not. Gated by
+// -log_core_downlink_queues <file>; num_cores/interval are experiment-specific
+// constants, not exposed as separate flags (single current caller).
+class CoreDownlinkQueueSampler : public EventSource {
+public:
+    CoreDownlinkQueueSampler(EventList& el, FatTreeTopology* topo,
+                              const std::string& outpath, double interval_us,
+                              uint32_t num_cores)
+        : EventSource(el, "core_downlink_queue_sampler"),
+          _topo(topo),
+          _interval((simtime_picosec)(interval_us * 1e6)),
+          _num_cores(num_cores) {
+        _f = fopen(outpath.c_str(), "w");
+        if (_f) fprintf(_f, "time_us,core,agg,bytes\n");
+        eventlist().sourceIsPending(*this, _interval);
+    }
+    ~CoreDownlinkQueueSampler() { if (_f) fclose(_f); }
+    void doNextEvent() override {
+        if (!_f) return;
+        double t = timeAsUs(eventlist().now());
+        uint32_t ncore = min(_num_cores, _topo->no_of_cores());
+        for (uint32_t core = 0; core < ncore; core++) {
+            if (core >= _topo->queues_nc_nup.size()) continue;
+            for (uint32_t agg = 0; agg < _topo->getNAGG(); agg++) {
+                if (agg >= _topo->queues_nc_nup[core].size()) continue;
+                if (_topo->queues_nc_nup[core][agg].empty()) continue;
+                BaseQueue* q = _topo->queues_nc_nup[core][agg][0];
+                if (q) fprintf(_f, "%.3f,%u,%u,%ld\n", t, core, agg,
+                               (long)q->queuesize());
+            }
+        }
+        eventlist().sourceIsPending(*this, eventlist().now() + _interval);
+    }
+private:
+    FatTreeTopology* _topo;
+    simtime_picosec _interval;
+    uint32_t _num_cores;
+    FILE* _f = nullptr;
+};
+// ===== END ADDED (core-downlink-queue-log) =====
+
 void exit_error(char* progr) {
     cout << "Usage " << progr << " [-nodes N]\n\t[-conns C]\n\t[-cwnd cwnd_size]\n\t[-q queue_size]\n\t[-recv_oversub_cc] Use receiver-driven AIMD to reduce total window when trims are not last hop\n\t[-queue_type composite|random|lossless|lossless_input|]\n\t[-tm traffic_matrix_file]\n\t[-strat route_strategy (single,rand,perm,pull,ecmp,\n\tecmp_host path_count,ecmp_ar,ecmp_rr,\n\tecmp_host_ar ar_thresh)]\n\t[-log log_level]\n\t[-seed random_seed]\n\t[-end end_time_in_usec]\n\t[-mtu MTU]\n\t[-hop_latency x] per hop wire latency in us,default 1 \n\t[-disable_fd] disable fair decrease to get higher throught, \n\t[-target_q_delay x] target_queuing_delay in us, default is 6us \n\t[-switch_latency x] switching latency in us, default 0\n\t[-host_queue_type  swift|prio|fair_prio]\n\t[-logtime dt] sample time for sinklogger, etc" << endl;
     exit(1);
@@ -188,6 +235,7 @@ int main(int argc, char **argv) {
     double ecn_thresh = 0.5; // default marking threshold for ECN load balancing
     std::string log_core_queues_file = "";   // ===== ADDED (path-random queue logging) =====
     std::string log_tor_queues_file  = "";   // ===== ADDED (tor-queue logging) =====
+    std::string log_core_downlink_queues_file = "";  // ===== ADDED (core-downlink-queue-log) =====
 
     bool param_ecn_set = false;
     bool ecn = true;
@@ -989,6 +1037,11 @@ int main(int argc, char **argv) {
             log_tor_queues_file = string(argv[i+1]);
             i++;
         // ===== END ADDED (tor-queue logging) =====
+        // ===== ADDED (core-downlink-queue-log) =====
+        } else if (!strcmp(argv[i], "-log_core_downlink_queues")) {
+            log_core_downlink_queues_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (core-downlink-queue-log) =====
         } else {
             cout << "Unknown parameter " << argv[i] << endl;
             exit_error(argv[0]);
@@ -1691,6 +1744,14 @@ int main(int argc, char **argv) {
         cout << "[tor_queue_sampler] logging to " << log_tor_queues_file << endl;
     }
     // ===== END ADDED (tor-queue logging) =====
+    // ===== ADDED (core-downlink-queue-log) =====
+    if (!log_core_downlink_queues_file.empty() && !topo.empty() && topo[0] != nullptr) {
+        new CoreDownlinkQueueSampler(eventlist, topo[0], log_core_downlink_queues_file,
+                                      0.2 /* µs, exp25: resolve few-µs round-robin burst */,
+                                      16  /* first 16 core switches, exp25 subset */);
+        cout << "[core_downlink_queue_sampler] logging to " << log_core_downlink_queues_file << endl;
+    }
+    // ===== END ADDED (core-downlink-queue-log) =====
 
     // GO!
     cout << "Starting simulation" << endl;

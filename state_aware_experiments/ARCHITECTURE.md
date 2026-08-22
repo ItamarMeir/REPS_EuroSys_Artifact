@@ -122,3 +122,18 @@ The v2 study found a strong observable in this bounded buffer:
 That's the foundation for a future v4: replace the all-or-nothing asymmetric flag with a buffer-fill threshold (`cc_ecn = pkt.ecn_echo() && (asymmetric || fresh ≤ 1)`), so the CC reacts not only on RTO-confirmed failure but also when the LB's working memory has demonstrably drained. **v4 is NOT implemented yet.**
 
 See also the project memory [`reps_buffer_cache_idea.md`](/root/.claude/projects/-home-itamar-WSL-Clones-REPS-EuroSys-Artifact/memory/reps_buffer_cache_idea.md) for a related design hypothesis (cache good EVs instead of invalidating per draw).
+
+---
+
+## Per-switch queue-occupancy sampling (`CoreDownlinkQueueSampler`)
+
+Built for exp25 to test whether REPS's first-window round-robin (exp24 finding) produces a
+synchronized queue spike on core switches. Samples `queues_nc_nup[core][agg][0]->queuesize()`
+(core→agg **downlink**, bytes) for the first N core switches × all their connected aggs, at a
+configurable interval — class in `htsim/sim/datacenter/main_uec.cpp`
+(`// ===== ADDED (core-downlink-queue-log) =====`), gated by `-log_core_downlink_queues
+<file>`. This is the downlink counterpart to the pre-existing `CoreQueueSampler`/
+`TorQueueSampler` (agg→core and ToR→agg uplinks respectively, used by exp20/exp21's
+`-log_core_queues`/`-log_tor_queues`). Result: exp25 did **not** find evidence of a REPS-side
+queue spike on the sampled subset — see
+[`exp25_queue_dynamics_v25/README.md`](exp25_queue_dynamics_v25/README.md).

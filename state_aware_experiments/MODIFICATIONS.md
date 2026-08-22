@@ -150,6 +150,33 @@ because its own H-cap of 4 is tighter than MAX_H.
 |------|-------------|--------|
 | `htsim/sim/delay_median_buffer.h` | `MAX_H = 32 → 128`; `setCapacity` truncates `_count` instead of flushing; banner `// ===== FIX (median-buf-paper-faithful) =====` | MSwift's H now follows paper Eq (8) up to W ≈ 240; median window survives MD-induced cwnd drops |
 
+### `[FIX: circular-buffer-reps-leak-fix]` — applied 2026-08-21
+
+`code-review.md` finding 12 (was N3): `UecSrc::startFlow()` (`uec.cpp:2662-2663`)
+allocates `circular_buffer_reps` with `new` on every call, including reactivations of a
+long-lived source (`activate()`, `uec.cpp:4013-4015`), silently overwriting the previous
+pointer each time and leaking it for the rest of the run. A destructor was deliberately
+**not** added — `UecSrc` is never itself `delete`d anywhere in the tree (grep-confirmed),
+so a destructor would never run. Fix instead tracks ownership: a new
+`_owns_circular_buffer_reps` flag is `true` only when this instance allocated the buffer
+itself, `false` when it's borrowed from `CONNECTION_INFO_MAP` under `-connections_mapping`
+(that path is shared/owned by the map across reactivations and must never be deleted here,
+or it would double-free/corrupt shared state). `startFlow()` now deletes the previous
+buffer before reassigning, gated on the flag.
+
+| File | Lines / what | Effect |
+|------|-------------|--------|
+| `htsim/sim/uec.h` | `_owns_circular_buffer_reps` member added, banner `// ===== ADDED (circular-buffer-reps-leak-fix) =====` | Tracks whether this `UecSrc` owns `circular_buffer_reps` |
+| `htsim/sim/uec.cpp` | `startFlow()` guarded `delete` before reassignment + flag set in both branches, same banner | Fixes in-run leak on reactivation without `-connections_mapping`; no behavior change on the `-connections_mapping` path |
+
+**Verification:** Docker build clean, normal and `-fsanitize=address`. Short `reps` runs
+clean on both branches (owned buffer / `-connections_mapping` borrowed buffer), no
+crash/double-free. Trigger-chained `.cm` reactivation test built to directly exercise the
+leak path found the connection-matrix engine spawns a new `UecSrc` per triggered
+connection rather than reactivating one instance — so this fix's severity may be more
+theoretical/latent than originally stated (finding not directly reproduced under stress;
+see `code-review.md` finding 12).
+
 ### `[ADDED: swift-sack-hole-md]` — gated by `_sender_cc_algo == SWIFT`, always compiled
 
 Paper 2 (CC4Spraying, arXiv:2509.07907v2) §IV.B explicitly states the Swift CCA collapses under
@@ -299,3 +326,18 @@ Experiment + results: [`state_aware_experiments/exp23_freezing_pxr_v23/README.md
 | `htsim/sim/uec.h` | `FREEZING_PXR` in `LoadBalancing_Algo` enum; `_pxr_excluded_evs` + `_pxr_clear_deadline` per-source fields; `_pxr_window` public static; `nextEntropy_freezing_pxr` / `processEv_freezing_pxr` declarations; `sent_ev` added to `sendRecord`; `createSendRecord` declaration updated | `-load_balancing_algo freezing_pxr` |
 | `htsim/sim/uec.cpp` | `_pxr_window` static def (200 ms default); `_parseLBName` entry; `_dispatchLB` case; `nextEntropy_freezing_pxr` (timer check + saturation guard + filtered REPS draw); `processEv_freezing_pxr` (filtered buffer add); RTO branch (exclusion + sliding deadline); `createSendRecord` stores `ev`; `rto_trigger_ev` captured before erase; `pxr_excluded_count` + `pxr_excluded_evs` CSV columns | `-load_balancing_algo freezing_pxr` |
 | `htsim/sim/datacenter/main_uec.cpp` | `freezing_pxr` in `-load_balancing_algo` handler; `-pxr_window_us <N>` flag; CSV header update | own flags |
+
+## `core-downlink-queue-log`
+
+New `CoreDownlinkQueueSampler` class, banner `// ===== ADDED (core-downlink-queue-log) =====`.
+Samples core→agg **downlink** queue depth (`queues_nc_nup[core][agg][0]`) — opposite
+direction from the pre-existing `CoreQueueSampler` (agg→core uplink, `queues_nup_nc`) — for
+the first N core switches (N and the sample interval are constructor args, not separate CLI
+flags; currently called with N=16, interval=0.2 µs, both exp25-specific constants). Built to
+check whether REPS's first-window round-robin (exp24) produces a synchronized queue spike at
+flow start; see [`state_aware_experiments/exp25_queue_dynamics_v25/README.md`](exp25_queue_dynamics_v25/README.md)
+for the (non-confirming) result.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/datacenter/main_uec.cpp` | `CoreDownlinkQueueSampler` class (after `TorQueueSampler`); `log_core_downlink_queues_file` local; `-log_core_downlink_queues <file>` CLI parser; construction wired next to the existing core/tor samplers | `-log_core_downlink_queues <file>` |

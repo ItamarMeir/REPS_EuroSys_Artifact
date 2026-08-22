@@ -34,6 +34,17 @@ The experiments for both live in `state_aware_experiments/`.
 
 ## Base artifact: setup, build, run, test
 
+**Build and run `htsim_uec` via Docker (see "Docker environment" below), not directly on the
+host or via WSL.** This is a hard requirement, not a soft preference: building on the host and
+running the same tree from WSL (or vice versa) hit real failures in practice — cross-filesystem
+(`/mnt/c/...`) builds under WSL threw `make: warning: Clock skew detected` /
+`File 'X' has modification time N s in the future`, and host-built `.o`/binaries can fail
+inside a container with `GLIBCXX_*`/`GLIBC_*` "version not found" if bind-mounted (see Docker
+section's gotcha). Docker sidesteps all of this — it's the same toolchain and filesystem every
+time, on every OS. The venv/host instructions below remain for reference (e.g. running the
+Python figure scripts, which don't have this problem) but `htsim_uec` itself should be built
+and invoked through Docker.
+
 Python env (from repo root, in a clean venv):
 ```bash
 python3 -m venv .venv
@@ -70,9 +81,18 @@ There is no test suite for `htsim/sim/` itself or for `state_aware_experiments/`
 
 ## Docker environment
 
-A `Dockerfile` (repo root) builds a self-contained Ubuntu 22.04 image with the C++17 toolchain,
-`libgraphviz-dev`, Python 3 + `requirements.txt`, and a pre-built `htsim_uec`. Prefer this over
-ad-hoc host setup when the host environment is unknown/dirty.
+**Required for building/running `htsim_uec`** — not just preferred for a dirty host. A
+`Dockerfile` (repo root) builds a self-contained Ubuntu 22.04 image with the C++17 toolchain,
+`libgraphviz-dev`, Python 3 + `requirements.txt`, and a pre-built `htsim_uec`.
+
+**Gotcha: `.cm`/`.dockerignore`'d files missing from the image.** `.dockerignore` excludes
+`**/*.cm` (generated connection-matrix workload files) along with `.o`/`.a`/binaries/`.csv`/
+`.png`/`.pdf`. Running an experiment that needs a specific `.cm` file (or other gitignored
+generated artifact) not already present on the image may fail with
+`Failed to load connection matrix ...`. Fix: `docker cp <host-file> <container>:<path>` into a
+running container before invoking `htsim_uec`, or regenerate it in-container via
+`traffic_gen/`'s generators. Same applies to topology files if they're gitignored/generated
+locally rather than tracked.
 
 ```bash
 docker build -t reps-artifact .

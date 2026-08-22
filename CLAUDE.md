@@ -23,6 +23,11 @@ Experiments for both live in `state_aware_experiments/`.
 
 ## Base artifact: setup, build, run, test
 
+**Build/run `htsim_uec` via Docker (see Docker section), not host or WSL directly.** Hard
+requirement, not preference: cross-filesystem WSL builds (`/mnt/c/...`) hit clock-skew
+warnings/incomplete builds; host-built binaries can fail inside a container with
+`GLIBCXX_*`/`GLIBC_*` errors if bind-mounted. Docker = one toolchain/filesystem every time.
+
 Python env (from repo root, clean venv):
 ```bash
 python3 -m venv .venv
@@ -59,9 +64,14 @@ No test suite for `htsim/sim/` itself or `state_aware_experiments/` — correctn
 
 ## Docker environment
 
-`Dockerfile` (repo root) builds self-contained Ubuntu 22.04 image with C++17 toolchain,
-`libgraphviz-dev`, Python 3 + `requirements.txt`, prebuilt `htsim_uec`. Prefer over
-ad-hoc host setup when host environment unknown/dirty.
+**Required for `htsim_uec` build/run**, not just dirty-host fallback. `Dockerfile` (repo root)
+builds self-contained Ubuntu 22.04 image, C++17 toolchain, `libgraphviz-dev`, Python 3 +
+`requirements.txt`, prebuilt `htsim_uec`.
+
+**Gotcha:** `.dockerignore` excludes `**/*.cm` (generated connection-matrix workloads) +
+`.o`/`.a`/binaries/`.csv`/`.png`/`.pdf`. Experiment needing a `.cm` not on the image →
+`Failed to load connection matrix`. Fix: `docker cp <host-file> <container>:<path>` before
+running, or regenerate via `traffic_gen/`.
 
 ```bash
 docker build -t reps-artifact .

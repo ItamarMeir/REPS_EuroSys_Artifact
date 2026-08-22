@@ -593,6 +593,41 @@ The core REPS algorithm (`-load_balancing_algo freezing`) maintains a small boun
 2. **ECN-Marked ACK**: A switch along this path is congested. The EV is immediately **evicted**, and a brand new random EV is drawn to explore an alternate path.
 3. **Entropy Lifetime Bounding (`repsMaxLifetimeEntropy`)**: In the extended REPS implementation, an EV is forcefully refreshed after $N$ uses to prevent permanent path lock-in when network state shifts (Note: currently gated off in code and lacks a CLI flag).
 
+FREEZING replaces the plain `list` with a fixed-size `CircularBufferREPS<int>` (`buffer_reps.h`,
+default 8 slots via `repsBufferSize`), and adds a second read cursor (`head_forzen_mode`) so
+"draw the next EV" means something different depending on frozen/unfrozen state.
+
+- **`nextEntropy_freezing()`** (`uec.cpp:3293-3312`) — no first-window sweep at all (see the
+  Plain REPS section below for what that means). Three paths depending on state:
+  - `explore_counter > 0`: forced `rand() % _no_of_paths`, decrementing the counter each draw.
+    Only ever set non-zero right after a freeze exit (`= _bdp / _mtu`, `uec.cpp:2958`/`3327`) —
+    a post-thaw ramp-up, not a flow-start one.
+  - Frozen and buffer non-empty: `remove_frozen()` — reads via the *separate* `head_forzen_mode`
+    cursor, walking the buffer in insertion order independent of the normal `head`/tail state,
+    and evicts the slot (or decrements its lifetime if `compressed_acks`). Frozen + empty falls
+    back to `rand()`.
+  - Not frozen: `remove_earliest_fresh()` if any fresh entries exist, else `rand()`. This is the
+    steady-state path — same "pop oldest, evict on read" shape as plain REPS's `_next_pathid`.
+- **`processEv_freezing()`** (`uec.cpp:3314-3337`) — first runs the timer-driven auto-exit check
+  (`isFrozenMode() && now() > can_exit_frozen_mode` → unfreeze, reset buffer, arm
+  `explore_counter`). Feedback handling is symmetric across frozen/unfrozen: `PATH_GOOD` always
+  calls `add()` (buffer tail push via the write cursor `head`), in *either* state. Unlike plain
+  REPS's `processEv_REPS`, ECN and NACK still hit no explicit branch here either — same no-op
+  gap, just on a bounded buffer instead of an unbounded list.
+- **RTO/timeout — this is FREEZING's actual defining behavior**, in `rtxTimerExpired()`
+  (`uec.cpp:3848-3872`), not in `processEv`: on RTO, if not already frozen and
+  `explore_counter == 0`, it calls `setFrozenMode(true)` and arms
+  `can_exit_frozen_mode = now() + exit_freeze_after` (our experiments pin
+  `exit_freeze_after` via `-exit_freeze 200000000`). Two branches (`_trim_disbled` +
+  RTT-ratio check vs. plain `!_trim_disbled`) both do the same freeze — the split only changes
+  the diagnostic printf. Like plain REPS, `hashmap_entropy`/`PATH_TIMEOUT` are never touched
+  here either — freezing is triggered directly off the RTO event, not through a `processEv`
+  feedback path.
+- **`sendRTS()`** — same shared function as plain REPS (`uec.cpp:3663-3689`): draws through the
+  `nextEntropy` pointer, so under FREEZING an RTS during frozen mode can legitimately pull from
+  `remove_frozen()` and advance the frozen-mode cursor, with — same as REPS — no matching
+  `processEv` call to account for it.
+
 ---
 
 ### The Plain REPS Variant (`-load_balancing_algo reps`) — a Thinner, Unbounded Sibling
@@ -606,7 +641,14 @@ sitting in `_next_pathid`}.
   packet needs an EV; if the pool is empty it falls back to `random() % _no_of_paths`. At flow
   start, while `_mss * _highest_sent < min(_cwnd, _mss * _no_of_paths)`, it instead
   round-robins `_crt_path` through every path once (a first-window sweep) before recycling
-  kicks in. Note the sibling implementation in `EqdsSrc::nextEntropy()` (`eqds.cpp:1220`) uses
+  kicks in. Reading the condition: `_mss * _highest_sent` = bytes sent so far; `min(_cwnd,
+  _mss * _no_of_paths)` caps at whichever is smaller — the congestion window, or "one packet
+  per path". So the sweep runs until either the window fills or every path has been hit once,
+  guaranteeing the opening burst covers distinct EVs deterministically instead of depending on
+  ACKs (which haven't arrived yet) or randomness. **REPS-only** — `nextEntropy_freezing()`
+  (`uec.cpp:3293-3312`, above) has no `_highest_sent`/`_cwnd` first-window branch at all; it
+  draws from `explore_counter` / the frozen-or-fresh circular buffer state from packet one.
+  Note the sibling implementation in `EqdsSrc::nextEntropy()` (`eqds.cpp:1220`) uses
   `max(_maxwnd, allpathssizes)` for the equivalent condition — the two REPS-family
   implementations in this codebase sweep the initial entropy space differently.
 - **`processEv_REPS()`** (`uec.cpp:2948-2970`) only has a branch for `feedback == PATH_GOOD`
@@ -631,7 +673,7 @@ sitting in `_next_pathid`}.
 |---|---|---|
 | Structure | Bounded 8-slot `CircularBufferREPS` | Unbounded `list<uint16_t>` (`_next_pathid`) |
 | On clean ACK | Recycled to buffer tail | Pushed to `_next_pathid` |
-| On ECN | EV evicted, frozen-mode gating | No-op — EV simply not re-queued |
+| On ECN | No-op in `processEv_freezing` — same no-op gap as REPS; eviction happens on next *read* via `remove_frozen()`/`remove_earliest_fresh()`, not on ECN itself | No-op — EV simply not re-queued |
 | On RTO | Buffer-level freeze/cycle | No effect — `_next_pathid` untouched |
 | Recommended use | Paper-comparable / state-aware work | Retained for archaeology (see CLAUDE.md) |
 

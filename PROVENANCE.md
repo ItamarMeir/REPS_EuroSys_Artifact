@@ -25,7 +25,7 @@ later commits is ours.
 | `README.md`, `LICENSE-Transport-WG.txt`, `.gitignore`, `reps_pkg_install.sh`, `requirements.txt` | `[ORIGINAL]` | Present in `e19b8d0`, untouched in kind (may have received minor edits since). |
 | `state_aware_experiments/` | `[ADDED]` | Our extension code's experiment harness + all findings. |
 | `docs/assets/*.svg` | `[ADDED]` (commit `fd44085`) | Diagrams for `HTSIM_BEGINNERS_GUIDE.md`. |
-| `htsim/README.md` | `[ADDED]` (commit `0bd00a6`) | htsim's multi-generation fork-lineage doc (Handley → Raiciu/MPTCP → NDP → Correct Networks/Broadcom/EQDS → Ultra Ethernet Consortium → REPS paper). |
+| `htsim/README.md` | `[ORIGINAL]` (commit `0bd00a6`, author Tommaso Bonato) | Paper author's own htsim fork-lineage doc (Handley → Raiciu/MPTCP → NDP → Correct Networks/Broadcom/EQDS → Ultra Ethernet Consortium → REPS paper), landed 2nd commit, not the 1st — not written by us. |
 | `CLAUDE.md`, `CLAUDE.original.md` | `[ADDED]` | This project's agent-guidance docs. |
 | `AGENTS.md` | `[ADDED]` | Agent-guidance doc. |
 | `HTSIM_BEGINNERS_GUIDE.md` | `[ADDED]` | Fact-checked beginner's guide to the simulator internals. |
@@ -48,11 +48,15 @@ classification entirely): `papers/` (reference PDFs), `output_metrics/globalInfo
   Rule of thumb: everything *not* listed there is original/untouched — no original lines were
   ever deleted, every modification is an addition or a wrap (see CLAUDE.md "What has NOT been
   changed").
-- `htsim/README.md` — `[ADDED]` by us; documents the pre-REPS fork lineage, itself sourced from
-  the REPS paper's own `htsim/README.md` "Main Changes Introduced by the REPS paper" section
-  (which lists `uec.cpp`/`uec.h`, `main_uec.cpp`, `fat_tree_topology.*`, `buffer_reps.*`,
-  `failuregenerator.*` as *the paper's own* additions over pre-REPS htsim — i.e. one layer further
-  back than our own additions on top of the REPS paper).
+- `htsim/README.md` — `[ORIGINAL]`, authored by Tommaso Bonato (commit `0bd00a6`, 2025-09-20) —
+  landed after the first commit but still paper-author content, not ours. Documents the pre-REPS
+  fork lineage (Handley → Raiciu/MPTCP → NDP → Correct Networks/Broadcom/EQDS → Ultra Ethernet
+  Consortium) and, in its "Main Changes Introduced by the REPS paper" section, lists
+  `uec.cpp`/`uec.h`, `main_uec.cpp`, `fat_tree_topology.*`, `buffer_reps.*`, `failuregenerator.*`
+  as *the paper's own* additions over pre-REPS htsim — one layer further back than our own
+  additions on top of the REPS paper. Names `buffer_reps.*` as implementing "its circular
+  buffer" — no mention of an unbounded variant; corroborates the paper's bounded-8-slot design
+  (see `state_aware_experiments/README.md` verification note).
 
 ---
 

@@ -1585,11 +1585,23 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         // ===== END ADDED (wtd-in-nscc) =========================================
         // ===== ADDED (buffer-contents-log) =====================================
         std::string buf_str;
+        int _sf_buf_size_log = _sf_buf_size;
         if (_log_buffer_contents) {
-            auto evs = circular_buffer_reps->getValidEntropies();
-            for (size_t bi = 0; bi < evs.size(); ++bi) {
-                if (bi) buf_str += '|';
-                buf_str += std::to_string(evs[bi]);
+            if (_load_balancing_algo == REPS) {
+                // plain REPS keeps accepted path IDs in the unbounded _next_pathid
+                // list, not circular_buffer_reps (which it never populates).
+                size_t bi = 0;
+                for (auto it = _next_pathid.begin(); it != _next_pathid.end(); ++it, ++bi) {
+                    if (bi) buf_str += '|';
+                    buf_str += std::to_string(*it);
+                }
+                _sf_buf_size_log = (int)_next_pathid.size();
+            } else {
+                auto evs = circular_buffer_reps->getValidEntropies();
+                for (size_t bi = 0; bi < evs.size(); ++bi) {
+                    if (bi) buf_str += '|';
+                    buf_str += std::to_string(evs[bi]);
+                }
             }
         }
         // ===== END ADDED (buffer-contents-log) =================================
@@ -1615,7 +1627,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
                 (unsigned)pkt.ev(),                           // ack_ev
                 _sf_fresh,                                    // fresh
                 (unsigned)(_cwnd / get_avg_pktsize()),        // cwnd_pkts
-                _sf_buf_size,                                 // buf_size
+                _sf_buf_size_log,                             // buf_size
                 _network_is_asymmetric ? 1 : 0,              // sa_asym
                 cc_ecn_log ? 1 : 0,                          // cc_ecn_view
                 buf_str.c_str(),                              // buf_contents
@@ -2647,8 +2659,21 @@ void UecSrc::startFlow() {
     _credit = _maxwnd;
 
 
+    // ===== ADDED (circular-buffer-reps-leak-fix) =====
+    // startFlow() re-enters this block on every reactivation of a long-lived UecSrc
+    // (e.g. via activate()); without this, the branch below silently overwrites
+    // circular_buffer_reps with a fresh allocation and leaks the previous one for the
+    // rest of the run. Only free it when this instance owned it — a buffer borrowed
+    // from CONNECTION_INFO_MAP (the else branch) is shared/owned by the map and must
+    // never be deleted here.
+    if (_owns_circular_buffer_reps) {
+        delete circular_buffer_reps;
+    }
+    // ===== END ADDED (circular-buffer-reps-leak-fix) =====
+
     if (CONNECTION_INFO_MAP.find(_src_dst) == CONNECTION_INFO_MAP.end() || !_connections_mapping) {
         circular_buffer_reps = new CircularBufferREPS<int>(CircularBufferREPS<int>::repsBufferSize);
+        _owns_circular_buffer_reps = true;   // ===== ADDED (circular-buffer-reps-leak-fix) =====
     } else {
         circular_buffer_reps = CONNECTION_INFO_MAP[_src_dst].buffer;
         CONNECTION_INFO_MAP[_src_dst].buffer = circular_buffer_reps;
@@ -2657,6 +2682,7 @@ void UecSrc::startFlow() {
         flowlet_entropy = CONNECTION_INFO_MAP[_src_dst].flowlet_entropy;
         _ev_skip_bitmap = CONNECTION_INFO_MAP[_src_dst].ev_skip_bitmap;
         working_path_ecmp_mp = CONNECTION_INFO_MAP[_src_dst].working_path_ecmp_mp;
+        _owns_circular_buffer_reps = false;   // ===== ADDED (circular-buffer-reps-leak-fix) =====
     }
     
 

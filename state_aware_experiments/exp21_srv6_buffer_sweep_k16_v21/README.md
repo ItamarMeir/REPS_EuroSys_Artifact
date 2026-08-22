@@ -98,10 +98,15 @@ REPS mean FCT: 211.5 µs vs FREEZING 205.5 µs under NSCC. The difference persis
 seeds (CI: ±0.3 µs for REPS, ±0.3 µs for B=8). Under CONSTANT CC, the gap narrows (203.8 vs
 200.9 µs, +2.9 µs).
 
-**Interpretation**: the unbounded deque in REPS accumulates stale path IDs from early in the
-flow (before the network is loaded). Under NSCC, these old IDs can lag behind the current state,
-momentarily routing to suboptimal paths. FREEZING's bounded buffer naturally evicts old entries,
-staying more reactive. This matches the exp01/exp02 finding that `recycle` is not predictive.
+**Interpretation — superseded, see [`exp24_reps_no_rr_v24/README.md`](../exp24_reps_no_rr_v24/README.md).**
+The original explanation here ("REPS's unbounded deque accumulates stale path IDs") was
+checked against the raw per-ACK logs and does not hold: REPS's recycle-pool depth (avg 4.99,
+empty 14.8% of ACKs) and FREEZING's (avg fresh 5.29, empty 16.6%) are statistically
+indistinguishable — buffer occupancy is not the driver. exp24 isolated the real cause:
+REPS's deterministic first-window round-robin (`uec.cpp:3046-3054`, absent in FREEZING)
+synchronizes path selection across tornado's simultaneously-starting flows, correlating load
+onto the same core switch/uplink. Disabling it closes the gap completely — the resulting
+FCT lands inside the FREEZING B=1..64 band on every metric and CC mode tested.
 
 ### 3. PATH_STATIC is the clear winner; FREEZING/REPS pay ~7 µs overhead (NSCC) or ~15 µs (CONSTANT)
 
