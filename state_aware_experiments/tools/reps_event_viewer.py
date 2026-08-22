@@ -767,10 +767,18 @@ def main(argv=None):
     parser.add_argument("--verify", action="store_true", help="Run invariant checks and exit non-zero on violation")
     args = parser.parse_args(argv)
 
+    if args.t0 is not None and args.t1 is not None and args.t0 > args.t1:
+        print(f"warning: --from {args.t0} is after --to {args.t1}; no event can match",
+              file=sys.stderr)
+
     try:
         events = load_events(args.csv_path)
     except EventParseError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        # Unreadable/missing trace is a normal user error, not a crash.
+        print(f"error: cannot read {args.csv_path}: {exc.strerror or exc}", file=sys.stderr)
         return 1
 
     events = filter_events(events, t0=args.t0, t1=args.t1, srcs=args.src)
@@ -784,11 +792,17 @@ def main(argv=None):
             if len(violations) > 50:
                 print(f"  ... and {len(violations) - 50} more", file=sys.stderr)
             return 1
-        if buffer_is_live(events):
+        # Messages stay ASCII: these go to a terminal whose encoding we don't
+        # control (Windows consoles default to cp1252 and mangle or reject
+        # anything outside it).
+        if not events:
+            print("VERIFY OK: 0 events - nothing to check "
+                  "(check the trace's src filter and time window)")
+        elif buffer_is_live(events):
             print(f"VERIFY OK: {len(events)} events, all invariants pass")
         else:
             print(f"VERIFY OK: {len(events)} events, ordering/fresh invariants pass "
-                  f"(buffer never populated — not a FREEZING trace, so "
+                  f"(buffer never populated - not a FREEZING trace, so "
                   f"buffer-geometry invariants were skipped)")
         return 0
 

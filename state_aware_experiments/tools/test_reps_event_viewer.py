@@ -1,5 +1,7 @@
 """ Unit tests for reps_event_viewer.py """
 
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from reps_event_viewer import (
     diff_slots,
     filter_events,
     load_events,
+    main,
     parse_slots,
     truncate_events,
     verify_events,
@@ -222,6 +225,58 @@ class TestVerify(unittest.TestCase):
         events = load_events(_fixture_path(rows))
         violations = verify_events(events)
         self.assertTrue(any("UNFREEZE" in v for v in violations))
+
+
+class TestCliEdgeCases(unittest.TestCase):
+    """main()'s handling of degenerate inputs: these must report cleanly and
+    never raise out of main()."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.out = os.path.join(self.tmpdir, "o.html")
+
+    def _run(self, *args):
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            rc = main(list(args))
+        return rc, buf_out.getvalue() + buf_err.getvalue()
+
+    def test_missing_file_reports_cleanly(self):
+        rc, msg = self._run(os.path.join(self.tmpdir, "nope.csv"), "-o", self.out)
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot read", msg)
+        self.assertNotIn("Traceback", msg)
+
+    def test_header_only_trace(self):
+        path = os.path.join(self.tmpdir, "h.csv")
+        write_csv(path, [])
+        rc, msg = self._run(path, "-o", self.out)
+        self.assertEqual(rc, 0)
+        self.assertIn("0 events", msg)
+
+    def test_verify_on_empty_trace_says_nothing_to_check(self):
+        path = os.path.join(self.tmpdir, "h.csv")
+        write_csv(path, [])
+        rc, msg = self._run(path, "--verify")
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to check", msg)
+        # must not claim anything about the LB algorithm from an empty trace
+        self.assertNotIn("not a FREEZING trace", msg)
+
+    def test_inverted_time_window_warns(self):
+        path = os.path.join(self.tmpdir, "g.csv")
+        write_csv(path, GOOD_ROWS)
+        rc, msg = self._run(path, "-o", self.out, "--from", "100", "--to", "10")
+        self.assertEqual(rc, 0)
+        self.assertIn("is after --to", msg)
+
+    def test_messages_are_ascii(self):
+        """stdout goes to consoles we do not control (cp1252 on Windows)."""
+        path = os.path.join(self.tmpdir, "g.csv")
+        write_csv(path, GOOD_ROWS)
+        for args in ((path, "--verify"), (path, "-o", self.out)):
+            _, msg = self._run(*args)
+            msg.encode("ascii")  # raises if a non-ASCII char slipped into a message
 
 
 def _fixture_path(rows):
