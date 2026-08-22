@@ -261,6 +261,18 @@ template <typename T> std::vector<T> CircularBufferREPS<T>::getValidEntropies() 
 }
 // ===== END ADDED (ev-health-counter) ========================================
 
+// ===== ADDED (reps-event-trace) ==============================================
+template <typename T>
+std::vector<typename CircularBufferREPS<T>::SlotView> CircularBufferREPS<T>::getSlots() const {
+    std::vector<SlotView> out;
+    out.reserve(max_size);
+    for (int i = 0; i < max_size; i++) {
+        out.push_back(SlotView{buffer[i].value, buffer[i].isValid, buffer[i].usable_lifetime});
+    }
+    return out;
+}
+// ===== END ADDED (reps-event-trace) ==========================================
+
 // Prints the elements of the buffer
 template <typename T> bool CircularBufferREPS<T>::containsEntropy(uint16_t givenEntropy) {
     for (int i = 0; i < max_size; i++) {

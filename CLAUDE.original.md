@@ -186,6 +186,7 @@ The `_network_is_asymmetric` flag is set organically when the LB enters frozen m
 | `-fail_link_time <fail_us> <recover_us>` | Schedules dynamic Agg↔Core pipe failure and recovery. |
 | `-fail_link_target <agg> <core>` | Repeatable. Selects which Agg↔Core link(s) to fail. |
 | `-log_reps_state <file>` + `-log_reps_state_src <id>` | Per-ACK CSV diagnostic log. |
+| `-log_reps_events <file>` + `-log_reps_events_src <id>` | Unified send+ACK+freeze event trace (SEND/RTX/RTS/ACK/NACK/FREEZE/UNFREEZE, slot-indexed buffer snapshot per row). Independent file and schema from `-log_reps_state`. See `state_aware_experiments/tools/README.md` for the CSV schema and the `reps_event_viewer.py` interactive HTML viewer. |
 
 `-exit_freeze <picoseconds>` already existed; our experiments use `200000000` (= 200 ms) to suppress mid-run thaws.
 
@@ -353,3 +354,4 @@ banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCH
 | `path-static` | `-load_balancing_algo path_static` | Flow pinned to 1 path (greedy edge-load) + reverse-path routing fix |
 | `srv6` | `-use_srv6` | SRv6 source-routing substrate, orthogonal to LB algo |
 | `freezing-pxr` | `-load_balancing_algo freezing_pxr` | Path-eXcluding REPS: exclude RTO-triggering EV instead of full freeze |
+| `reps-event-trace` | `-log_reps_events` | Unified send+ACK+freeze event trace plus an interactive HTML buffer viewer (`state_aware_experiments/tools/`) |

@@ -46,6 +46,17 @@ template <typename T> class CircularBufferREPS {
     // rather than scanning all _no_of_paths EVs with containsEntropy().
     std::vector<T> getValidEntropies() const;
     // ===== END ADDED (ev-health-counter) ================================
+    // ===== ADDED (reps-event-trace) =====================================
+    // Slot-indexed view of every buffer slot (incl. invalid), for the event
+    // trace's per-event snapshot. Unlike getValidEntropies(), preserves slot
+    // index (== position in the circular buffer) and per-slot lifetime, so
+    // the viewer can reconstruct head/frozen-head geometry.
+    struct SlotView { T value; bool isValid; int lifetime; };
+    std::vector<SlotView> getSlots() const;
+    int getHead()       const { return head; }
+    int getFrozenHead() const { return head_forzen_mode; }
+    int getMaxSize()    const { return max_size; }
+    // ===== END ADDED (reps-event-trace) ==================================
     // ===== ADDED (frozen-ev-log) ========================================
     // Returns the EV at the current frozen-mode read pointer, or -1 if not
     // in frozen mode or the buffer is empty.  Used to log the active frozen

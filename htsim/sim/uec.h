@@ -374,6 +374,35 @@ public:
     static bool _log_buffer_contents;  // append buf_contents column to reps_state_log
     // ===== END ADDED (buffer-contents-log) =====
 
+    // ===== ADDED (reps-event-trace) =====
+    // Unified send+ACK+freeze event trace, independent of _reps_state_log (whose
+    // schema is left untouched — existing runner scripts parse it). See
+    // logRepsEvent() for the row format.
+    enum EvSource : uint8_t {
+        EVSRC_NONE = 0,    // no provenance: non-send event, or an LB algorithm
+                           // that records none. Rendered as an empty field.
+        EVSRC_EXPLORE,     // explore_counter > 0 -> fresh random draw
+        EVSRC_RANDOM,      // buffer empty / no fresh entropies -> random draw
+        EVSRC_FRESH_POP,   // remove_earliest_fresh()
+        EVSRC_FROZEN_POP,  // remove_frozen()
+        EVSRC_PXR_RANDOM,  // freezing_pxr random draw after exclusion filter
+        EVSRC_PXR_POP      // freezing_pxr buffer pop after exclusion filter
+    };
+    static FILE* _reps_events_log;
+    static std::set<uint32_t> _reps_events_log_srcs;  // empty -> fallback to _reps_state_log_srcs
+    static uint64_t _reps_events_max;                 // row cap, default 200000
+    static uint64_t _reps_events_rows;                // rows written so far (for cap check)
+    // Time window, in picoseconds (eventlist().now() units). Note the trace's
+    // time column is *nanoseconds* (now/1000), matching the pre-existing
+    // -log_reps_state column so the two files can be compared row-for-row.
+    static simtime_picosec _reps_events_t0, _reps_events_t1;
+    // ev_src is a property of the entropy *draw*, so only send events carry one;
+    // ACK/NACK/FREEZE/UNFREEZE pass EVSRC_NONE and log an empty field. Passing it
+    // explicitly (rather than reading _last_ev_source inside) keeps a stale draw
+    // from an earlier send out of non-send rows.
+    void logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvSource ev_src);
+    // ===== END ADDED (reps-event-trace) =====
+
     enum Sender_CC {
         DCTCP,
         NSCC,
@@ -855,6 +884,20 @@ private:
     // time, so the algorithm's state machine advances exactly once per packet.
     uint16_t _srv6_pending_ev = 0;
     // ===== END ADDED (srv6) =====
+
+    // ===== ADDED (reps-event-trace) =====
+    // Scratch register recording why nextEntropy_* returned the EV it just
+    // returned. Set at every return site in nextEntropy_freezing/_pxr/REPS,
+    // read immediately after by the SEND/RTX/RTS logging call so the event
+    // trace can record draw provenance without re-deriving the branch.
+    // EvSource type itself declared public (see near _reps_events_log) so the
+    // free helper evSourceStr() in uec.cpp can take it as a parameter.
+    EvSource _last_ev_source = EVSRC_NONE;
+    // Cached "is this source traced?" decision. The allow-lists are fixed at CLI
+    // parse time, before any UecSrc is constructed, so the set lookup only needs
+    // to run once per source instead of once per packet. -1 = not yet computed.
+    int8_t _reps_events_traced = -1;
+    // ===== END ADDED (reps-event-trace) =====
 
     // ===== ADDED (freezing-pxr) =====
     // FREEZING_PXR ("Path-eXcluding REPS") state. On RTO, the EV that triggered

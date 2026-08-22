@@ -327,6 +327,34 @@ Experiment + results: [`state_aware_experiments/exp23_freezing_pxr_v23/README.md
 | `htsim/sim/uec.cpp` | `_pxr_window` static def (200 ms default); `_parseLBName` entry; `_dispatchLB` case; `nextEntropy_freezing_pxr` (timer check + saturation guard + filtered REPS draw); `processEv_freezing_pxr` (filtered buffer add); RTO branch (exclusion + sliding deadline); `createSendRecord` stores `ev`; `rto_trigger_ev` captured before erase; `pxr_excluded_count` + `pxr_excluded_evs` CSV columns | `-load_balancing_algo freezing_pxr` |
 | `htsim/sim/datacenter/main_uec.cpp` | `freezing_pxr` in `-load_balancing_algo` handler; `-pxr_window_us <N>` flag; CSV header update | own flags |
 
+### `[ADDED: reps-event-trace]` — gated by `-log_reps_events`
+
+Unified send+ACK+freeze event trace for the REPS/FREEZING/FREEZING_PXR circular buffer,
+independent of `-log_reps_state` (that CSV's schema is untouched — exp07/08/09/11/23 runner
+scripts parse it). Where `-log_reps_state` logs only the ACK side (one row per received ACK),
+this trace also captures SEND/RTX/RTS (with EV-draw provenance), NACK (which does *not* recycle
+its EV — invisible in the old log), and FREEZE/UNFREEZE transitions, each with a full
+slot-indexed snapshot of the buffer (value/valid/lifetime per slot, plus head and frozen-mode
+read pointer) instead of the old `buf_contents`'s unordered valid-EV list. The time column is
+named `time_ns` and holds `eventlist().now()/1000` — numerically identical to the pre-existing
+`-log_reps_state` time column (which is labelled `time_us` but also holds nanoseconds), so the
+two files line up row-for-row. Feeds a Python-generated
+self-contained interactive HTML viewer that replays the trace as a circular-buffer cell grid with
+a step-through event log (like the hand-driven teaching simulator it mirrors).
+
+Feature-off cost is one null-pointer test at each of 7 call sites — no allocation, no formatting.
+
+Tool + docs: [`state_aware_experiments/tools/README.md`](tools/README.md)
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/buffer_reps.h`/`.cpp` | `SlotView` struct; `getSlots()` (slot-indexed view, incl. invalid slots — unlike `getValidEntropies()`); `getHead()`/`getFrozenHead()`/`getMaxSize()` accessors | always compiled |
+| `htsim/sim/uec.h` | `EvSource` enum + `_last_ev_source` scratch register (draw provenance); `_reps_events_log`/`_reps_events_log_srcs`/`_reps_events_max`/`_reps_events_rows`/`_reps_events_t0`/`_reps_events_t1` statics; `_reps_events_traced` per-source membership cache (the allow-lists are fixed at CLI parse time, so the set lookup runs once per source, not once per packet); `logRepsEvent()` declaration | `-log_reps_events` |
+| `htsim/sim/uec.cpp` | Static defs; `logRepsEvent()` impl (src/window/cap gating, slot snapshot formatting, one `fprintf`); `_last_ev_source` set at every return in `nextEntropy_freezing`/`nextEntropy_freezing_pxr`/`nextEntropy_REPS`; 7 call sites — SEND (`sendNewPacket`), RTX (`sendRtxPacket`), RTS (`sendRTS`), ACK (`processAck`, logs `pkt.acked_psn()` as `seqno` for PSN cross-reference), NACK (`processNack`), FREEZE ×3 (`rtxTimerExpired`'s two FREEZING branches + the state-aware REPS branch), UNFREEZE (`processEv_freezing`) | `-log_reps_events` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `-log_reps_events <file>`, `-log_reps_events_src <id>` (repeatable, falls back to `-log_reps_state_src` if never given), `-log_reps_events_max <N>`, `-log_reps_events_window <t0_ns> <t1_ns>` | own flags |
+| `state_aware_experiments/tools/reps_event_viewer.py` | new — CSV parser, filters, `--verify` invariant checker, self-contained HTML viewer generator (buffer grid, event log, PSN cross-reference + RTT, theme-aware palette) | n/a |
+| `state_aware_experiments/tools/test_reps_event_viewer.py` | new — unit tests | n/a |
+
 ## `core-downlink-queue-log`
 
 New `CoreDownlinkQueueSampler` class, banner `// ===== ADDED (core-downlink-queue-log) =====`.

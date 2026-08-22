@@ -211,6 +211,100 @@ std::set<uint32_t> UecSrc::_cwnd_log_srcs;
 bool UecSrc::_log_buffer_contents = false;
 // ===== END ADDED (buffer-contents-log) =====
 
+// ===== ADDED (reps-event-trace) =====
+FILE* UecSrc::_reps_events_log = nullptr;
+std::set<uint32_t> UecSrc::_reps_events_log_srcs;
+uint64_t UecSrc::_reps_events_max = 200000;
+uint64_t UecSrc::_reps_events_rows = 0;
+simtime_picosec UecSrc::_reps_events_t0 = 0;
+simtime_picosec UecSrc::_reps_events_t1 = (simtime_picosec)-1; // ~UINT64_MAX
+
+// logRepsEvent(): appends one row to the unified REPS event trace (see uec.h
+// for schema doc). Cheap no-op when the flag is off (_reps_events_log ==
+// nullptr): a single pointer test, no allocation, no formatting. Independent
+// of _reps_state_log — that CSV's schema is untouched.
+static const char* evSourceStr(UecSrc::EvSource s) {
+    switch (s) {
+        case UecSrc::EVSRC_EXPLORE:    return "explore";
+        case UecSrc::EVSRC_RANDOM:     return "random";
+        case UecSrc::EVSRC_FRESH_POP:  return "fresh_pop";
+        case UecSrc::EVSRC_FROZEN_POP: return "frozen_pop";
+        case UecSrc::EVSRC_PXR_RANDOM: return "pxr_random";
+        case UecSrc::EVSRC_PXR_POP:    return "pxr_pop";
+        default:                       return "";
+    }
+}
+
+void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvSource ev_src) {
+    if (!_reps_events_log) return;
+
+    if (_reps_events_traced < 0) {
+        // Allow-lists are fixed at CLI parse time, so resolve membership once.
+        const std::set<uint32_t>& srcs = _reps_events_log_srcs.empty() ? _reps_state_log_srcs
+                                                                         : _reps_events_log_srcs;
+        _reps_events_traced = (srcs.find(_node_num) != srcs.end()) ? 1 : 0;
+    }
+    if (!_reps_events_traced) return;
+
+    simtime_picosec now = eventlist().now();
+    if (now < _reps_events_t0 || now > _reps_events_t1) return;
+    if (_reps_events_rows >= _reps_events_max) {
+        if (_reps_events_rows == _reps_events_max) {
+            printf("[reps-event-trace] row cap %lu reached, truncating\n",
+                   (unsigned long)_reps_events_max);
+            _reps_events_rows++; // avoid reprinting the warning
+        }
+        return;
+    }
+
+    int fresh = -1, buf_size = -1, frozen_mode = -1, frozen_ev = -1, head = -1, frozen_head = -1;
+    // Never truncate: -reps_buffer_size is unbounded from the CLI (exp23 sweeps
+    // up to 64), and a clipped slots field would be unparseable downstream.
+    std::string slots_str;
+
+    if (circular_buffer_reps) {
+        fresh = circular_buffer_reps->getNumberFreshEntropies();
+        buf_size = circular_buffer_reps->getSize();
+        frozen_mode = circular_buffer_reps->isFrozenMode() ? 1 : 0;
+        frozen_ev = circular_buffer_reps->getFrozenEv();
+        head = circular_buffer_reps->getHead();
+        frozen_head = circular_buffer_reps->getFrozenHead();
+
+        auto slots = circular_buffer_reps->getSlots();
+        slots_str.reserve(slots.size() * 12);
+        char one[32];
+        for (size_t i = 0; i < slots.size(); i++) {
+            snprintf(one, sizeof(one), "%s%d:%d:%d", (i ? "|" : ""), (int)slots[i].value,
+                     slots[i].isValid ? 1 : 0, slots[i].lifetime);
+            slots_str += one;
+        }
+    }
+
+    // time_ns: eventlist().now() is picoseconds; /1000 is nanoseconds. The column
+    // is deliberately the same expression the pre-existing -log_reps_state log
+    // uses (where it is mislabelled "time_us"), so the two files line up exactly.
+    fprintf(_reps_events_log,
+            "%lu,%.3f,%u,%s,%d,%s,%d,%ld,%d,%d,%d,%d,%d,%d,%u,%u,%s\n",
+            (unsigned long)++_reps_events_rows,
+            (double)now / 1000.0,
+            _node_num,
+            kind,
+            ev,
+            evSourceStr(ev_src),
+            ecn,
+            (long)seqno,
+            fresh,
+            buf_size,
+            frozen_mode,
+            frozen_ev,
+            head,
+            frozen_head,
+            (unsigned)(_cwnd / get_avg_pktsize()),
+            (unsigned)(_in_flight / get_avg_pktsize()),
+            slots_str.c_str());
+}
+// ===== END ADDED (reps-event-trace) =====
+
 // ===== ADDED (smart-filter) ============================================
 // smartFilterCounter(): returns the active congestion-evidence counter in [0..B],
 // where B = CircularBufferREPS<int>::repsBufferSize (the live REPS buffer size,
@@ -1637,6 +1731,12 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
                 pxr_str.c_str());                             // pxr_excluded_evs
     }
 
+    // ===== ADDED (reps-event-trace) =====
+    // seqno = acked_psn(): the PSN this ACK covers, so the viewer can trace an
+    // ACK back to the SEND/RTX row that put that exact packet on the wire.
+    logRepsEvent("ACK", (int)pkt.ev(), pkt.ecn_echo() ? 1 : 0, (uint64_t)pkt.acked_psn(), EVSRC_NONE);
+    // ===== END ADDED (reps-event-trace) =====
+
     if (_debug_src) {
         cout << "At " << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " processAck: " << cum_ack << " flow " << _flow.str() << " cwnd " << _cwnd << " flightsize " << _in_flight << " delay " << timeAsUs(delay) << " newlyrecvd " << newly_recvd_bytes << " skip " << pkt.ecn_echo() << " raw rtt " << _raw_rtt <<  " ecn avg " << _exp_avg_ecn << endl;
     }
@@ -2615,6 +2715,10 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
 
     (this->*processEv)(ev, PATH_NACK);
 
+    // ===== ADDED (reps-event-trace) =====
+    logRepsEvent("NACK", (int)ev, -1, (uint64_t)nacked_seqno, EVSRC_NONE);
+    // ===== END ADDED (reps-event-trace) =====
+
     sendIfPermitted();
 }
 
@@ -3062,23 +3166,26 @@ uint16_t UecSrc::nextEntropy_REPS(){
         if (_crt_path == _no_of_paths) {
             _crt_path = 0;
         }
+        _last_ev_source = EVSRC_NONE; // ===== ADDED (reps-event-trace) =====
 
-        if (_debug) 
+        if (_debug)
             cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " REPS FirstWindow " << _crt_path << " highest sent " << _mss * _highest_sent << " maxwnd " << _maxwnd << " allpaths " << allpathssizes << endl;
 
     } else {
         if (_next_pathid.empty()) {
             assert(_no_of_paths > 0);
 		    _crt_path = random() % _no_of_paths;
+            _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
 
-            if (_debug) 
+            if (_debug)
                 cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " REPS Steady " << _crt_path << endl;
 
         } else {
             _crt_path = _next_pathid.front();
             _next_pathid.pop_front();
+            _last_ev_source = EVSRC_FRESH_POP; // ===== ADDED (reps-event-trace) =====
 
-            if (_debug) 
+            if (_debug)
                 cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " REPS Recycle " << _crt_path << " " << _next_pathid.size() << endl;
 
         }
@@ -3319,19 +3426,24 @@ void UecSrc::processEv_ecmp(uint16_t path_id, PathFeedback feedback) {
 uint16_t UecSrc::nextEntropy_freezing(){
     if (circular_buffer_reps->explore_counter > 0) {
         circular_buffer_reps->explore_counter--;
+        _last_ev_source = EVSRC_EXPLORE; // ===== ADDED (reps-event-trace) =====
         return rand() % _no_of_paths;
     }
 
     if (circular_buffer_reps->isFrozenMode()) {
         if (circular_buffer_reps->isEmpty()) {
+            _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
             return rand() % _no_of_paths;
         } else {
+            _last_ev_source = EVSRC_FROZEN_POP; // ===== ADDED (reps-event-trace) =====
             return circular_buffer_reps->remove_frozen();
         }
     } else {
         if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
+            _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
             return _crt_path = rand() % _no_of_paths;
         } else {
+            _last_ev_source = EVSRC_FRESH_POP; // ===== ADDED (reps-event-trace) =====
             return circular_buffer_reps->remove_earliest_fresh();
         }
     }
@@ -3353,6 +3465,7 @@ void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
         circular_buffer_reps->explore_counter = _bdp / _mtu;
         //circular_buffer_reps->explore_counter = 8;
         printf("%s exited freezing mode at %lu\n", _name.c_str(), eventlist().now() / 1000);
+        logRepsEvent("UNFREEZE", -1, -1, (uint64_t)-1, EVSRC_NONE); // ===== ADDED (reps-event-trace) =====
     }
 
     if ((feedback == PATH_GOOD) && !circular_buffer_reps->isFrozenMode()) {
@@ -3389,6 +3502,7 @@ uint16_t UecSrc::nextEntropy_freezing_pxr() {
     // Explore burst: random draws, skipping excluded EVs (with retry cap).
     if (circular_buffer_reps->explore_counter > 0) {
         circular_buffer_reps->explore_counter--;
+        _last_ev_source = EVSRC_PXR_RANDOM; // ===== ADDED (reps-event-trace) =====
         for (int tries = 0; tries < 32; ++tries) {
             uint16_t ev = rand() % _no_of_paths;
             if (_pxr_excluded_evs.count(ev) == 0) return ev;
@@ -3398,6 +3512,7 @@ uint16_t UecSrc::nextEntropy_freezing_pxr() {
 
     // Empty / no-fresh: random draw (filtered).
     if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
+        _last_ev_source = EVSRC_PXR_RANDOM; // ===== ADDED (reps-event-trace) =====
         for (int tries = 0; tries < 32; ++tries) {
             uint16_t ev = rand() % _no_of_paths;
             if (_pxr_excluded_evs.count(ev) == 0) return _crt_path = ev;
@@ -3409,9 +3524,13 @@ uint16_t UecSrc::nextEntropy_freezing_pxr() {
     int max_pops = circular_buffer_reps->getNumberFreshEntropies();
     for (int pops = 0; pops < max_pops; ++pops) {
         uint16_t ev = circular_buffer_reps->remove_earliest_fresh();
-        if (_pxr_excluded_evs.count(ev) == 0) return ev;
+        if (_pxr_excluded_evs.count(ev) == 0) {
+            _last_ev_source = EVSRC_PXR_POP; // ===== ADDED (reps-event-trace) =====
+            return ev;
+        }
         if (circular_buffer_reps->getNumberFreshEntropies() == 0) break;
     }
+    _last_ev_source = EVSRC_PXR_RANDOM; // ===== ADDED (reps-event-trace) =====
     for (int tries = 0; tries < 32; ++tries) {
         uint16_t ev = rand() % _no_of_paths;
         if (_pxr_excluded_evs.count(ev) == 0) return ev;
@@ -3606,6 +3725,9 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
              << " size " << full_pkt_size << " cwnd " << _cwnd << " ev " << ev << " skip_weight " << static_cast<int>(1)
              << " in_flight " << _in_flight << " pull_target " << _pull_target << " pull " << _pull << endl;
     }
+    // ===== ADDED (reps-event-trace) =====
+    logRepsEvent("SEND", (int)ev, -1, (uint64_t)_highest_sent, _last_ev_source);
+    // ===== END ADDED (reps-event-trace) =====
     p->sendOn();
     _highest_sent++;
     _new_packets_sent++;
@@ -3680,6 +3802,9 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
              << " in_flight " << _in_flight << " pull_target " << _pull_target << " pull " << _pull << endl;
     }
     p->set_ar(true);
+    // ===== ADDED (reps-event-trace) =====
+    logRepsEvent("RTX", (int)ev, -1, (uint64_t)seq_no, _last_ev_source);
+    // ===== END ADDED (reps-event-trace) =====
     p->sendOn();
     _rtx_packets_sent++;
     startRTO(eventlist().now());
@@ -3704,6 +3829,9 @@ void UecSrc::sendRTS() {
     uint16_t ev = (this->*nextEntropy)();
     p->set_pathid(ev);
     createSendRecord(_highest_sent, _hdr_size, ev);
+    // ===== ADDED (reps-event-trace) =====
+    logRepsEvent("RTS", (int)ev, -1, (uint64_t)_highest_sent, _last_ev_source);
+    // ===== END ADDED (reps-event-trace) =====
 
     // p->sendOn();
     _nic.sendControlPacket(p, this, NULL);
@@ -3885,6 +4013,7 @@ void UecSrc::rtxTimerExpired() {
             }
             printf("%s started freezing mode1 at %lu (can exit at %lu) - %d - Size Buffer %d - trigger_ev %u\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize(), (unsigned)rto_trigger_ev);
             printf("Last Max RTT %lu - RTO Start %lu - Time is %lu - Base RTT is %lu -- Max %lu at %lu\n", _last_rto_max_rtt/1000, _last_rto_start/1000, eventlist().now()/1000, _base_rtt/1000, _max_rtt_seen/1000, _when__max_rtt_seen/1000);
+            logRepsEvent("FREEZE", (int)rto_trigger_ev, -1, (uint64_t)-1, EVSRC_NONE); // ===== ADDED (reps-event-trace) =====
         } else if (!_trim_disbled) {
             circular_buffer_reps->setFrozenMode(true);
             circular_buffer_reps->can_exit_frozen_mode = eventlist().now() +  circular_buffer_reps->exit_freeze_after;
@@ -3895,6 +4024,7 @@ void UecSrc::rtxTimerExpired() {
                        _name.c_str(), eventlist().now() / 1000);
             }
             printf("%s started freezing mode2 at %lu (can exit at %lu) - Explore Counter %d - %d - Size Buffer %d - trigger_ev %u\n", _name.c_str(), eventlist().now() / 1000, circular_buffer_reps->can_exit_frozen_mode / 1000, circular_buffer_reps->explore_counter, circular_buffer_reps->isFrozenMode(), circular_buffer_reps->getSize(), (unsigned)rto_trigger_ev);
+            logRepsEvent("FREEZE", (int)rto_trigger_ev, -1, (uint64_t)-1, EVSRC_NONE); // ===== ADDED (reps-event-trace) =====
         }
     }
 
@@ -3931,6 +4061,7 @@ void UecSrc::rtxTimerExpired() {
         printf("[state-aware] %s RTO -> freeze + asymmetric=true at %lu us (can exit at %lu us)\n",
                _name.c_str(), eventlist().now() / 1000,
                circular_buffer_reps->can_exit_frozen_mode / 1000);
+        logRepsEvent("FREEZE", (int)rto_trigger_ev, -1, (uint64_t)-1, EVSRC_NONE); // ===== ADDED (reps-event-trace) =====
     }
 
 

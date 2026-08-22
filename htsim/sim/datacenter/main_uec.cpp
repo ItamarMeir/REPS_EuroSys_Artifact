@@ -881,6 +881,38 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i],"-log_buffer_contents")) { // ===== ADDED (buffer-contents-log) =====
             UecSrc::_log_buffer_contents = true;
             cout << "Buffer contents logging enabled (appends buf_contents column to reps_state_log)" << endl;
+        // ===== ADDED (reps-event-trace) =====
+        } else if (!strcmp(argv[i],"-log_reps_events")){
+            // Open unified send+ACK+freeze event trace (independent of -log_reps_state,
+            // whose schema is untouched — existing runner scripts parse it).
+            UecSrc::_reps_events_log = fopen(argv[i+1], "w");
+            if (!UecSrc::_reps_events_log) {
+                cerr << "Could not open REPS event trace: " << argv[i+1] << endl;
+                exit(1);
+            }
+            fprintf(UecSrc::_reps_events_log,
+                    "n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,head,frozen_head,cwnd_pkts,inflight_pkts,slots\n");
+            cout << "Logging REPS event trace to " << argv[i+1] << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_reps_events_src")){
+            UecSrc::_reps_events_log_srcs.insert((uint32_t)atoi(argv[i+1]));
+            cout << "Adding src " << argv[i+1]
+                 << " to REPS event trace (total tracked="
+                 << UecSrc::_reps_events_log_srcs.size() << ")" << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_reps_events_max")){
+            UecSrc::_reps_events_max = (uint64_t)atoll(argv[i+1]);
+            cout << "REPS event trace row cap set to " << UecSrc::_reps_events_max << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_reps_events_window")){
+            // Bounds are in NANOSECONDS, matching the trace's time_ns column
+            // (and the pre-existing -log_reps_state time column, which is also
+            // now/1000 despite being labelled "time_us").
+            UecSrc::_reps_events_t0 = (simtime_picosec)(atof(argv[i+1]) * 1000.0);
+            UecSrc::_reps_events_t1 = (simtime_picosec)(atof(argv[i+2]) * 1000.0);
+            cout << "REPS event trace window set to [" << argv[i+1] << ", " << argv[i+2] << "] ns" << endl;
+            i += 2;
+        // ===== END ADDED (reps-event-trace) =====
         } else if (!strcmp(argv[i],"-log_cwnd")) { // ===== ADDED (cwnd-log) =====
             UecSrc::_cwnd_log = fopen(argv[i+1], "w");
             if (!UecSrc::_cwnd_log) {
