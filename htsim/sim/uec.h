@@ -270,7 +270,7 @@ public:
 
     // ====================================================================
     // ADDED (smart-filter): independent of -state_aware_ecn. Off by default.
-    // See state_aware_experiments/expNN_smart_filter/ARCHITECTURE.md.
+    // See experiments/expNN_smart_filter/ARCHITECTURE.md.
     //
     // A B-bounded ECN counter (where B = CircularBufferREPS<int>::repsBufferSize)
     // tracks how saturated the REPS buffer is with congestion signals. Two filter

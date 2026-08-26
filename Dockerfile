@@ -1,7 +1,7 @@
 # REPS EuroSys Artifact — containerized build/run environment
 #
 # Builds htsim_uec (and the other htsim datacenter binaries) plus the Python
-# analysis environment used by artifact_scripts/ and state_aware_experiments/.
+# analysis environment used by artifact_scripts/ and experiments/.
 #
 # Usage (from repo root):
 #   docker build -t reps-artifact .

@@ -36,8 +36,13 @@ failures_input/saved_alternative
 
 # === Heavy artifacts (added) ===
 # REPS experiment run bundles
-state_aware_experiments/**/runs.tar.gz
-state_aware_experiments/**/runs/
+experiments/**/runs.tar.gz
+experiments/**/runs/
+
+# Heavy generated data: per-switch/per-flow raw logger dumps (port/link_util/ecn/nack/...)
+# and interactive HTML buffer-trace viewers (can be tens of MB each).
+experiments/**/*.txt
+experiments/**/*.html
 
 # Generated connection matrices (regenerable via traffic_gen/);
 # already-tracked .cm files in the index are not affected by adding this rule.

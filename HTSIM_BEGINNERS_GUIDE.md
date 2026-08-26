@@ -86,10 +86,10 @@ REPS_EuroSys_Artifact/
 │       ├── [main_roce.cpp](./htsim/sim/datacenter/main_roce.cpp)      ← Main RoCEv2 / DCQCN runner
 │       └── [fat_tree_topology.cpp](./htsim/sim/datacenter/fat_tree_topology.cpp) ← K-ary Fat-Tree graph builder
 │
-├── [state_aware_experiments/](./state_aware_experiments/)    ← OUR WORK (Extensions & Experiments)
-│   ├── [workloads/](./state_aware_experiments/workloads/)              ← Synthetic Traffic Matrices shared across experiments
-│   ├── [exp03_matrix_sweep_v3/](./state_aware_experiments/exp03_matrix_sweep_v3/)  ← Example: Full experiment with scripts, plots, and CSVs
-│   └── [RUNNING_EXPERIMENTS.md](./state_aware_experiments/RUNNING_EXPERIMENTS.md)  ← Step-by-step guide for running sweeps
+├── [experiments/](./experiments/)    ← OUR WORK (Extensions & Experiments)
+│   ├── [workloads/](./experiments/workloads/)              ← Synthetic Traffic Matrices shared across experiments
+│   ├── [exp03_matrix_sweep_v3/](./experiments/exp03_matrix_sweep_v3/)  ← Example: Full experiment with scripts, plots, and CSVs
+│   └── [RUNNING_EXPERIMENTS.md](./experiments/RUNNING_EXPERIMENTS.md)  ← Step-by-step guide for running sweeps
 │
 ├── [artifact_scripts/](./artifact_scripts/)           ← The paper's ORIGINAL bash runners (DO NOT MODIFY)
 ├── [artifact_results/](./artifact_results/)           ← The paper's ORIGINAL results (DO NOT MODIFY)
@@ -99,7 +99,7 @@ REPS_EuroSys_Artifact/
 > [!IMPORTANT]
 > **Repository Rules:**
 > - If you are modifying transport logic, congestion control, or load balancing, edit [`./htsim/sim/`](./htsim/sim/).
-> - If you are designing new experiment benchmarks, create a subfolder under [`./state_aware_experiments/`](./state_aware_experiments/).
+> - If you are designing new experiment benchmarks, create a subfolder under [`./experiments/`](./experiments/).
 > - **Never modify** [`./artifact_scripts/`](./artifact_scripts/) or [`./artifact_results/`](./artifact_results/) to preserve baseline paper reproducibility.
 
 ---

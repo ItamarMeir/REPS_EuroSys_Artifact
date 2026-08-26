@@ -3,7 +3,7 @@
 Two-layer provenance model:
 - **This file** — repo-wide map: which top-level directories/files are the paper's original
   artifact vs our additions.
-- [`state_aware_experiments/MODIFICATIONS.md`](state_aware_experiments/MODIFICATIONS.md) —
+- [`experiments/MODIFICATIONS.md`](experiments/MODIFICATIONS.md) —
   line-level detail *within* `htsim/sim/` (every added mechanism, gate flag, and file/line
   location). Don't duplicate that detail here — link to it.
 
@@ -23,7 +23,7 @@ later commits is ours.
 | `traffic_gen/` | `[ORIGINAL]` | Connection-matrix generator, not used by our experiments. |
 | `.github/workflows/c-cpp.yml` | `[ORIGINAL, modified]` | Removed a `make test` step (no `test` Makefile target exists) — CI fix, not a feature. |
 | `README.md`, `LICENSE-Transport-WG.txt`, `.gitignore`, `reps_pkg_install.sh`, `requirements.txt` | `[ORIGINAL]` | Present in `e19b8d0`, untouched in kind (may have received minor edits since). |
-| `state_aware_experiments/` | `[ADDED]` | Our extension code's experiment harness + all findings. |
+| `experiments/` | `[ADDED]` | Our extension code's experiment harness + all findings. |
 | `docs/assets/*.svg` | `[ADDED]` (commit `fd44085`) | Diagrams for `HTSIM_BEGINNERS_GUIDE.md`. |
 | `htsim/README.md` | `[ORIGINAL]` (commit `0bd00a6`, author Tommaso Bonato) | Paper author's own htsim fork-lineage doc (Handley → Raiciu/MPTCP → NDP → Correct Networks/Broadcom/EQDS → Ultra Ethernet Consortium → REPS paper), landed 2nd commit, not the 1st — not written by us. |
 | `CLAUDE.md`, `CLAUDE.original.md` | `[ADDED]` | This project's agent-guidance docs. |
@@ -44,7 +44,7 @@ classification entirely): `papers/` (reference PDFs), `output_metrics/globalInfo
 
 - `htsim/older_scripts/` — `[ORIGINAL]`, untouched.
 - `htsim/sim/` — original REPS-paper simulator, with our additions layered in. Full line-level
-  inventory: [`state_aware_experiments/MODIFICATIONS.md`](state_aware_experiments/MODIFICATIONS.md).
+  inventory: [`experiments/MODIFICATIONS.md`](experiments/MODIFICATIONS.md).
   Rule of thumb: everything *not* listed there is original/untouched — no original lines were
   ever deleted, every modification is an addition or a wrap (see CLAUDE.md "What has NOT been
   changed").
@@ -56,7 +56,7 @@ classification entirely): `papers/` (reference PDFs), `output_metrics/globalInfo
   as *the paper's own* additions over pre-REPS htsim — one layer further back than our own
   additions on top of the REPS paper. Names `buffer_reps.*` as implementing "its circular
   buffer" — no mention of an unbounded variant; corroborates the paper's bounded-8-slot design
-  (see `state_aware_experiments/README.md` verification note).
+  (see `experiments/README.md` verification note).
 
 ---
 

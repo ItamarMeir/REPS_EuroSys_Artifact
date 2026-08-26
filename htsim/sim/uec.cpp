@@ -262,6 +262,39 @@ void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvS
     // up to 64), and a clipped slots field would be unparseable downstream.
     std::string slots_str;
 
+    // ===== ADDED (reps-fifo-trace) =====
+    // Plain REPS (and MIXED) do not use circular_buffer_reps at all; they recycle
+    // EVs through the unbounded FIFO _next_pathid (push_back on a clean ACK,
+    // pop_front on reuse). Without this column those traces show an all-zero
+    // buffer, which reads as "no buffer" rather than "different buffer".
+    //   "-"        -> this LB algorithm does not use the FIFO (column N/A)
+    //   ""         -> FIFO algorithm, buffer currently empty
+    //   "a|b|c"    -> contents, front (next to be reused) first
+    //   "...|+N"   -> N further entries elided past the row cap below
+    // The FIFO is genuinely unbounded, so unlike `slots` this field has a cap.
+    const bool uses_fifo =
+        (_load_balancing_algo == REPS || _load_balancing_algo == MIXED);
+    std::string fifo_str;
+    if (!uses_fifo) {
+        fifo_str = "-";
+    } else {
+        const size_t kMaxFifoLogged = 128;
+        fifo_str.reserve(std::min(_next_pathid.size(), kMaxFifoLogged) * 4);
+        size_t i = 0;
+        char one[24];
+        for (auto it = _next_pathid.begin(); it != _next_pathid.end(); ++it, ++i) {
+            if (i >= kMaxFifoLogged) {
+                snprintf(one, sizeof(one), "|+%lu",
+                         (unsigned long)(_next_pathid.size() - kMaxFifoLogged));
+                fifo_str += one;
+                break;
+            }
+            snprintf(one, sizeof(one), "%s%u", (i ? "|" : ""), (unsigned)*it);
+            fifo_str += one;
+        }
+    }
+    // ===== END ADDED (reps-fifo-trace) =====
+
     if (circular_buffer_reps) {
         fresh = circular_buffer_reps->getNumberFreshEntropies();
         buf_size = circular_buffer_reps->getSize();
@@ -284,7 +317,7 @@ void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvS
     // is deliberately the same expression the pre-existing -log_reps_state log
     // uses (where it is mislabelled "time_us"), so the two files line up exactly.
     fprintf(_reps_events_log,
-            "%lu,%.3f,%u,%s,%d,%s,%d,%ld,%d,%d,%d,%d,%d,%d,%u,%u,%s\n",
+            "%lu,%.3f,%u,%s,%d,%s,%d,%ld,%d,%d,%d,%d,%d,%d,%u,%u,%s,%s\n",
             (unsigned long)++_reps_events_rows,
             (double)now / 1000.0,
             _node_num,
@@ -301,7 +334,8 @@ void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvS
             frozen_head,
             (unsigned)(_cwnd / get_avg_pktsize()),
             (unsigned)(_in_flight / get_avg_pktsize()),
-            slots_str.c_str());
+            slots_str.c_str(),
+            fifo_str.c_str()); // ===== ADDED (reps-fifo-trace) =====
 }
 // ===== END ADDED (reps-event-trace) =====
 

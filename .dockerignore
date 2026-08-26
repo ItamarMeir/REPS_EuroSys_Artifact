@@ -10,6 +10,6 @@
 **/*.pdf
 **/*.png
 **/*.cm
-state_aware_experiments/**/runs.tar.gz
-state_aware_experiments/**/runs/
+experiments/**/runs.tar.gz
+experiments/**/runs/
 artifact_results_backup

@@ -28,7 +28,7 @@ On top of the paper artifact we built several independent extensions, all gated 
 3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
 4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
 
-The experiments for both live in `state_aware_experiments/`.
+The experiments for both live in `experiments/`.
 
 ---
 
@@ -75,7 +75,7 @@ python -m unittest test_traffic_gen_utils.py
 python -m unittest test_custom_random_number_generator.py
 ```
 
-There is no test suite for `htsim/sim/` itself or for `state_aware_experiments/` — correctness there is validated by running experiments and inspecting output (grep for `enable on tor downlink 1`, event-count sanity checks, etc. — see `state_aware_experiments/RUNNING_EXPERIMENTS.md`).
+There is no test suite for `htsim/sim/` itself or for `experiments/` — correctness there is validated by running experiments and inspecting output (grep for `enable on tor downlink 1`, event-count sanity checks, etc. — see `experiments/RUNNING_EXPERIMENTS.md`).
 
 ---
 
@@ -137,7 +137,7 @@ REPS_EuroSys_Artifact/
 │       ├── main_uec.cpp         ← CLI entry point (new flags added here)
 │       ├── fat_tree_topology.*  ← leaf-ECN flag
 │       └── connection_matrices/ ← workload TM files
-├── state_aware_experiments/    ← OUR WORK (state-aware extension + experiments)
+├── experiments/    ← OUR WORK (state-aware extension + experiments)
 │   ├── README.md               ← start here: lineage + takeaways
 │   ├── ARCHITECTURE.md         ← code-level design, line references
 │   ├── RUNNING_EXPERIMENTS.md  ← how to add a new experiment (written for future agents)
@@ -186,7 +186,7 @@ The `_network_is_asymmetric` flag is set organically when the LB enters frozen m
 | `-fail_link_time <fail_us> <recover_us>` | Schedules dynamic Agg↔Core pipe failure and recovery. |
 | `-fail_link_target <agg> <core>` | Repeatable. Selects which Agg↔Core link(s) to fail. |
 | `-log_reps_state <file>` + `-log_reps_state_src <id>` | Per-ACK CSV diagnostic log. |
-| `-log_reps_events <file>` + `-log_reps_events_src <id>` | Unified send+ACK+freeze event trace (SEND/RTX/RTS/ACK/NACK/FREEZE/UNFREEZE, slot-indexed buffer snapshot per row). Independent file and schema from `-log_reps_state`. See `state_aware_experiments/tools/README.md` for the CSV schema and the `reps_event_viewer.py` interactive HTML viewer. |
+| `-log_reps_events <file>` + `-log_reps_events_src <id>` | Unified send+ACK+freeze event trace (SEND/RTX/RTS/ACK/NACK/FREEZE/UNFREEZE, slot-indexed buffer snapshot per row). Independent file and schema from `-log_reps_state`. See `experiments/tools/README.md` for the CSV schema and the `reps_event_viewer.py` interactive HTML viewer. |
 
 `-exit_freeze <picoseconds>` already existed; our experiments use `200000000` (= 200 ms) to suppress mid-run thaws.
 
@@ -247,7 +247,7 @@ is a near-deterministic congestion signal. Motivated v4 future idea (gate CC on 
 
 - **4 workloads × 5 failure severities × 2 modes × 5 seeds = 200 cells.**
 - **Full artifacts**: 16 plots, 2 CSVs (~44k flow rows, 200 event rows), 3 scripts, `runs.tar.gz`.
-- All in `state_aware_experiments/exp03_matrix_sweep_v3/`.
+- All in `experiments/exp03_matrix_sweep_v3/`.
 
 **Headline**: once `-disable_tor_ecn` is correctly in place, state-aware mode's FCT impact on synthetic workloads is **small**. Strongest signal: incast p99 improves ~14 μs in healthy composite. The architecture wires correctly (SA flag flips exactly equal FREEZING entries; zero false positives in 40 healthy-state runs), but the FCT win is narrow.
 
@@ -269,15 +269,15 @@ is a near-deterministic congestion signal. Motivated v4 future idea (gate CC on 
 
 ## How to run a new experiment
 
-The full recipe is in `state_aware_experiments/RUNNING_EXPERIMENTS.md`. Short version:
+The full recipe is in `experiments/RUNNING_EXPERIMENTS.md`. Short version:
 
-1. Create `state_aware_experiments/expNN_short_name/` with subdirs `plots/`, `data/`, `scripts/`.
+1. Create `experiments/expNN_short_name/` with subdirs `plots/`, `data/`, `scripts/`.
 2. Write a bash driver that iterates the design matrix, is idempotent, and always passes `-disable_tor_ecn`.
 3. Write a Python aggregator that outputs a tidy CSV (columns: `workload`, `mode`, `sev`, `seed`, `flow_id`, `fct_us`, `size`, `flow_class`).
 4. Write a Python plotter that emits PNGs to `plots/` with 95% CI error bars (t-distribution, not naive ±SE).
 5. Compress runs: `tar -czf expNN/runs.tar.gz -C expNN/runs . && rm -rf expNN/runs/`.
 6. Write `README.md` with required sections; use relative image paths (`plots/foo.png`, never `/tmp/`).
-7. Add a row to `state_aware_experiments/README.md` lineage table.
+7. Add a row to `experiments/README.md` lineage table.
 8. Run the quick checklist from `RUNNING_EXPERIMENTS.md § 11`.
 
 ---
@@ -325,12 +325,12 @@ If an experiment reveals a new design hypothesis worth keeping across sessions, 
 directories/files are the paper's original artifact vs our additions, verified against the
 first commit (`e19b8d0`). Use that file for anything outside `htsim/sim/`.
 
-Full detail for `htsim/sim/` itself moved to [`state_aware_experiments/MODIFICATIONS.md`](state_aware_experiments/MODIFICATIONS.md)
+Full detail for `htsim/sim/` itself moved to [`experiments/MODIFICATIONS.md`](experiments/MODIFICATIONS.md)
 — source of truth for original-vs-added boundary in `htsim/sim/`. Index below; consult that
 file for exact lines, rationale, and per-entry results.
 **Rule for future additions:** every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====`
 banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCHITECTURE doc under
-`state_aware_experiments/`.
+`experiments/`.
 
 `[ORIGINAL]` — all of `htsim/sim/` except rows below; `artifact_scripts/`/`artifact_results/` untouched.
 
@@ -354,4 +354,4 @@ banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCH
 | `path-static` | `-load_balancing_algo path_static` | Flow pinned to 1 path (greedy edge-load) + reverse-path routing fix |
 | `srv6` | `-use_srv6` | SRv6 source-routing substrate, orthogonal to LB algo |
 | `freezing-pxr` | `-load_balancing_algo freezing_pxr` | Path-eXcluding REPS: exclude RTO-triggering EV instead of full freeze |
-| `reps-event-trace` | `-log_reps_events` | Unified send+ACK+freeze event trace plus an interactive HTML buffer viewer (`state_aware_experiments/tools/`) |
+| `reps-event-trace` | `-log_reps_events` | Unified send+ACK+freeze event trace plus an interactive HTML buffer viewer (`experiments/tools/`) |

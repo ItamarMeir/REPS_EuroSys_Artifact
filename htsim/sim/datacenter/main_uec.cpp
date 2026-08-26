@@ -153,7 +153,7 @@ private:
 // Samples core→agg DOWNlink queue depths (queues_nc_nup, opposite direction
 // from CoreQueueSampler's agg→core uplink) for the first num_cores core
 // switches only, every interval_us µs, writing time_us,core,agg,bytes rows
-// to a CSV. Built for exp25 (state_aware_experiments/exp25_queue_dynamics_v25/)
+// to a CSV. Built for exp25 (experiments/exp25_queue_dynamics_v25/)
 // to check whether REPS's first-window round-robin (see exp24) produces a
 // synchronized queue spike at flow start that FREEZING does not. Gated by
 // -log_core_downlink_queues <file>; num_cores/interval are experiment-specific
@@ -813,7 +813,7 @@ int main(int argc, char **argv) {
 
         // ===== ADDED (smart-filter): off by default. Mutually exclusive with =====
         // -state_aware_ecn (hard error below after parse loop).               =====
-        // See state_aware_experiments/expNN_smart_filter/ARCHITECTURE.md.     =====
+        // See experiments/expNN_smart_filter/ARCHITECTURE.md.     =====
         } else if (!strcmp(argv[i],"-smart_filter_mode")){
             const char* m = argv[i+1];
             if      (!strcmp(m,"none"))                 UecSrc::_smart_filter_mode = UecSrc::SF_NONE;
@@ -891,7 +891,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
             fprintf(UecSrc::_reps_events_log,
-                    "n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,head,frozen_head,cwnd_pkts,inflight_pkts,slots\n");
+                    "n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,head,frozen_head,cwnd_pkts,inflight_pkts,slots,fifo\n"); // ===== ADDED (reps-fifo-trace): fifo column =====
             cout << "Logging REPS event trace to " << argv[i+1] << endl;
             i++;
         } else if (!strcmp(argv[i],"-log_reps_events_src")){

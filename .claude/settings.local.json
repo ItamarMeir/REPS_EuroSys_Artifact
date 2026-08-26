@@ -5,7 +5,8 @@
       "Bash(git fsck *)",
       "Bash(docker build *)",
       "Bash(Get-Content *)",
-      "Bash(docker run *)"
+      "Bash(docker run *)",
+      "Bash(docker --version)"
     ]
   }
 }
