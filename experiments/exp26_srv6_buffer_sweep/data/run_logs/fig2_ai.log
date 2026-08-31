@@ -1,0 +1,45 @@
+fig2: 25 runs  (panels=['ai'])
+  prep: python3 connection_matrices/gen_files.py --size_topo 128 --all_red_size 128
+[1/25] ok                   ai/alltoall4/ops  16256 flows, 108.8s  [tor-ecn-reenabled]
+[2/25] ok                   ai/alltoall4/reps_b1  16256 flows, 119.5s  [tor-ecn-reenabled]
+[3/25] ok                   ai/alltoall4/reps_b2  16256 flows, 109.5s  [tor-ecn-reenabled]
+[4/25] ok                   ai/alltoall4/reps_b4  16256 flows, 130.6s  [tor-ecn-reenabled]
+[5/25] ok                   ai/alltoall4/reps_b8  16256 flows, 121.8s  [tor-ecn-reenabled]
+[6/25] ok                   ai/alltoall8/ops  16256 flows, 140.4s  [tor-ecn-reenabled]
+[7/25] ok                   ai/alltoall8/reps_b1  16256 flows, 110.6s  [tor-ecn-reenabled]
+[8/25] ok                   ai/alltoall8/reps_b2  16256 flows, 107.2s  [tor-ecn-reenabled]
+[9/25] ok                   ai/alltoall8/reps_b4  16256 flows, 126.4s  [tor-ecn-reenabled]
+[10/25] ok                   ai/alltoall8/reps_b8  16256 flows, 150.1s  [tor-ecn-reenabled]
+[11/25] ok                   ai/alltoall16/ops  16256 flows, 157.7s  [tor-ecn-reenabled]
+[12/25] ok                   ai/alltoall16/reps_b1  16256 flows, 174.6s  [tor-ecn-reenabled]
+[13/25] ok                   ai/alltoall16/reps_b2  16256 flows, 183.9s  [tor-ecn-reenabled]
+[14/25] ok                   ai/alltoall16/reps_b4  16256 flows, 169.4s  [tor-ecn-reenabled]
+[15/25] ok                   ai/alltoall16/reps_b8  16256 flows, 189.6s  [tor-ecn-reenabled]
+[16/25] ok                   ai/allreduce/ops  8128 flows, 100.9s  [tor-ecn-reenabled]
+[17/25] ok                   ai/allreduce/reps_b1  8128 flows, 107.4s  [tor-ecn-reenabled]
+[18/25] ok                   ai/allreduce/reps_b2  8128 flows, 97.6s  [tor-ecn-reenabled]
+[19/25] ok                   ai/allreduce/reps_b4  8128 flows, 98.8s  [tor-ecn-reenabled]
+[20/25] ok                   ai/allreduce/reps_b8  8128 flows, 100.0s  [tor-ecn-reenabled]
+[21/25] ok                   ai/allreduce_t/ops  896 flows, 44.3s  [tor-ecn-reenabled]
+[22/25] ok                   ai/allreduce_t/reps_b1  896 flows, 50.7s  [tor-ecn-reenabled]
+[23/25] ok                   ai/allreduce_t/reps_b2  896 flows, 48.7s  [tor-ecn-reenabled]
+[24/25] ok                   ai/allreduce_t/reps_b4  896 flows, 46.2s  [tor-ecn-reenabled]
+[25/25] ok                   ai/allreduce_t/reps_b8  896 flows, 55.3s  [tor-ecn-reenabled]
+  restore: git checkout -- <5 collective .cm>
+fatal: Unable to create '/workspace/.git/index.lock': File exists.
+
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+Traceback (most recent call last):
+  File "/workspace/experiments/exp26_srv6_buffer_sweep/scripts/run_sym.py", line 246, in <module>
+    main()
+  File "/workspace/experiments/exp26_srv6_buffer_sweep/scripts/run_sym.py", line 239, in main
+    restore_collective_cms()
+  File "/workspace/experiments/exp26_srv6_buffer_sweep/scripts/run_sym.py", line 83, in restore_collective_cms
+    subprocess.run(["git", "checkout", "--", *paths],
+  File "/usr/lib/python3.10/subprocess.py", line 526, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'checkout', '--', 'htsim/sim/datacenter/connection_matrices/alltoall4.cm', 'htsim/sim/datacenter/connection_matrices/alltoall8.cm', 'htsim/sim/datacenter/connection_matrices/alltoall16.cm', 'htsim/sim/datacenter/connection_matrices/allreduce.cm', 'htsim/sim/datacenter/connection_matrices/allreduce_t.cm']' returned non-zero exit status 128.

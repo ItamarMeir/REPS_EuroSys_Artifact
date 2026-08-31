@@ -1,0 +1,9 @@
+fig6: 6 runs  (topo=fat_tree_128_1os_3t_400g n_paths=16)
+[1/6] ok                   ops  4 flows, 5.6s  [tor-ecn-reenabled]
+[2/6] ok                   reps_b1  4 flows, 5.3s  [tor-ecn-reenabled]
+[3/6] ok                   reps_b2  4 flows, 5.3s  [tor-ecn-reenabled]
+[4/6] ok                   reps_b4  4 flows, 5.5s  [tor-ecn-reenabled]
+[5/6] ok                   reps_b8  4 flows, 5.9s  [tor-ecn-reenabled]
+[6/6] ok                   reps_b16  4 flows, 7.6s  [tor-ecn-reenabled]
+
+fig6 done: 0 failures / 6

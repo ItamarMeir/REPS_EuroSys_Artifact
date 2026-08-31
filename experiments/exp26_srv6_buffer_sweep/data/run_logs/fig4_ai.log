@@ -1,0 +1,30 @@
+fig4: 25 runs  (panels=['ai'])
+  prep: python3 connection_matrices/gen_files.py --size_topo 128 --all_red_size 128  (backed up 7 .cm)
+[1/25] ok                   ai/alltoall4/ops  16256 flows, 166.5s  [tor-ecn-reenabled]
+[2/25] ok                   ai/alltoall4/reps_b1  16256 flows, 161.8s  [tor-ecn-reenabled]
+[3/25] ok                   ai/alltoall4/reps_b2  16256 flows, 156.8s  [tor-ecn-reenabled]
+[4/25] ok                   ai/alltoall4/reps_b4  16256 flows, 120.0s  [tor-ecn-reenabled]
+[5/25] ok                   ai/alltoall4/reps_b8  16256 flows, 112.8s  [tor-ecn-reenabled]
+[6/25] ok                   ai/alltoall8/ops  16256 flows, 127.5s  [tor-ecn-reenabled]
+[7/25] ok                   ai/alltoall8/reps_b1  16256 flows, 108.3s  [tor-ecn-reenabled]
+[8/25] ok                   ai/alltoall8/reps_b2  16256 flows, 126.7s  [tor-ecn-reenabled]
+[9/25] ok                   ai/alltoall8/reps_b4  16256 flows, 158.3s  [tor-ecn-reenabled]
+[10/25] ok                   ai/alltoall8/reps_b8  16256 flows, 176.0s  [tor-ecn-reenabled]
+[11/25] ok                   ai/alltoall16/ops  16256 flows, 137.8s  [tor-ecn-reenabled]
+[12/25] ok                   ai/alltoall16/reps_b1  16256 flows, 146.2s  [tor-ecn-reenabled]
+[13/25] ok                   ai/alltoall16/reps_b2  16256 flows, 137.5s  [tor-ecn-reenabled]
+[14/25] ok                   ai/alltoall16/reps_b4  16256 flows, 163.1s  [tor-ecn-reenabled]
+[15/25] ok                   ai/alltoall16/reps_b8  16256 flows, 147.3s  [tor-ecn-reenabled]
+[16/25] ok                   ai/allreduce/ops  8128 flows, 62.2s  [tor-ecn-reenabled]
+[17/25] ok                   ai/allreduce/reps_b1  8128 flows, 77.9s  [tor-ecn-reenabled]
+[18/25] ok                   ai/allreduce/reps_b2  8128 flows, 64.8s  [tor-ecn-reenabled]
+[19/25] ok                   ai/allreduce/reps_b4  8128 flows, 74.1s  [tor-ecn-reenabled]
+[20/25] ok                   ai/allreduce/reps_b8  8128 flows, 70.7s  [tor-ecn-reenabled]
+[21/25] ok                   ai/allreduce_t/ops  896 flows, 32.4s  [tor-ecn-reenabled]
+[22/25] ok                   ai/allreduce_t/reps_b1  896 flows, 33.7s  [tor-ecn-reenabled]
+[23/25] ok                   ai/allreduce_t/reps_b2  896 flows, 37.6s  [tor-ecn-reenabled]
+[24/25] ok                   ai/allreduce_t/reps_b4  896 flows, 32.5s  [tor-ecn-reenabled]
+[25/25] ok                   ai/allreduce_t/reps_b8  896 flows, 30.7s  [tor-ecn-reenabled]
+  restore: put back 7 collective .cm
+
+fig4 done: 0 failures / 25
