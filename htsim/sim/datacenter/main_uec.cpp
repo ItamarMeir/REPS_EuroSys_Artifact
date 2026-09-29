@@ -599,6 +599,13 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i+1],"dual_mprdma_reps"))
                 UecSrc::_sender_cc_algo = UecSrc::DUAL_MPRDMA_REPS;
             // ===== END ADDED (dual-window-reps-mprdma) =====
+            // ===== ADDED (dual-window-cwnd-cap) =====
+            // v2: same mechanism, combined safe+random cwnd budget instead of
+            // each window getting its own independent ceiling. See
+            // experiments/MODIFICATIONS.md and uec.cpp's design note.
+            else if (!strcmp(argv[i+1],"dual_mprdma_reps_cap"))
+                UecSrc::_sender_cc_algo = UecSrc::DUAL_MPRDMA_REPS_CAP;
+            // ===== END ADDED (dual-window-cwnd-cap) =====
             else {
                 cout << "UNKNOWN CC ALGO " << argv[i+1] << endl;
                 exit(1);
@@ -1191,7 +1198,14 @@ int main(int argc, char **argv) {
     // EvSource distinctions (fresh/frozen pop vs random/explore) - it composes
     // only with -load_balancing_algo freezing (paper-REPS), never with the
     // separate, sticky-single-path MPRDMA *LB* algo or any other LB algo.
-    if (UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS) {
+    // ===== FIXED (dual-window-cwnd-cap): guard extended to the CAP variant =====
+    // Every requirement below (LB=freezing, -sender_cc_only, per-host LB
+    // overrides, NSCC-extension incompatibility) applies identically to
+    // DUAL_MPRDMA_REPS_CAP - it's the same mechanism with a different cwnd
+    // update rule, not a different composition requirement.
+    if (UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS
+        || UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS_CAP) {
+    // ===== END FIXED =====
         if (UecSrc::_load_balancing_algo != UecSrc::FREEZING) {
             cerr << "ERROR: -sender_cc_algo dual_mprdma_reps requires "
                  << "-load_balancing_algo freezing (paper-REPS). Got a different "

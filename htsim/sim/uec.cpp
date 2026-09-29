@@ -747,6 +747,43 @@ void UecSrc::initNscc(mem_b cwnd, simtime_picosec peer_rtt) {
             << endl;
     }
     // ===== END ADDED (dual-window-reps-mprdma) =====
+    // ===== ADDED (dual-window-cwnd-cap) =====
+    // Rule #1: both windows default to 1x BDP (symmetric) rather than the
+    // v1 asymmetric _maxwnd/_cwnd defaults - the two windows now share one
+    // _maxwnd budget instead of each getting their own full ceiling, so
+    // starting both at the same conservative value is the correct baseline.
+    // Still independently overridable via the same -dual_safe_cwnd_init /
+    // -dual_random_cwnd_init flags v1 uses.
+    else if (_sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
+        _safe_cwnd_init = (_dual_safe_cwnd_init_flag > 0) ? (mem_b)_dual_safe_cwnd_init_flag * _mtu : _bdp;
+        _random_cwnd_init = (_dual_random_cwnd_init_flag > 0) ? (mem_b)_dual_random_cwnd_init_flag * _mtu : _bdp;
+        _win_safe.cwnd = _safe_cwnd_init;
+        _win_random.cwnd = _random_cwnd_init;
+        _win_safe.in_flight = 0;
+        _win_random.in_flight = 0;
+        syncDualCwnd();
+        cout << "Initialize per-instance DUAL_MPRDMA_REPS_CAP windows:"
+            << " flowid " << _flow.flow_id()
+            << " safe_cwnd_init=" << _safe_cwnd_init
+            << " random_cwnd_init=" << _random_cwnd_init
+            << " maxwnd=" << _maxwnd
+            << " bdp=" << _bdp
+            << endl;
+        // ===== FIXED (dual-window-cwnd-cap review pass, LOW) =====
+        // -dual_safe_cwnd_init/-dual_random_cwnd_init aren't validated against
+        // _maxwnd - a user-supplied pair summing well above it is silently
+        // legal (rule #6 will converge it down over subsequent RTTs, same as
+        // the built-in startup overshoot), but worth a visible warning rather
+        // than a silent surprise.
+        if (_safe_cwnd_init + _random_cwnd_init > _maxwnd) {
+            cout << "WARNING: DUAL_MPRDMA_REPS_CAP safe_cwnd_init+random_cwnd_init="
+                << (_safe_cwnd_init + _random_cwnd_init) << " > maxwnd=" << _maxwnd
+                << " - will converge down over the first few RTTs (see rule #6, "
+                << "experiments/MODIFICATIONS.md)." << endl;
+        }
+        // ===== END FIXED =====
+    }
+    // ===== END ADDED (dual-window-cwnd-cap) =====
 
     cout << "Initialize per-instance NSCC parameters:"
         << " flowid " << _flow.flow_id()
@@ -1215,6 +1252,14 @@ UecSrc::UecSrc(TrafficLogger* trafficLogger, EventList& eventList, UecNIC& nic, 
                 updateCwndOnNack = &UecSrc::dontUpdateCwndOnNack;
                 break;
             // ===== END ADDED (dual-window-reps-mprdma) =====
+            // ===== ADDED (dual-window-cwnd-cap) =====
+            // Same no-op binding as DUAL_MPRDMA_REPS above, same reason: real
+            // dispatch is the explicit calls in processAck()/processNack().
+            case DUAL_MPRDMA_REPS_CAP:
+                updateCwndOnAck  = &UecSrc::dontUpdateCwndOnAck;
+                updateCwndOnNack = &UecSrc::dontUpdateCwndOnNack;
+                break;
+            // ===== END ADDED (dual-window-cwnd-cap) =====
             default:
                 cout << "Unknown CC algo specified " << _sender_cc_algo << endl;
                 assert(0);
@@ -1377,7 +1422,9 @@ mem_b UecSrc::handleAckno(UecDataPacket::seq_t ackno, mem_b* safe_bytes, mem_b* 
             // invariant assert cannot catch (both sides leak equally), and
             // which can eventually wedge a window's admission gate shut
             // (maybeIdleReset requires in_flight==0, unreachable once leaked).
-            if (_sender_cc_algo != DUAL_MPRDMA_REPS) {
+            // ===== FIXED (dual-window-cwnd-cap): CAP shares this decrement-only guard =====
+            if (_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) {
+            // ===== END FIXED =====
                 _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
             } else {
                 _rtx_win_tag.erase(ackno);
@@ -1445,7 +1492,9 @@ mem_b UecSrc::handleCumulativeAck(UecDataPacket::seq_t cum_ack, mem_b* safe_byte
             // fully decremented at RTO time and is not part of
             // dual_safe_acked/dual_random_acked, so the give-back would be a
             // permanent phantom increment on both counters.
-            if (_sender_cc_algo != DUAL_MPRDMA_REPS) {
+            // ===== FIXED (dual-window-cwnd-cap): CAP shares this decrement-only guard =====
+            if (_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) {
+            // ===== END FIXED =====
                 _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
             } else {
                 _rtx_win_tag.erase(seqno);
@@ -1546,6 +1595,20 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
                  << endl;
         }
         // ===== END ADDED (dual-window-reps-mprdma) =====
+        // ===== ADDED (dual-window-cwnd-cap) =====
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
+            mem_b sum = _win_safe.cwnd + _win_random.cwnd;
+            cout << "Flow " << _name << " DUAL_MPRDMA_REPS_CAP final state:"
+                 << " predict_mismatch_count=" << _dual_predict_mismatch_count
+                 << " safe_cwnd=" << _win_safe.cwnd << " safe_in_flight=" << _win_safe.in_flight
+                 << " random_cwnd=" << _win_random.cwnd << " random_in_flight=" << _win_random.in_flight
+                 << " sum=" << sum << " maxwnd=" << _maxwnd
+                 << " max_sum_ratio_x1000=" << _dual_cap_max_sum_ratio_x1000
+                 << " last_over_cap_at_us=" << timeAsUs(_dual_cap_last_over_cap_at)
+                 << " max_sum_ratio_after_converge_x1000=" << _dual_cap_max_sum_ratio_after_converge_x1000
+                 << endl;
+        }
+        // ===== END ADDED (dual-window-cwnd-cap) =====
         _speculating = false;
         
 
@@ -1747,7 +1810,12 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     // approximation - see experiments/ARCHITECTURE.md: an aggregate ACK's
     // single ECN bit can legitimately straddle both windows).
     mem_b dual_safe_acked = 0, dual_random_acked = 0;
-    bool dual_active = (_sender_cc_algo == DUAL_MPRDMA_REPS);
+    // ===== FIXED (dual-window-cwnd-cap): dual_active covers both v1 and CAP =====
+    // This flag gates shared bookkeeping only (dual_safe_acked/dual_random_acked
+    // accumulation, the _in_flight correction below) - identical for both algos,
+    // since only the cwnd VALUE update differs (dispatched separately below).
+    bool dual_active = (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP);
+    // ===== END FIXED =====
     // ===== END ADDED (dual-window-reps-mprdma) =====
 
     handleCumulativeAck(cum_ack, dual_active ? &dual_safe_acked : nullptr,
@@ -1905,7 +1973,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         // ===== END ADDED (smart-filter) ==================================
 
         // ===== ADDED (dual-window-reps-mprdma) =====
-        if (dual_active) {
+        if (dual_active && _sender_cc_algo == DUAL_MPRDMA_REPS) {
             if (dual_safe_acked > 0)
                 updateCwndOnAck_DualMPRDMA(WIN_SAFE, cc_ecn_view, delay, dual_safe_acked);
             if (dual_random_acked > 0)
@@ -1918,6 +1986,21 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
             }
         } else
         // ===== END ADDED (dual-window-reps-mprdma) =====
+        // ===== ADDED (dual-window-cwnd-cap) =====
+        // v2: same shared plumbing, but the AI cwnd math and idle-reset target
+        // differ (combined-budget cap) - dispatched to new sibling functions,
+        // the v1 functions above are untouched.
+        if (dual_active && _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
+            if (dual_safe_acked > 0)
+                updateCwndOnAck_DualMPRDMA_Cap(WIN_SAFE, cc_ecn_view, delay, dual_safe_acked);
+            if (dual_random_acked > 0)
+                updateCwndOnAck_DualMPRDMA_Cap(WIN_RANDOM, cc_ecn_view, delay, dual_random_acked);
+            if (!_loss_recovery_mode) {
+                maybeIdleReset_Cap(_win_safe, _safe_cwnd_init, _win_random);
+                maybeIdleReset_Cap(_win_random, _random_cwnd_init, _win_safe);
+            }
+        } else
+        // ===== END ADDED (dual-window-cwnd-cap) =====
         (this->*updateCwndOnAck)(cc_ecn_view, delay, newly_recvd_bytes);
 
         // ===== ADDED (swift-sack-hole-md) =====================================
@@ -2328,14 +2411,15 @@ void UecSrc::fulfill_adjustment(){
 
 // ===== ADDED (dual-window-reps-mprdma): tag param =====
 void UecSrc::mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t pktsize, WindowTag tag){
-    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // ===== FIXED (dual-window-reps-mprdma review pass; extended for dual-window-cwnd-cap) =====
     // A WIN_NONE record (RTS control packet - createSendRecord tags it
     // WIN_NONE since RTS isn't attributed to either window, and it never
     // increments _in_flight when sent, see sendRTS()) must not decrement the
     // aggregate _in_flight either, or the invariant permanently breaks by
     // exactly pktsize (aggregate down, per-window branches below correctly
-    // no-op on WIN_NONE, so nothing on that side to match it).
-    if (_sender_cc_algo != DUAL_MPRDMA_REPS || tag != WIN_NONE) {
+    // no-op on WIN_NONE, so nothing on that side to match it). CAP shares
+    // this guard unchanged - same decrement-only semantics.
+    if ((_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) || tag != WIN_NONE) {
         _in_flight -= pktsize;
     }
     // ===== END FIXED =====
@@ -3010,8 +3094,9 @@ void UecSrc::fastLossRecovery(uint32_t ooo, UecBasePacket::seq_t cum_ack) {
         // passes ">=" and reaches here with win_tag == WIN_NONE (RTS is never
         // attributed to a window and never incremented _in_flight when
         // sent) - skip the aggregate decrement to match, same reasoning as
-        // mark_packet_for_retransmission's identical fix.
-        if (_sender_cc_algo != DUAL_MPRDMA_REPS || win_tag != WIN_NONE) {
+        // mark_packet_for_retransmission's identical fix. CAP shares this
+        // guard unchanged (dual-window-cwnd-cap).
+        if ((_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) || win_tag != WIN_NONE) {
             _in_flight -= pkt_size;
         }
         // ===== END FIXED =====
@@ -3098,8 +3183,10 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
             << " trimming " << endl;
     }
     if (_sender_based_cc){
-        // ===== ADDED (dual-window-reps-mprdma) =====
-        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        // ===== ADDED (dual-window-reps-mprdma); extended for dual-window-cwnd-cap =====
+        // NACK/MD is identical for CAP (rule #7: independent per-window, decrease-
+        // only, can't violate the combined cap) - both algos share this same call.
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
             updateCwndOnNack_DualMPRDMA(win_tag, pkt_size);
         } else
         // ===== END ADDED (dual-window-reps-mprdma) =====
@@ -3115,8 +3202,9 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
     // ===== FIXED (dual-window-reps-mprdma review pass) =====
     // Same as the identical fix in fastLossRecovery/mark_packet_for_retransmission:
     // an RTS record (win_tag == WIN_NONE) never incremented _in_flight when
-    // sent, so skip the aggregate decrement to match.
-    if (_sender_cc_algo != DUAL_MPRDMA_REPS || win_tag != WIN_NONE) {
+    // sent, so skip the aggregate decrement to match. CAP shares this guard
+    // unchanged (dual-window-cwnd-cap).
+    if ((_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) || win_tag != WIN_NONE) {
         _in_flight -= pkt_size;
     }
     // ===== END FIXED =====
@@ -3261,6 +3349,15 @@ void UecSrc::startFlow() {
     _rtx_win_tag.clear();
     _dual_gate_predicted_tag = WIN_NONE;
     // ===== END FIXED =====
+    // ===== FIXED (dual-window-cwnd-cap review pass, LOW) =====
+    // Same reactivation-staleness reasoning as above: a peak-ratio/last-over-
+    // cap reading from a previous activation shouldn't be attributed to this
+    // one.
+    _dual_cap_max_sum_ratio_x1000 = 0;
+    _dual_cap_last_over_cap_at = 0;
+    _dual_cap_converged_once = false;
+    _dual_cap_max_sum_ratio_after_converge_x1000 = 0;
+    // ===== END FIXED =====
     _pull_target = INIT_PULL;
     _pull = INIT_PULL;
     _last_rts = 0;
@@ -3377,8 +3474,10 @@ void UecSrc::sendIfPermitted() {
     //cout << timeAsUs(eventlist().now()) << " " << nodename() << " FOO " << _cwnd << " " << _in_flight << endl;
 
     if (_sender_based_cc) {
-        // ===== ADDED (dual-window-reps-mprdma) =====
-        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        // ===== ADDED (dual-window-reps-mprdma); extended for dual-window-cwnd-cap =====
+        // dualWindowBlocked() itself dispatches to the CAP-aware idle-reset
+        // internally when CAP is active - see its body.
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
             if (dualWindowBlocked()) {
                 return;
             }
@@ -3890,10 +3989,10 @@ uint16_t UecSrc::nextEntropy_freezing(){
             return rand() % _no_of_paths;
         } else {
             // ===== ADDED (dual-window-reps-mprdma) =====
-            // Only the dual algo distinguishes valid vs. stale frozen pops;
+            // Only the dual algos distinguish valid vs. stale frozen pops;
             // every other algo keeps emitting plain EVSRC_FROZEN_POP so its
             // trace output (-log_reps_events) stays byte-identical.
-            if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
                 bool was_valid = circular_buffer_reps->is_valid_frozen();
                 _last_ev_source = was_valid ? EVSRC_FROZEN_POP_VALID : EVSRC_FROZEN_POP_STALE;
                 return circular_buffer_reps->remove_frozen();
@@ -4016,8 +4115,16 @@ bool UecSrc::dualWindowBlocked() {
         return _rtx_queue.empty();
     }
     // ===== END ADDED (dual-window-reps-mprdma): code-review fix =====
+    // ===== ADDED (dual-window-cwnd-cap) =====
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
+        maybeIdleReset_Cap(_win_safe, _safe_cwnd_init, _win_random);
+        maybeIdleReset_Cap(_win_random, _random_cwnd_init, _win_safe);
+    } else
+    // ===== END ADDED (dual-window-cwnd-cap) =====
+    {
     maybeIdleReset(_win_safe, _safe_cwnd_init);
     maybeIdleReset(_win_random, _random_cwnd_init);
+    }
     WindowTag tag = dualPeekNextWindowTag();
     if (_rtx_queue.empty()) {
         // Only a NEW-packet prediction is meaningful to compare later in
@@ -4034,7 +4141,9 @@ bool UecSrc::dualWindowBlocked() {
 // rtxTimerExpired - see plan's Step 4 site list for what a violation would
 // mean (a missed _in_flight mutation site).
 void UecSrc::assertDualWindowInvariant(const char* site) {
-    if (_sender_cc_algo != DUAL_MPRDMA_REPS) return;
+    // ===== FIXED (dual-window-cwnd-cap): also checked for CAP =====
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) return;
+    // ===== END FIXED =====
     mem_b sum = _win_safe.in_flight + _win_random.in_flight;
     if (sum != _in_flight) {
         printf("DUALDEBUG site=%s name=%s now=%lu safe_if=%lld random_if=%lld "
@@ -4048,10 +4157,132 @@ void UecSrc::assertDualWindowInvariant(const char* site) {
 }
 
 void UecSrc::syncDualCwnd() {
-    if (_sender_cc_algo != DUAL_MPRDMA_REPS) return;
+    // ===== FIXED (dual-window-cwnd-cap): also mirrored for CAP =====
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) return;
+    // ===== END FIXED =====
     _cwnd = _win_safe.cwnd + _win_random.cwnd;
 }
-// ===== END ADDED (dual-window-reps-mprdma) ==================================
+// ===== END ADDED (dual-window-reps-mprdma) =====
+
+// ===== ADDED (dual-window-cwnd-cap) =====================================
+// v2 of DUAL_MPRDMA_REPS (see uec.h's Sender_CC enum and
+// experiments/MODIFICATIONS.md for the full design). Every original
+// dual-window-reps-mprdma function above is untouched; these are new,
+// parallel functions sharing the same plumbing (window tagging, admission
+// gate dispatch, invariant assert - all extended to recognize this algo too)
+// but implementing the combined-budget cap:
+//   _win_safe.cwnd + _win_random.cwnd <= _maxwnd
+// instead of each window getting its own independent _maxwnd ceiling.
+//
+// Locked rules (resolved with the user + advisor this session):
+// 1. Flow start: both windows default to 1x BDP (initNscc's DUAL_MPRDMA_REPS
+//    branch, extended - see there), not the original's asymmetric
+//    _maxwnd/_cwnd defaults.
+// 2. Freeze entry: no change (cwnd already updates normally through frozen
+//    mode for both v1 and v2 - nothing to implement).
+// 3. Freeze exit (unfreeze): no special-case at all, by explicit user
+//    correction - cwnd just continues unchanged through the unfreeze event.
+//    (Implemented as: processEv_freezing's reset-to-init block is NOT
+//    extended to this algo - absence of a match is the entire "no special
+//    case" behavior, nothing to add there.)
+// 4. Idle reset (below): target is capped at max(_mtu, _maxwnd-other.cwnd)
+//    so an idle window can't single-handedly push the sum over the cap.
+// 5. Normal-state AI (sum-before <= _maxwnd): headroom-first - own window
+//    always gets the full AI increment; only reach into the other window
+//    for the overflow if growing would cross the cap. Lets the sum recover
+//    after an MD event (the user's literal "grow one, shrink other by the
+//    same amount" wording would make that permanent - flagged and revised).
+// 6. Over-cap state (sum-before > _maxwnd, reachable e.g. after a freeze
+//    where random ran high while safe was starved): own window does not
+//    grow; shrink the other window by the plain AI increment (~1 MTU/RTT).
+// 7. MD/NACK/RTO/mark_packet_for_retransmission: unchanged, fully
+//    independent per window (shared with v1 - see the extended dispatch
+//    sites above), since they only ever decrease a window's cwnd and can't
+//    violate the cap.
+//
+// Per-flow peak-sum diagnostic (verification aid, checkFinished's finish
+// line): _dual_cap_max_sum_ratio_x1000 = max observed
+// (win_safe.cwnd+win_random.cwnd)/_maxwnd * 1000 over the flow's life, and
+// _dual_cap_last_over_cap_at = the last simtime the sum was seen over cap
+// (0 if never) - printed on the finish line so a run can be checked for
+// whether/how often the cap actually binds without re-instrumenting.
+
+// Cap-aware idle reset (used only by DUAL_MPRDMA_REPS_CAP): same idle-timer
+// logic as maybeIdleReset(), but the reset target is
+// min(init_val, max(_mtu, _maxwnd - other.cwnd)) instead of a flat init_val,
+// so a window resetting to its default can't by itself push the combined
+// sum over _maxwnd. Never touches other.last_active - this is purely a
+// ceiling on w's own reset target, not a mutation of the sibling window.
+// ===== FIXED (dual-window-cwnd-cap review pass, LOW) =====
+// Shared by maybeIdleReset_Cap and updateCwndOnAck_DualMPRDMA_Cap so the peak-
+// ratio diagnostic also sees overshoot from the idle-reset floor case (the
+// max(_mtu, ...) in maybeIdleReset_Cap can itself leave the sum at
+// _maxwnd + _mtu), not just from the AI/MD path.
+void UecSrc::trackDualCapSumRatio() {
+    mem_b sum = _win_safe.cwnd + _win_random.cwnd;
+    uint32_t ratio_x1000 = (uint32_t)((1000.0 * (double)sum) / (double)_maxwnd);
+    if (ratio_x1000 > _dual_cap_max_sum_ratio_x1000) _dual_cap_max_sum_ratio_x1000 = ratio_x1000;
+    if (sum > _maxwnd) _dual_cap_last_over_cap_at = eventlist().now();
+    if (!_dual_cap_converged_once) {
+        if (sum <= _maxwnd) _dual_cap_converged_once = true;
+    } else if (ratio_x1000 > _dual_cap_max_sum_ratio_after_converge_x1000) {
+        _dual_cap_max_sum_ratio_after_converge_x1000 = ratio_x1000;
+    }
+}
+// ===== END FIXED =====
+
+void UecSrc::maybeIdleReset_Cap(MprdmaWindow& w, mem_b init_val, MprdmaWindow& other) {
+    if (w.last_active == 0) {
+        return; // never active yet; flow-start init already set cwnd correctly
+    }
+    if (w.in_flight == 0 &&
+        eventlist().now() - w.last_active > (simtime_picosec)_dual_window_idle_reset_rtts * _base_rtt) {
+        mem_b headroom = max((mem_b)_mtu, _maxwnd - other.cwnd);
+        w.cwnd = min(init_val, headroom);
+        w.last_active = eventlist().now();
+        trackDualCapSumRatio(); // ===== ADDED (dual-window-cwnd-cap review pass, LOW) =====
+        syncDualCwnd();
+    }
+}
+
+// Cap-aware AI/MD update (used only by DUAL_MPRDMA_REPS_CAP). MD branch is
+// identical to updateCwndOnAck_DualMPRDMA's (a decrease can't violate the
+// cap, rule #7). AI branch implements rules #5/#6.
+void UecSrc::updateCwndOnAck_DualMPRDMA_Cap(WindowTag tag, bool skip, simtime_picosec rtt, mem_b newly_acked_bytes) {
+    if (tag == WIN_NONE) return;
+    MprdmaWindow& w = (tag == WIN_SAFE) ? _win_safe : _win_random;
+    MprdmaWindow& other = (tag == WIN_SAFE) ? _win_random : _win_safe;
+    if (w.cwnd < (mem_b)_mtu) w.cwnd = _mtu;   // same defensive floor as v1
+    if (skip == false) { // additive increase
+        mem_b inc = newly_acked_bytes * _mtu / w.cwnd;
+        mem_b sum_before = w.cwnd + other.cwnd;
+        if (sum_before > _maxwnd) {
+            // Rule #6: already over cap - don't grow own window; shrink the
+            // other by the plain AI increment. other.last_active untouched:
+            // this is w's AI event, not activity on other.
+            other.cwnd = max((mem_b)_mtu, other.cwnd - inc);
+        } else {
+            // Rule #5: headroom-first - own window always gets the full
+            // increment; only reach into other for the overflow if growing
+            // would cross the cap.
+            mem_b new_own = w.cwnd + inc;
+            mem_b new_sum = new_own + other.cwnd;
+            if (new_sum > _maxwnd) {
+                mem_b overflow = new_sum - _maxwnd;
+                other.cwnd = max((mem_b)_mtu, other.cwnd - overflow);
+            }
+            w.cwnd = new_own;
+        }
+        if (w.cwnd > _maxwnd) w.cwnd = _maxwnd; // defensive per-window ceiling
+    } else { // multiplicative decrease, per mark - identical to v1, rule #7
+        w.cwnd -= newly_acked_bytes / 4;
+        w.cwnd = max((mem_b)_mtu, w.cwnd);
+    }
+    w.last_active = eventlist().now();
+    trackDualCapSumRatio(); // Verification aid: peak sum/_maxwnd ratio + last-over-cap time.
+    syncDualCwnd();
+}
+// ===== END ADDED (dual-window-cwnd-cap) ================================================================
 
 void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
 
@@ -4071,6 +4302,12 @@ void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
         // ===== ADDED (dual-window-reps-mprdma) =====
         // Unfreeze wipes buffer state entirely; treat both windows as
         // fresh-start, each back to its own configured init value.
+        // NOT extended to DUAL_MPRDMA_REPS_CAP (dual-window-cwnd-cap, rule #3,
+        // explicit user decision): CAP does no special-casing at unfreeze at
+        // all - cwnd just continues through the event unchanged, and an idle
+        // window picks up the regular capped idle-reset at its normal time.
+        // This intentional non-match is the entire implementation of that
+        // rule - nothing else needed here.
         if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
             _win_safe.cwnd = _safe_cwnd_init;
             _win_random.cwnd = _random_cwnd_init;
@@ -4325,9 +4562,9 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
 
     p->flow().logTraffic(*p, *this, TrafficLogger::PKT_CREATESEND);
 
-    // ===== ADDED (dual-window-reps-mprdma) =====
+    // ===== ADDED (dual-window-reps-mprdma); extended for dual-window-cwnd-cap =====
     WindowTag dual_tag = WIN_NONE;
-    if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
         dual_tag = evSourceToWindowTag(_last_ev_source);
         // Runtime proof of the predictor/actual-draw invariant (see
         // predictWindowForNextEntropy_freezing's comment): must stay 0.
@@ -4349,9 +4586,9 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     // ===== END ADDED (dual-window-reps-mprdma) =====
 
     if (_backlog == 0 || (_receiver_based_cc && _credit < 0) ||
-        (_sender_based_cc && _sender_cc_algo != DUAL_MPRDMA_REPS && _in_flight >= _cwnd) ||
-        // ===== ADDED (dual-window-reps-mprdma) =====
-        (_sender_based_cc && _sender_cc_algo == DUAL_MPRDMA_REPS &&
+        (_sender_based_cc && _sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP && _in_flight >= _cwnd) ||
+        // ===== ADDED (dual-window-reps-mprdma); extended for dual-window-cwnd-cap =====
+        (_sender_based_cc && (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) &&
          ((dual_tag == WIN_SAFE) ? (_win_safe.in_flight >= _win_safe.cwnd)
                                   : (_win_random.in_flight >= _win_random.cwnd)))
         // ===== END ADDED (dual-window-reps-mprdma) =====
@@ -4411,7 +4648,7 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     // WIN_RANDOM (which used to silently misattribute e.g. an RTS retransmit
     // into the random window's accounting). =====
     WindowTag dual_tag = WIN_NONE;
-    if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
         auto tag_it = _rtx_win_tag.find(seq_no);
         if (tag_it != _rtx_win_tag.end()) {
             dual_tag = tag_it->second;
@@ -4433,7 +4670,9 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     // WIN_NONE site (mark_packet_for_retransmission, processNack, fastLossRecovery,
     // handleAckno/handleCumulativeAck's rtx give-back). Without this, retransmitting
     // an RTS permanently inflates _in_flight by _hdr_size with no window counterpart.
-    if (_sender_cc_algo != DUAL_MPRDMA_REPS || dual_tag != WIN_NONE) {
+    // CAP shares this guard unchanged (dual-window-cwnd-cap) - same bug would
+    // otherwise apply identically there.
+    if ((_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) || dual_tag != WIN_NONE) {
         _in_flight += full_pkt_size;
     }
     // ===== END FIXED =====
@@ -4608,11 +4847,11 @@ void UecSrc::timeToSend(const Route& route) {
     }
 
     if (_sender_based_cc) {
-        // ===== ADDED (dual-window-reps-mprdma) =====
-        bool dual_blocked = (_sender_cc_algo == DUAL_MPRDMA_REPS) && dualWindowBlocked();
+        // ===== ADDED (dual-window-reps-mprdma); extended for dual-window-cwnd-cap =====
+        bool dual_blocked = (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) && dualWindowBlocked();
         if (dual_blocked ||
             // ===== END ADDED (dual-window-reps-mprdma) =====
-            (_sender_cc_algo != DUAL_MPRDMA_REPS &&
+            ((_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) &&
              ((_cwnd <= _in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())))) {
             if (_debug_src)
                 cout << _flow.str() << " " << _node_num << "cantSend, limited by sender CWND " << _cwnd << " _in_flight "
@@ -4657,7 +4896,7 @@ void UecSrc::timeToSend(const Route& route) {
         // Loose post-send re-check, not correctness-critical (doesn't send
         // anything itself - just decides whether to ask for another send
         // opportunity later, which will re-gate correctly via dualWindowBlocked()).
-        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
             // review-pass fix: match dualWindowBlocked()'s own loss-recovery
             // exception - during recovery, sending from _rtx_queue is
             // permitted regardless of window occupancy. Without this, both

@@ -568,16 +568,15 @@ for the full rationale):
   send if its window's own `cwnd > in_flight`.
 - Each window gets the **full existing `_maxwnd`** ceiling independently (not split) —
   aggregate in-flight can exceed `1.5*BDP` if both windows are simultaneously near full;
-  accepted trade-off vs. underutilizing a skewed traffic mix. **Future-fix idea (user note,
-  2026-09-29, not implemented):** enforce `_win_safe.cwnd + _win_random.cwnd <= _maxwnd`
-  instead. Two options raised: (1) on an AI step, skip the increase if it would push the sum
-  over `_maxwnd` (simplest, but caps total throughput below today's up-to-2x-BDP headroom);
-  (2) on an AI step, take the headroom from the *other* window's cwnd (grow one, shrink the
-  other by the same amount) — keeps the sum pinned at `_maxwnd` continuously, closer in
-  spirit to a single shared budget split by trust tier rather than two independent ceilings.
-  Confirmed cause (see exp29 dashboard investigation) of dual-window B=8 showing far higher
-  ECN/RTO/random-EV-draw counts than plain MPRDMA B=8 at the same F: dual-window's summed
-  cwnd runs up to ~2x MPRDMA's single ceiling, not a REPS/LB-layer difference.
+  accepted trade-off vs. underutilizing a skewed traffic mix. This is unchanged in this
+  (v1, `DUAL_MPRDMA_REPS`) mechanism. It's the confirmed cause (see exp29 dashboard
+  investigation) of dual-window B=8 showing far higher ECN/RTO/random-EV-draw counts than
+  plain MPRDMA B=8 at the same F: dual-window's summed cwnd runs up to ~2x MPRDMA's single
+  ceiling, not a REPS/LB-layer difference. **Now addressed by a v2 variant**,
+  `DUAL_MPRDMA_REPS_CAP` (`-sender_cc_algo dual_mprdma_reps_cap`) — see the
+  `dual-window-cwnd-cap` section below. v1 itself is intentionally left as-is (not
+  retrofitted) so this section and every already-published exp29/exp30 result built from
+  v1 stay exactly reproducible.
 - Each window's init defaults **asymmetrically**: `_win_safe` starts at the full ceiling
   (`_maxwnd`) so its first clean ACK after a reset doesn't underutilize; `_win_random`
   starts at the same conservative `cwnd_init_total` NSCC/MPRDMA use. Both independently
@@ -799,3 +798,108 @@ state accessors. Left in place as a correct, documented utility rather than remo
 | `htsim/sim/uec.cpp` | Static defs for the 3 new CLI-set statics; `nextEntropy_freezing()`'s frozen-pop branch split (gated to this algo); `predictWindowForNextEntropy_freezing`/`evSourceToWindowTag`/`maybeIdleReset`/`dualPeekNextWindowTag`/`dualWindowBlocked`/`assertDualWindowInvariant` impls; `updateCwndOnAck_DualMPRDMA`/`updateCwndOnNack_DualMPRDMA` (MPRDMA formula, per-window); `DUAL_MPRDMA_REPS` case in the CC dispatch switch (bound to no-op stubs — real dispatch is explicit at the ACK/NACK call sites, not through the shared function pointer); 3 admission-gate sites (`sendIfPermitted`, `timeToSend` pre-send + loose post-send recheck) branch on the algo; `processAck` accumulates per-window ACKed bytes across `handleCumulativeAck`/the SACK loop and calls the dual update twice; `processNack`/`fastLossRecovery`/`rtxTimerExpired` capture `win_tag` before erasing the `_tx_bitmap` entry and thread it through `queueForRtx`/`mark_packet_for_retransmission`; `handleAckno`/`handleCumulativeAck` gain the output params and the rtx-queue give-back branches restore per-window in-flight via `_rtx_win_tag`; `sendNewPacket`/`sendRtxPacket` resolve/carry the tag and pass it to `createSendRecord`; `initNscc` seeds `_safe_cwnd_init`/`_random_cwnd_init`/both windows' cwnd when this algo is active; unfreeze branch in `processEv_freezing` resets both windows to their own init; flow-finish log line prints the mismatch counter + final window state when this algo is active | `-sender_cc_algo dual_mprdma_reps` |
 | `htsim/sim/buffer_reps.h`/`.cpp` | `peek_earliest_fresh()` — non-destructive counterpart to `remove_earliest_fresh()`, same offset arithmetic, no mutation, returns `false` instead of throwing | always compiled |
 | `htsim/sim/datacenter/main_uec.cpp` | `dual_mprdma_reps` branch in `-sender_cc_algo` parsing; `-window_idle_reset_rtts`/`-dual_safe_cwnd_init`/`-dual_random_cwnd_init` flags; post-parse compatibility guard (hard error if this algo is selected without `-load_balancing_algo freezing`) | own flags |
+
+## `dual-window-cwnd-cap` — combined safe+random cwnd budget (v2 of `dual-window-reps-mprdma`)
+
+Banner `// ===== ADDED (dual-window-cwnd-cap) =====`. New `Sender_CC` value
+`DUAL_MPRDMA_REPS_CAP` (`-sender_cc_algo dual_mprdma_reps_cap`), a v2 of `DUAL_MPRDMA_REPS`
+sharing the same EV/window-attribution plumbing but enforcing
+`_win_safe.cwnd + _win_random.cwnd <= _maxwnd` (a combined budget) instead of each window
+getting its own independent `_maxwnd` ceiling — v1's confirmed cause (see the note in the
+section above) of dual-window B=8 running far higher ECN/RTO than plain MPRDMA B=8 at the
+same severity.
+
+**By explicit user request, this is implemented as a separate algo/new parallel functions,
+not a flag on `DUAL_MPRDMA_REPS`** — every original dual-window function (`updateCwndOnAck_DualMPRDMA`,
+`maybeIdleReset`, `initNscc`'s v1 branch, the unfreeze reset block) is **byte-for-byte
+untouched**; v2 adds new sibling functions (`updateCwndOnAck_DualMPRDMA_Cap`,
+`maybeIdleReset_Cap`) and a new `initNscc` branch, and reuses v1's shared plumbing (admission
+gate, EV→window tagging, `sendRecord.win_tag` threading, the invariant assert, NACK/MD,
+`mark_packet_for_retransmission`) by widening each dispatch condition to recognize
+`DUAL_MPRDMA_REPS_CAP` too (verified: every `_sender_cc_algo == DUAL_MPRDMA_REPS` site in
+`uec.cpp`/`uec.h`/`main_uec.cpp` was audited and either widened or deliberately left
+unwidened, per rule below). Confirmed via test: `DUAL_MPRDMA_REPS` runs produce byte-identical
+`safe_cwnd=625284 random_cwnd=626650` finish-line output before and after this change.
+
+**Locked design** (resolved with the user + an advisor consult this session — the user's
+initial literal wording for the normal-state rule had a real flaw, caught and revised before
+implementing, see below):
+
+1. **Flow start (`initNscc`)**: both windows default to **1x `_bdp`**, not v1's asymmetric
+   `_maxwnd`/`_cwnd` defaults — a deliberate revision, not an oversight (the two windows now
+   share one budget, so starting both at the same conservative value is the correct
+   baseline). Still independently overridable via the same `-dual_safe_cwnd_init` /
+   `-dual_random_cwnd_init` flags v1 uses.
+2. **Freeze entry**: no change — cwnd already updates normally through frozen mode for both
+   v1 and v2.
+3. **Freeze exit (unfreeze)**: **no special-case at all**, by explicit user correction (an
+   earlier "safe inherits random's cwnd" idea was dropped as unnecessary complexity) — cwnd
+   just continues through the unfreeze event unchanged. Implemented as an *absence*: v2 is
+   simply not added to `processEv_freezing`'s reset-to-init condition, so it never matches.
+4. **Idle reset**: new `maybeIdleReset_Cap(w, init_val, other)` — target is
+   `min(init_val, max(_mtu, _maxwnd - other.cwnd))` instead of v1's flat `init_val`, so an
+   idle window can't single-handedly re-inflate the combined sum past the cap. Never touches
+   `other.last_active`.
+5. **Normal-state AI** (sum-before-this-ACK `<= _maxwnd`) — **headroom-first**: own window
+   always gets the full AI increment; only reach into the other window for the *overflow* if
+   growing would cross the cap. Chosen over the user's initial literal "grow one, shrink
+   other by the same amount" wording, which was flagged and revised because it makes the
+   combined sum permanently non-recoverable after any MD event (redistribution nets to zero,
+   so nothing ever grows the sum — an MD's reduction would be permanent for the rest of the
+   flow) and would stall warmup (sum could never climb from ~1 BDP toward the 1.5 BDP cap).
+6. **Over-cap state** (sum-before-this-ACK `> _maxwnd`, reachable e.g. right after warmup
+   when both windows start at 1x BDP, summing to ~1.33x the cap): own window does not grow;
+   shrink the other window by the plain AI increment (~1 MTU/RTT). Verified in a real run
+   (exp29-style F=31 scenario): sum starts at `max_sum_ratio_x1000=1333` (1.333x cap, exactly
+   matching 2x BDP / 1.5x BDP), converges to exactly `sum == _maxwnd` within ~40us
+   (`last_over_cap_at_us`), stays there for the remainder of the ~350-400us flow.
+7. **MD / NACK / RTO / `mark_packet_for_retransmission`**: unchanged, fully independent per
+   window, shared with v1 (dispatch conditions widened, function bodies untouched) — these
+   only ever decrease a window's cwnd, so they can't violate the cap.
+
+**Verification aids** (`DUAL_MPRDMA_REPS_CAP` only, finish-line print): `max_sum_ratio_x1000`
+(peak observed `(win_safe.cwnd+win_random.cwnd)/_maxwnd`, x1000) and
+`last_over_cap_at_us` (0 if the sum was never seen over cap) — lets a run be checked for
+whether/how often the cap actually binds without re-instrumenting. Since the designed startup
+overshoot (rule #6 above, ~1.333x) dominates `max_sum_ratio_x1000` on every default-init flow,
+a second field, `max_sum_ratio_after_converge_x1000`, tracks the peak only from the first time
+the sum is seen at-or-under cap onward (via a shared `trackDualCapSumRatio()` helper, called
+from both the AI/MD update and `maybeIdleReset_Cap` — the idle-reset floor
+`max(_mtu, _maxwnd-other.cwnd)` can itself leave the sum slightly over cap, a case the AI/MD-
+only version of this diagnostic missed) — a materially-elevated *post*-convergence value would
+flag a real regression the startup-dominated field can't distinguish. Added during the Opus
+code-review pass (see below), not the initial implementation.
+
+**Verified this session**: build clean (after an intervening stale-incremental-build segfault —
+see CLAUDE.md's Docker gotcha; `make clean` + full rebuild resolved it, not a real regression);
+targeted runs (v1 F=8/F=31 unaffected-baseline checks, v2 F=8/F=24/F=31 at seed 43 — the
+scenarios that originally surfaced the RTS-retransmit `_in_flight` leak bug fixed earlier this
+session — plus a healthy no-failure run) all complete with `assertDualWindowInvariant` never
+firing and `predict_mismatch_count=0`. The RTS-retransmit bug's fix (`sendRtxPacket`'s
+`WIN_NONE` guard on the aggregate `_in_flight +=`) was explicitly re-verified as extended to
+`DUAL_MPRDMA_REPS_CAP` too, not just v1, since the same bug would otherwise apply identically
+there. **Independent Opus subagent code review** (requested explicitly, full transcript in
+session history): no HIGH/MEDIUM findings; confirmed v1 is byte-for-byte untouched (every v1
+function absent from the diff, or widened only in provably-equivalent ways), every
+`_win_safe`/`_win_random` mutation site accounted for, the RTS-leak guard correctly widened at
+all 6 `_in_flight` sites plus the tag-lookup site, and the arithmetic verified correct by hand.
+5 LOW/informational findings, all addressed: two diagnostic-only gaps (the
+`max_sum_ratio_after_converge_x1000` field above, and resetting the new per-flow diagnostic
+fields on `startFlow()` reactivation, matching the existing pattern for `_rtx_win_tag` etc.)
+and a new startup warning if `-dual_safe_cwnd_init`/`-dual_random_cwnd_init` are set to sum
+above `_maxwnd`. Two findings left as documented, intentional behavior (not fixed): the startup
+overshoot itself (design consequence, not a bug) and a negligible (~1 `inc`) within-ACK
+ordering bias favoring the safe window when one ACK covers both windows.
+
+    -sender_cc_algo dual_mprdma_reps_cap
+        New Sender_CC value, v2 of dual_mprdma_reps. Same compatibility requirements
+        (-load_balancing_algo freezing, -sender_cc_only, no -host_lb_overrides with a
+        non-freezing algo, incompatible with -state_aware_ecn/-smart_filter_mode/-wtd_in_nscc)
+        as dual_mprdma_reps - the existing compatibility guard block was widened to check
+        for either algo rather than duplicated.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `Sender_CC`: `DUAL_MPRDMA_REPS_CAP` appended (after `DUAL_MPRDMA_REPS`); new method decls `updateCwndOnAck_DualMPRDMA_Cap`/`maybeIdleReset_Cap`; new fields `_dual_cap_max_sum_ratio_x1000`/`_dual_cap_last_over_cap_at` | `-sender_cc_algo dual_mprdma_reps_cap` |
+| `htsim/sim/uec.cpp` | New functions `updateCwndOnAck_DualMPRDMA_Cap`/`maybeIdleReset_Cap` (rules #4-#6); new `initNscc` branch (rule #1); `dualWindowBlocked()` dispatches to the capped idle-reset internally when this algo is active; every `_sender_cc_algo == DUAL_MPRDMA_REPS` plumbing check widened to also recognize this algo (admission gate, EV/window tagging, invariant assert, `syncDualCwnd`, NACK dispatch, the RTS-retransmit-bug guard in `sendRtxPacket`, the CC dispatch switch's no-op case) — audited exhaustively, one site (`processEv_freezing`'s unfreeze reset) deliberately *not* widened per rule #3; finish-line print extended with the two new diagnostic fields | `-sender_cc_algo dual_mprdma_reps_cap` |
+| `htsim/sim/datacenter/main_uec.cpp` | `dual_mprdma_reps_cap` branch in `-sender_cc_algo` parsing; compatibility guard condition widened to include this algo | own branch, shared guard |

@@ -463,8 +463,18 @@ public:
         // Dispatch is NOT via the shared updateCwndOnAck/updateCwndOnNack
         // function pointers (see processAck/processNack); this enum value is
         // used only to select behavior at those explicit call sites.
-        DUAL_MPRDMA_REPS
+        DUAL_MPRDMA_REPS,
         // ===== END ADDED (dual-window-reps-mprdma) =====
+        // ===== ADDED (dual-window-cwnd-cap) =====
+        // v2 of DUAL_MPRDMA_REPS: same two windows, same EV-based attribution,
+        // but _win_safe.cwnd + _win_random.cwnd is capped at _maxwnd (a shared
+        // budget) instead of each window getting its own independent _maxwnd
+        // ceiling. A separate algo value, not a flag on DUAL_MPRDMA_REPS, so
+        // every original dual-window function/call site stays byte-for-byte
+        // untouched - this variant is implemented as new, parallel functions.
+        // See experiments/MODIFICATIONS.md for the full design.
+        DUAL_MPRDMA_REPS_CAP
+        // ===== END ADDED (dual-window-cwnd-cap) =====
     };
     // ===== ADDED (path-rr) =====
     // PATH_RR: true round-robin over distinct physical paths using full source
@@ -689,6 +699,14 @@ public:
     void maybeIdleReset(MprdmaWindow& w, mem_b init_val);
     // ===== END ADDED (dual-window-reps-mprdma) =====
 
+    // ===== ADDED (dual-window-cwnd-cap) =====
+    // v2: new, parallel functions - see uec.cpp for the full design note.
+    // Every function above this banner is untouched by dual-window-cwnd-cap.
+    void updateCwndOnAck_DualMPRDMA_Cap(WindowTag tag, bool skip, simtime_picosec rtt, mem_b newly_acked_bytes);
+    void maybeIdleReset_Cap(MprdmaWindow& w, mem_b init_val, MprdmaWindow& other);
+    void trackDualCapSumRatio(); // review-pass addition: shared peak-ratio diagnostic update
+    // ===== END ADDED (dual-window-cwnd-cap) =====
+
     void dontUpdateCwndOnAck(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
     void dontUpdateCwndOnNack(bool skip, mem_b nacked_bytes);
 
@@ -841,6 +859,24 @@ public:
     void syncDualCwnd();
     // ===== END FIXED =====
     // ===== END ADDED (dual-window-reps-mprdma) =====
+    // ===== ADDED (dual-window-cwnd-cap) =====
+    // Verification aids, DUAL_MPRDMA_REPS_CAP only: peak observed sum/_maxwnd
+    // ratio (x1000, e.g. 1500 = 1.5x) and the last simtime the sum was seen
+    // over cap (0 = never). Printed at flow end.
+    uint32_t _dual_cap_max_sum_ratio_x1000 = 0;
+    simtime_picosec _dual_cap_last_over_cap_at = 0;
+    // ===== FIXED (dual-window-cwnd-cap review pass, LOW) =====
+    // The startup overshoot (both windows default to 1x BDP, summing to
+    // 1.333x _maxwnd until rule #6 converges it down - see MODIFICATIONS.md)
+    // dominates _dual_cap_max_sum_ratio_x1000 above, hiding any later,
+    // unintended over-cap episode unless it exceeds that same ratio. This
+    // second pair tracks the peak only from the first time the sum is seen
+    // at or under cap onward, so a post-convergence regression is visible
+    // even if it never approaches 1.333x.
+    bool _dual_cap_converged_once = false;
+    uint32_t _dual_cap_max_sum_ratio_after_converge_x1000 = 0;
+    // ===== END FIXED =====
+    // ===== END ADDED (dual-window-cwnd-cap) =====
     mem_b _bdp;
     bool _send_blocked_on_nic;
     bool _speculating;
