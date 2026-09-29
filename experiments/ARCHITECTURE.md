@@ -137,3 +137,147 @@ configurable interval — class in `htsim/sim/datacenter/main_uec.cpp`
 `-log_core_queues`/`-log_tor_queues`). Result: exp25 did **not** find evidence of a REPS-side
 queue spike on the sampled subset — see
 [`exp25_queue_dynamics_v25/README.md`](exp25_queue_dynamics_v25/README.md).
+
+---
+
+## Per-source diagnostic counters (`metrics-counters`)
+
+Built for exp28 (targeted ToR→spine-0 link-degradation sweep). Five per-source
+quantities appended to the flow-finish `cout` line in `uec.cpp` `checkFinished`,
+after the pre-existing `ecn_acks`: `rtos`, `freeze_entries`, `freeze_us`
+(cumulative time frozen, with any interval still open at flow finish folded in),
+`ev_explore`, `ev_random` (forced-exploration vs buffer-empty/no-fresh random EV
+draws, both `nextEntropy_freezing` branches). Always compiled; no behaviour
+change.
+
+The counters are held in a **file-static side table** in `uec.cpp`
+(`std::unordered_map<int, RepsMetrics>` keyed by `_node_num`, banner
+`// ===== ADDED (metrics-counters) =====`), not in new `UecSrc` members: adding
+any member to `UecSrc` on this codebase deterministically triggers a heap-
+corruption abort during construction (a latent OOB write elsewhere is sensitive
+to the struct's size/layout). `accrueFreeze()` is called from
+`nextEntropy_freezing` (every send) and the end of `rtxTimerExpired`, so every
+freeze entry/exit transition is caught within one send; `freeze_entries` was
+verified equal to the `"started freezing"` printf count. Consumed by
+[`exp28_link_degradation_sweep/README.md`](exp28_link_degradation_sweep/README.md).
+
+## Timed link failure + per-host metric window log (`timed-failure`)
+
+Built for exp29 (fastLossRecovery ↔ freeze crossover). Two independent pieces,
+both always compiled, both inert when their flags are absent
+(regression-checked byte-identical).
+
+**Timed failure.** `-timed_window <start_us> <recover_us>` +
+`-timed_fail_tor_uplinks <tor> <F>` (or `..._downlinks`) fail the first `F`
+spine uplinks of one ToR for `t ∈ (start, recover)`, then restore. The
+`LinkFailureEvent` class (State-Aware lineage, `main_uec.cpp`) is **reused
+unmodified** — it already takes plain `Pipe*` and self-reschedules for recovery;
+only its instantiation was 3-tier-bound (`pipes_nup_nc`, resized only when
+`_tiers==3`). The new instantiation block resolves the 2-tier ToR↔spine pipe
+arrays (`pipes_nlp_nup` / `pipes_nup_nlp`, resized unconditionally) and creates
+one `LinkFailureEvent` per pipe (unused up/down slot = `nullptr`, which the
+class skips). This is the clean, parametrized form of the paper's hardcoded
+`scenario_micro_failures` (`-failed 42`, which string-matches a `-q 100`-encoded
+queue name and so is inert under exp29's `-q 101`).
+
+**Window log.** `-log_reps_window <file> <interval_us>` writes, every
+`interval_us`, one CSV row per active node with the **deltas** of the
+`g_reps_metrics` side table since the previous tick
+(`d_rto, d_freeze_entries, d_fast_loss, frozen_frac, d_ev_random, d_ev_explore,
+d_ecn_acks, frozen_now`). `UecWindowLogger` is a `Clock`-pattern `EventSource`
+in `uec.cpp` (re-arm first, stop past `t_end`) — it lives in `uec.cpp` so it can
+read the file-static side table directly, and is started from `main_uec.cpp` via
+the `static` method `UecSrc::startRepsWindowLog`. The side table gains two
+fields — `ecn_acks` (per-host mirror of `_ecn_ack_count`) and `fast_loss_entries`
+(bumped at `fastLossRecovery`'s `_loss_recovery_mode = true` transition) — the
+latter making the two-layer loss response (fast retransmit vs freeze/rotate)
+directly visible per host per time window. Growing `RepsMetrics` (a plain local
+struct) and adding `static` `UecSrc` members are both layout-safe; the heap bug
+that forced the side table is specific to non-static `UecSrc` members. Consumed
+by [`exp29_failure_response/README.md`](exp29_failure_response/README.md).
+
+## Targeted single-source path loss (`fail-src-paths`)
+
+Built for exp30 Part B. `-fail_src_paths <src> <count>` marks physical SRv6 path
+indices `[0, count)` dead **for one source host only**. The check lives at the
+two packet-emit sites in `uec.cpp` (`sendNewPacket`, `sendRtxPacket`): right
+after the SRv6 pre-draw computes `route_path_idx = ev % _paths.size()`, an inline
+`pathDeadForThisSrc(route_path_idx)` guard (`_fail_src_paths.empty()` fast-path →
+`find(_node_num)` → `idx < count`) replaces `p->sendOn()` with `p->free()`. The
+sender's own bookkeeping (`_highest_sent`/`_rtx_packets_sent`, `createSendRecord`,
+`startRTO`) is untouched, so from the sender it is indistinguishable from a
+first-hop failed `Pipe` (`pipe.cpp:67-70` does the same `pkt.free(); return`) —
+no ACK → RTO → freeze → EV rotation.
+
+Why a source-side guard and not a failed `Pipe`: the fabric has no pipe that is
+both *per-path* (diverges by SRv6 index) and *private to one source* — a ToR
+uplink carries all 32 hosts on the ToR, the access link carries all 32 of the
+source's paths. So `-failed` / `-timed_fail_tor_uplinks` can only express
+"1/32 of *every* ToR0 flow's paths" (exp30 Part A) or "F/32 of every ToR0 flow's
+paths"; "1/4 of *one* pair's paths" (the meeting's regime) needs the source-side
+mechanism. The static `UecSrc` map is layout-safe (same reasoning as
+`timed-failure`). Consumed by
+[`exp30_concentrated_path_loss/README.md`](exp30_concentrated_path_loss/README.md).
+
+## Dual-window REPS+MPRDMA (`dual-window-reps-mprdma`)
+
+New `-sender_cc_algo dual_mprdma_reps`, composes only with `-load_balancing_algo
+freezing` (paper-REPS) — never with the separate, sticky-single-path
+`-load_balancing_algo mprdma`, which shares the MPRDMA name but is otherwise
+unrelated (CLI hard-errors on the wrong combination).
+
+**Why**: REPS's circular EV buffer already tells you, per draw, whether an EV is
+"known-good" (a fresh or valid-frozen buffer pop, backed by a prior `PATH_GOOD`
+ACK) or unverified (a random draw, a post-unfreeze forced-explore packet, or a
+stale frozen-mode pop). Under a single shared cwnd, losses/ECN marks on
+unverified traffic throttle *everything*, including paths already proven clean.
+Splitting into two independent MPRDMA-AIMD windows — `_win_safe` for verified
+EVs, `_win_random` for everything else — lets clean traffic keep making
+progress while REPS is actively exploring or recovering from a freeze. EV/path
+selection itself is untouched (still `nextEntropy_freezing`); only cwnd
+admission and the MPRDMA update are split and re-attributed by trust tier.
+
+**The hard part isn't the AIMD math** (both windows run literally the same
+MPRDMA formula — see `updateCwndOnAck_DualMPRDMA`/`updateCwndOnNack_DualMPRDMA`)
+— **it's that admission has to happen before the EV is known.** The cwnd gate
+(`sendIfPermitted`/`timeToSend`) fires before `nextEntropy_freezing()` draws an
+EV, but the draw is destructive (pops/invalidates a buffer slot), so you can't
+draw-and-discard on a gate failure without leaking EVs out of the bounded
+8-slot buffer. The fix is a read-only predictor
+(`predictWindowForNextEntropy_freezing()`, mirroring `nextEntropy_freezing`'s
+branch order exactly against a non-destructive `peek_earliest_fresh()` +
+the already-non-mutating `is_valid_frozen()`) that tells the gate which window
+the *next* draw will land in, without touching buffer state. The real,
+destructive draw happens moments later in the same event with nothing able to
+mutate the buffer in between (single-threaded, event-driven sim) — a runtime
+mismatch counter, not just that argument, is what actually proves it holds
+(`_dual_predict_mismatch_count`, printed at flow finish; must be 0). One real
+gap the counter caught during verification: `startFlow()`'s own initial send
+loop calls `sendNewPacket()` directly, bypassing the `_sender_based_cc`
+admission gate for *every* CC algo, so no prediction happens before those
+particular sends — the counter only fires a false positive there once, and
+the fix was to only count a round where a prediction was actually made.
+
+The window tag is decided once, at send time (from the resolved `EvSource`),
+stored on `sendRecord.win_tag`, and never re-derived later — by ACK/NACK/RTO
+time the buffer slot may already be popped, invalidated, or wiped by
+`resetBuffer()` on unfreeze, so the EV alone no longer says which window it
+belonged to. A retransmission carries the *original* tag forward even though
+it draws a fresh EV that may land in the other tier — a small side map
+(`_rtx_win_tag`) threads it through, since `_rtx_queue`'s value type has no
+room for it.
+
+Per-window in-flight bytes live only on `MprdmaWindow.in_flight` (no separate
+mirrored counter — an earlier draft had one and it was removed specifically to
+avoid two counters that could silently diverge). The correctness net is a
+single runtime-asserted invariant, gated to this algo so it costs nothing for
+any other run: `_win_safe.in_flight + _win_random.in_flight == _in_flight`,
+checked at the end of `processAck`, `processNack`, and `rtxTimerExpired`.
+`mark_packet_for_retransmission()` (RTO path) is a third site besides ACK/NACK
+that touches `_in_flight`/`_cwnd` together and needed its own window-aware
+version.
+
+Full design-decision rationale (window ceilings, asymmetric init values, the
+1-MTU MD floor kept deliberately unraised, the FROZEN_POP validity split) and
+the complete touched-file list are in
+[`MODIFICATIONS.md`](MODIFICATIONS.md#dual-window-reps-mprdma--two-independent-mprdma-aimd-windows-for-repsfreezing).

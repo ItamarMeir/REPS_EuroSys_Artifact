@@ -285,6 +285,19 @@ int main(int argc, char **argv) {
     // when -fail_link_time is set, defaults to a single (0,0) link.
     vector<pair<int,int>> fail_link_targets;
 
+    // ===== ADDED (timed-failure) =====
+    // exp29: transient failure of the first F spine uplinks (or downlinks) of one
+    // ToR, active t in (start_us, recover_us), on the 2-tier fabric. Reuses the
+    // LinkFailureEvent class above (unmodified) with 2-tier pipe arrays; the
+    // stock -fail_link_time path only resolves 3-tier Agg<->Core pipes.
+    double timed_fail_start_us   = 0.0;   // <= 0 -> no timed failure scheduled
+    double timed_fail_recover_us = 0.0;   // <= start -> permanent onset
+    int    timed_fail_ul_tor = -1, timed_fail_ul_count = 0;  // -timed_fail_tor_uplinks
+    int    timed_fail_dl_tor = -1, timed_fail_dl_count = 0;  // -timed_fail_tor_downlinks
+    string reps_window_path = "";      // -log_reps_window <file> <interval_us> <t0_us> <t1_us>
+    double reps_window_interval_us = 0.0, reps_window_t0_us = 0.0, reps_window_t1_us = 0.0;
+    // ===== END ADDED (timed-failure) =====
+
     string data_collection_dir = "";
     htsim::DataCollector& data_collector = htsim::DataCollector::get_instance();
 
@@ -483,6 +496,14 @@ int main(int argc, char **argv) {
             UecSrc::_use_srv6 = true;
             cout << "SRv6 source routing enabled: EV -> _paths[ev % N] (bypasses ECMP)" << endl;
         // ===== END ADDED (srv6) =====
+        // ===== ADDED (fail-src-paths) =====
+        } else if (!strcmp(argv[i], "-fail_src_paths")) {
+            int src = atoi(argv[++i]);
+            int cnt = atoi(argv[++i]);
+            UecSrc::_fail_src_paths[src] = cnt;
+            cout << "fail_src_paths: src " << src << " -> path indices [0," << cnt
+                 << ") dead (blackholed at emit)" << endl;
+        // ===== END ADDED (fail-src-paths) =====
         } else if (!strcmp(argv[i],"-sender_cc_only")) {
             UecSrc::_sender_based_cc = true;
             UecSrc::_receiver_based_cc = false;
@@ -574,6 +595,10 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i+1],"mnscc"))
                 UecSrc::_sender_cc_algo = UecSrc::MNSCC;
             // ===== END ADDED (swift-cc) =====================================
+            // ===== ADDED (dual-window-reps-mprdma) =====
+            else if (!strcmp(argv[i+1],"dual_mprdma_reps"))
+                UecSrc::_sender_cc_algo = UecSrc::DUAL_MPRDMA_REPS;
+            // ===== END ADDED (dual-window-reps-mprdma) =====
             else {
                 cout << "UNKNOWN CC ALGO " << argv[i+1] << endl;
                 exit(1);
@@ -730,6 +755,29 @@ int main(int argc, char **argv) {
             cwnd = atoi(argv[i+1]);
             cout << "cwnd "<< cwnd << endl;
             i++;
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        } else if (!strcmp(argv[i],"-window_idle_reset_rtts")) {
+            // code-review fix: atoi("-1") -> -1 silently wraps to UINT32_MAX
+            // on an unchecked (uint32_t) cast, disabling idle-reset instead
+            // of erroring on the typo/misconfiguration.
+            int parsed_idle_rtts = atoi(argv[i+1]);
+            if (parsed_idle_rtts < 1) {
+                cerr << "ERROR: -window_idle_reset_rtts must be a positive integer, got "
+                     << argv[i+1] << endl;
+                exit(1);
+            }
+            UecSrc::_dual_window_idle_reset_rtts = (uint32_t)parsed_idle_rtts;
+            cout << "window_idle_reset_rtts " << UecSrc::_dual_window_idle_reset_rtts << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-dual_safe_cwnd_init")) {
+            UecSrc::_dual_safe_cwnd_init_flag = (mem_b)atoi(argv[i+1]);
+            cout << "dual_safe_cwnd_init " << UecSrc::_dual_safe_cwnd_init_flag << " pkts" << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-dual_random_cwnd_init")) {
+            UecSrc::_dual_random_cwnd_init_flag = (mem_b)atoi(argv[i+1]);
+            cout << "dual_random_cwnd_init " << UecSrc::_dual_random_cwnd_init_flag << " pkts" << endl;
+            i++;
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         } else if (!strcmp(argv[i],"-tm")){
             tm_file = argv[i+1];
             cout << "traffic matrix input file: "<< tm_file << endl;
@@ -941,6 +989,40 @@ int main(int argc, char **argv) {
                  << ", core=" << core
                  << " (total targets=" << fail_link_targets.size() << ")" << endl;
             i += 2;
+        // ===== ADDED (timed-failure) =====
+        } else if (!strcmp(argv[i],"-timed_window")){
+            timed_fail_start_us   = atof(argv[i+1]);
+            timed_fail_recover_us = atof(argv[i+2]);
+            cout << "Timed failure window: fail at " << timed_fail_start_us
+                 << " us, recover at " << timed_fail_recover_us << " us" << endl;
+            i += 2;
+        } else if (!strcmp(argv[i],"-timed_fail_tor_uplinks")){
+            timed_fail_ul_tor   = atoi(argv[i+1]);
+            timed_fail_ul_count = atoi(argv[i+2]);
+            cout << "Timed uplink failure: ToR " << timed_fail_ul_tor
+                 << ", first " << timed_fail_ul_count << " spine uplinks" << endl;
+            i += 2;
+        } else if (!strcmp(argv[i],"-timed_fail_tor_downlinks")){
+            timed_fail_dl_tor   = atoi(argv[i+1]);
+            timed_fail_dl_count = atoi(argv[i+2]);
+            cout << "Timed downlink failure: ToR " << timed_fail_dl_tor
+                 << ", first " << timed_fail_dl_count << " spine downlinks" << endl;
+            i += 2;
+        } else if (!strcmp(argv[i],"-log_reps_window")){
+            // exp29 per-host metric-delta time series.
+            //   <file> <interval_us> <t0_us> <t1_us>
+            // Rows written for t in [t0, t1]; the logger does NOT keep the sim
+            // alive outside that window (first tick armed at t0, stops re-arming
+            // past t1).
+            reps_window_path        = argv[i+1];
+            reps_window_interval_us = atof(argv[i+2]);
+            reps_window_t0_us       = atof(argv[i+3]);
+            reps_window_t1_us       = atof(argv[i+4]);
+            cout << "Logging REPS metric window to " << argv[i+1] << " every "
+                 << argv[i+2] << " us, t in [" << argv[i+3] << ", " << argv[i+4]
+                 << "] us" << endl;
+            i += 4;
+        // ===== END ADDED (timed-failure) =====
         } else if (!strcmp(argv[i],"-linkspeed")){
             // linkspeed specified is in Mbps
             linkspeed = speedFromMbps(atof(argv[i+1]));
@@ -1103,6 +1185,71 @@ int main(int argc, char **argv) {
         }
     }
     // ===== END ADDED (smart-filter + wtd-in-nscc) ========================
+
+    // ===== ADDED (dual-window-reps-mprdma) ================================
+    // DUAL_MPRDMA_REPS's window attribution depends entirely on REPS/FREEZING's
+    // EvSource distinctions (fresh/frozen pop vs random/explore) - it composes
+    // only with -load_balancing_algo freezing (paper-REPS), never with the
+    // separate, sticky-single-path MPRDMA *LB* algo or any other LB algo.
+    if (UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS) {
+        if (UecSrc::_load_balancing_algo != UecSrc::FREEZING) {
+            cerr << "ERROR: -sender_cc_algo dual_mprdma_reps requires "
+                 << "-load_balancing_algo freezing (paper-REPS). Got a different "
+                 << "load balancing algo (mprdma is a separate, unrelated LB algo - "
+                 << "see CLAUDE.md)." << endl;
+            exit(1);
+        }
+        // code-review fix (Opus pass, HIGH): -sender_cc_algo alone sets
+        // _sender_based_cc=true but does NOT clear receiver_driven, and the
+        // dual-window init lives only in initNscc (called when
+        // !receiver_driven) - initRccc (called when receiver_driven, the
+        // default) leaves both windows' cwnd at their default-member value
+        // of 0. That wedges the admission gate shut permanently (0<=0) and,
+        // since startFlow()'s own send loop bypasses the gate, the first ACK
+        // reaches updateCwndOnAck_DualMPRDMA's "w.cwnd += bytes*mtu/w.cwnd"
+        // with w.cwnd==0 - integer division by zero (SIGFPE). Require the
+        // -sender_cc_only combination explicitly rather than relying on the
+        // user to remember it (easy to omit since -sender_cc_algo already
+        // sounds like it turns sender CC on by itself).
+        if (receiver_driven) {
+            cerr << "ERROR: -sender_cc_algo dual_mprdma_reps requires -sender_cc_only "
+                 << "as well. Without it, the dual windows are never initialized "
+                 << "(receiver-driven init path doesn't set them) and the first ACK "
+                 << "divides by a zero cwnd." << endl;
+            exit(1);
+        }
+        // code-review fix: -host_lb_overrides can put a non-FREEZING algo on
+        // an individual host even when the global algo is freezing. Such a
+        // host's sends never set _last_ev_source, so evSourceToWindowTag()
+        // returns WIN_NONE and its per-window in-flight counters never move
+        // while the aggregate _in_flight still does - guaranteed to trip
+        // assertDualWindowInvariant() on that host's first ACK.
+        if (!UecSrc::_per_host_lb_override.empty()) {
+            for (const auto& kv : UecSrc::_per_host_lb_override) {
+                if (kv.second != UecSrc::FREEZING) {
+                    cerr << "ERROR: -sender_cc_algo dual_mprdma_reps is incompatible with "
+                         << "-host_lb_overrides that set a non-freezing algo (host "
+                         << kv.first << "). Every host must use freezing." << endl;
+                    exit(1);
+                }
+            }
+        }
+        // code-review fix: these three CC extensions only touch the
+        // NSCC-specific update path (updateCwndOnAck_NSCC / smartFilterCounter /
+        // _nscc_wtd_enabled checks) - updateCwndOnAck_DualMPRDMA never
+        // consults any of them, so combining flags would silently no-op
+        // rather than error, producing a run a user would believe had
+        // dampening/state-awareness active.
+        if (UecSrc::_state_aware_ecn_enabled || UecSrc::_smart_filter_mode != UecSrc::SF_NONE
+            || UecSrc::_nscc_wtd_enabled) {
+            cerr << "ERROR: -sender_cc_algo dual_mprdma_reps is incompatible with "
+                 << "-state_aware_ecn / -smart_filter_mode / -wtd_in_nscc - those are "
+                 << "NSCC-specific CC extensions that dual_mprdma_reps's MPRDMA-based "
+                 << "update path never consults." << endl;
+            exit(1);
+        }
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =============================
 
     if (!param_queuesize_set || !param_ecn_set){
         cout << "queuesizes and ecn threshold should be input from the parameters, otherwise, queuesize = BDP of 100Gbps and 12us RTT and ecn_low is 20\% of queuesize and 80\% of queuesize."<< endl;
@@ -1763,6 +1910,95 @@ int main(int argc, char **argv) {
                  << " recover@" << fail_link_recover_us << "us" << endl;
         }
     }
+
+    // ===== ADDED (timed-failure) =====
+    // exp29: transient failure of the first F spine uplinks (and/or downlinks) of
+    // one ToR on the 2-tier fabric. Reuses LinkFailureEvent (one per pipe, the
+    // unused up/down slot passed nullptr). 2-tier pipe arrays queues_nlp_nup /
+    // pipes_nlp_nup (ToR->spine) and pipes_nup_nlp (spine->ToR) are resized
+    // unconditionally in fat_tree_topology.cpp (unlike the 3-tier pipes_nup_nc).
+    // ===== FIXED (code-review pass) =====
+    // Two independent bugs found here, neither touched by dual-window-reps-mprdma:
+    // (1) this mechanism and the older -fail_link_time/-fail_link_target one
+    //     scheduled independently with no mutual-exclusion check, so both could
+    //     fire simultaneously on different fabric tiers with indistinguishable
+    //     "[link_failure] failed pipe at ...us" log lines, making resulting FCT
+    //     data impossible to attribute to either cause;
+    // (2) pipes_nlp_nup/pipes_nup_nlp are generically "ToR <-> next-tier-up",
+    //     which is Agg in a 3-tier fat-tree (this repo's default), not spine/core
+    //     as the flag names (-timed_fail_tor_uplinks) and log messages claim -
+    //     nothing gated this block to the 2-tier topology it was actually
+    //     designed and documented for (exp29), so running it on a 3-tier
+    //     topology silently failed ToR<->Agg links while logging "uplink tor",
+    //     implying spine, with no warning of the mismatch.
+    if (timed_fail_start_us > 0.0 && fail_link_fail_us > 0.0) {
+        cerr << "ERROR: -timed_window/-timed_fail_tor_uplinks/-timed_fail_tor_downlinks "
+             << "cannot be combined with -fail_link_time/-fail_link_target - both "
+             << "schedule independent pipe-failure events with indistinguishable log "
+             << "output. Use only one failure-injection mechanism per run." << endl;
+        exit(1);
+    }
+    if (timed_fail_start_us > 0.0 && FatTreeTopology::get_tiers() != 2) {
+        cerr << "ERROR: -timed_window/-timed_fail_tor_uplinks/-timed_fail_tor_downlinks "
+             << "target the 2-tier fabric's ToR<->spine pipes (exp29's documented use "
+             << "case), but the topology has " << FatTreeTopology::get_tiers()
+             << " tiers. On a 3-tier topology these flags would fail ToR<->Agg links "
+             << "while logging them as \"uplink tor\" (implying spine/core), a silent "
+             << "topology mismatch." << endl;
+        exit(1);
+    }
+    // ===== END FIXED =====
+    if (timed_fail_start_us > 0.0 && !topo.empty() && topo[0] != nullptr) {
+        FatTreeTopology* t0 = topo[0];
+        simtime_picosec ts = (simtime_picosec)(timed_fail_start_us   * 1000000.0);
+        simtime_picosec tr = (simtime_picosec)(timed_fail_recover_us * 1000000.0);
+        int n_sched = 0;
+
+        auto fail_pipes = [&](vector<vector<vector<Pipe*>>>& arr, int a_idx,
+                              int count, const char* dir) {
+            if (a_idx < 0) return;
+            if (a_idx >= (int)arr.size()) {
+                cerr << "[timed_failure] " << dir << " index " << a_idx
+                     << " out of range; skipping." << endl;
+                return;
+            }
+            for (int s = 0; s < count && s < (int)arr[a_idx].size(); s++) {
+                for (size_t b = 0; b < arr[a_idx][s].size(); b++) {
+                    Pipe* p = arr[a_idx][s][b];
+                    if (!p) continue;
+                    new LinkFailureEvent(eventlist, p, nullptr, ts, tr);
+                    n_sched++;
+                }
+            }
+        };
+        // uplink: pipes_nlp_nup[tor][spine][bundle]
+        fail_pipes(t0->pipes_nlp_nup, timed_fail_ul_tor, timed_fail_ul_count, "uplink tor");
+        // downlink: pipes_nup_nlp[spine][tor][bundle] -- iterate spines s in [0,count)
+        if (timed_fail_dl_tor >= 0) {
+            for (int s = 0; s < timed_fail_dl_count && s < (int)t0->pipes_nup_nlp.size(); s++) {
+                if (timed_fail_dl_tor >= (int)t0->pipes_nup_nlp[s].size()) continue;
+                for (size_t b = 0; b < t0->pipes_nup_nlp[s][timed_fail_dl_tor].size(); b++) {
+                    Pipe* p = t0->pipes_nup_nlp[s][timed_fail_dl_tor][b];
+                    if (!p) continue;
+                    new LinkFailureEvent(eventlist, p, nullptr, ts, tr);
+                    n_sched++;
+                }
+            }
+        }
+        cout << "[timed_failure] scheduled " << n_sched << " pipe failures, fail@"
+             << timed_fail_start_us << "us recover@" << timed_fail_recover_us
+             << "us" << endl;
+    }
+
+    // exp29: periodic per-host metric window log.
+    if (!reps_window_path.empty()) {
+        UecSrc::startRepsWindowLog(
+            eventlist, reps_window_path.c_str(),
+            (simtime_picosec)(reps_window_interval_us * 1000000.0),
+            (simtime_picosec)(reps_window_t0_us * 1000000.0),
+            (simtime_picosec)(reps_window_t1_us * 1000000.0));
+    }
+    // ===== END ADDED (timed-failure) =====
 
     // ===== ADDED (path-random queue logging) =====
     if (!log_core_queues_file.empty() && !topo.empty() && topo[0] != nullptr) {

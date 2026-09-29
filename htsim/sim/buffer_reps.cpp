@@ -114,6 +114,32 @@ template <typename T> T CircularBufferREPS<T>::remove_earliest_fresh() {
     return element;
 }
 
+// ===== ADDED (dual-window-reps-mprdma) ====================================
+// Read-only counterpart to remove_earliest_fresh(): same offset arithmetic,
+// no mutation, no throw. Returns false (leaving out untouched) when there's
+// nothing fresh to pop.
+template <typename T> bool CircularBufferREPS<T>::peek_earliest_fresh(T& out) const {
+    if (count == 0 || number_fresh_entropies == 0) {
+        return false;
+    }
+
+    int offset = 0;
+    if (head - number_fresh_entropies < 0) {
+        offset = head + max_size - number_fresh_entropies;
+        if (offset < 0) {
+            return false;
+        }
+    } else {
+        offset = head - number_fresh_entropies;
+        if (offset < 0) {
+            return false;
+        }
+    }
+    out = buffer[offset].value;
+    return true;
+}
+// ===== END ADDED (dual-window-reps-mprdma) ================================
+
 // Removes an element from the buffer
 template <typename T> T CircularBufferREPS<T>::remove_earliest_round() {
     if (count == 0 || number_fresh_entropies == 0) {

@@ -111,6 +111,17 @@ cd htsim/sim && make clean && cd datacenter && make clean && cd .. \
 `.o`/binary files are gitignored, so this never touches tracked files. Full instructions: README.md
 §"Running in Docker".
 
+**Related gotcha (in-container, not bind-mount):** copying updated source into an
+already-running container (`docker cp` + incremental `make`) across several separate
+experiments/edits without an intervening `make clean` can leave stale `.o` files whose
+dependency tracking silently misses a change, producing a binary that segfaults —
+reproducibly, and identically across CC algos/LB algos, which makes it look like a
+pre-existing bug rather than a stale build. If a crash reproduces "identically" on
+otherwise-untouched baseline code inside a container you've been iterating in, `make
+clean` in both `htsim/sim/` and `htsim/sim/datacenter/` and rebuild before trusting the
+crash as real. (Found while verifying the `dual-window-reps-mprdma` mechanism — see
+`experiments/MODIFICATIONS.md`.)
+
 ### docker-compose
 
 `docker-compose.yml` (repo root) wraps the bind-mount workflow above into a single service
@@ -194,11 +205,13 @@ The `_network_is_asymmetric` flag is set organically when the LB enters frozen m
 
 | What | File | Line(s) |
 |---|---|---|
-| CC ECN-masking gate | `htsim/sim/uec.cpp` | ~1209 |
-| FREEZING freeze entry + asymmetric-flag set | `htsim/sim/uec.cpp` | ~3040 |
-| FREEZING unfreeze + asymmetric-flag clear | `htsim/sim/uec.cpp` | ~2653 |
-| REPS freeze entry + flag set | `htsim/sim/uec.cpp` | ~3022 |
-| REPS unfreeze + flag clear | `htsim/sim/uec.cpp` | ~2310 |
+| CC ECN-masking gate | `htsim/sim/uec.cpp` | `bool cc_ecn_view = pkt.ecn_echo();` in `processAck()`, ~1855 |
+| FREEZING freeze entry + asymmetric-flag set | `htsim/sim/uec.cpp` | `rtxTimerExpired()`, ~4590-4620 |
+| FREEZING unfreeze + asymmetric-flag clear | `htsim/sim/uec.cpp` | `processEv_freezing()`, ~3954 |
+| REPS freeze entry + flag set | `htsim/sim/uec.cpp` | state-aware `_load_balancing_algo == REPS` branch inside `rtxTimerExpired()`, ~4666-4677 |
+| REPS unfreeze + flag clear | `htsim/sim/uec.cpp` | `processEv_REPS()`, ~3443 |
+<!-- Line numbers drift with every edit to uec.cpp — grep the function/anchor name
+     in the right column rather than trusting the number alone. -->
 | `_network_is_asymmetric` flag declaration | `htsim/sim/uec.h` | ~static toggle + per-source flag |
 | `Pipe::_failed` flag + early-drop | `htsim/sim/pipe.h` ~42-48, `pipe.cpp` ~65 |
 | Leaf-ECN re-enable gotcha | `htsim/sim/datacenter/main_uec.cpp` | ~739 |
@@ -259,7 +272,7 @@ is a near-deterministic congestion signal. Motivated v4 future idea (gate CC on 
 
 ## Future directions (not implemented)
 
-1. **v4 buffer-fill gate**: change CC ECN-masking from `cc_ecn = ecn && asymmetric` to `cc_ecn = ecn && (asymmetric || fresh ≤ 1)`. One-line change at `uec.cpp:~1209`. Justified by exp02's `fresh=0 ⇒ P(ECN)≈1.0` finding.
+1. **v4 buffer-fill gate**: change CC ECN-masking from `cc_ecn = ecn && asymmetric` to `cc_ecn = ecn && (asymmetric || fresh ≤ 1)`. One-line change at the `cc_ecn_view` assignment in `processAck()` (see Key code locations above). Justified by exp02's `fresh=0 ⇒ P(ECN)≈1.0` finding.
 2. **Long-failure stress**: all experiments use a 150 μs failure window (50→200 μs). A 1-10 ms window would exercise the freeze-expiry / auto-thaw path, which is currently never reached.
 3. **Real-CDF workloads**: Datamining/Hadoop/Websearch CDFs (used in the paper) instead of synthetic permutations.
 4. **Topology sweep**: extend exp03 to k=8 2-tier and 1024-host 3-tier topologies.
@@ -346,6 +359,8 @@ banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCH
 | `per-host-lb` | `-host_lb_overrides` | Per-host LB algorithm override |
 | `target-qdelay-respect-cli` (FIX) | n/a, applied 2026-05-30 | Removed post-CLI reset that silently discarded `-target_q_delay` |
 | `median-buf-paper-faithful` (FIX) | n/a, applied 2026-06-01 | `DelayMedianBuffer` H-cap 32→128 + no-flush-on-shrink, paper Eq (8-9) fidelity |
+| `reps-metrics-per-host-key` (FIX) | n/a, applied during dual-window review | `g_reps_metrics`/`RM()` was keyed by `_node_num` (assigned once per `UecSrc` object, i.e. per flow) despite the "per-host" framing everywhere else (`-log_reps_window`, exp29 docs, the `node` CSV column). Rekeyed to `_srcaddr` (the physical host id) so multi-flow-per-host workloads (this repo's standard permutation/incast matrices) collapse into one row per host instead of one per flow, and the map is bounded by host count instead of growing unboundedly with flow count. |
+| `timed-failure-guards` (FIX) | n/a, applied during dual-window review | `-timed_window`/`-timed_fail_tor_uplinks`/`-timed_fail_tor_downlinks` had no mutual-exclusion check against the older `-fail_link_time`/`-fail_link_target` (both could fire simultaneously with indistinguishable log output) and no topology-tier check (the mechanism is documented/designed for the 2-tier fabric only, but ran silently on 3-tier, failing ToR<->Agg links while logging them as "uplink tor", implying spine/core). Both now hard-error at startup instead of silently misbehaving. |
 | `swift-sack-hole-md` | `_sender_cc_algo==SWIFT`, always compiled | Swift MDs on SACK holes from OOO (paper 2 §IV.B correction) |
 | `path-rr` | `-load_balancing_algo path_rr` | True RR over distinct physical paths via full source routing |
 | `path-rr-npaths` | `-path_rr_npaths_override` | Per-host cap on number of PATH_RR paths |
@@ -355,3 +370,7 @@ banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCH
 | `srv6` | `-use_srv6` | SRv6 source-routing substrate, orthogonal to LB algo |
 | `freezing-pxr` | `-load_balancing_algo freezing_pxr` | Path-eXcluding REPS: exclude RTO-triggering EV instead of full freeze |
 | `reps-event-trace` | `-log_reps_events` | Unified send+ACK+freeze event trace plus an interactive HTML buffer viewer (`experiments/tools/`) |
+| `metrics-counters` | always compiled | Per-source diagnostic counters appended to the flow-finish line (`rtos`, `freeze_entries`, `freeze_us`, `ev_explore`, `ev_random`); file-static side table, no `UecSrc` layout change, no behavior change. exp28. |
+| `timed-failure` | `-timed_window` + `-timed_fail_tor_uplinks`/`-timed_fail_tor_downlinks` + `-log_reps_window` | Schedule a transient failure of the first F spine uplinks (or downlinks) of one ToR on the 2-tier fabric (reuses the `LinkFailureEvent` class, new 2-tier pipe resolution); periodic per-host CSV of `g_reps_metrics` deltas (`UecWindowLogger`). Adds `ecn_acks` + `fast_loss_entries` to the side table (`fast_loss` also on the finish line). No behavior change when flags absent. exp29. |
+| `fail-src-paths` | `-fail_src_paths <src> <count>` | For one source host only, physical SRv6 path indices `[0,count)` are dead: a packet drawn onto them is `free()`d at emit (== first-hop failed Pipe), sender still arms the RTO. Scoped to one src by construction (no shared fabric pipe is per-path AND per-source). Static, whole-sim. No behavior change when flag absent. exp30 Part B. |
+| `dual-window-reps-mprdma` | `-sender_cc_algo dual_mprdma_reps` (requires `-load_balancing_algo freezing`) | Two independent MPRDMA-AIMD windows per flow: `_win_safe` gates/updates from REPS-buffer EVs verified valid at pop time, `_win_random` from unverified EVs (random draws, explore bursts, stale frozen pops). EV selection unchanged (still `nextEntropy_freezing`); only cwnd admission/update is split and re-attributed by trust tier. See `experiments/MODIFICATIONS.md` for full design notes. |

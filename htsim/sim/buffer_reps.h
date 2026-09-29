@@ -37,6 +37,14 @@ template <typename T> class CircularBufferREPS {
     T remove_earliest_round();
     T remove_frozen();
     bool is_valid_frozen();
+    // ===== ADDED (dual-window-reps-mprdma) ===============================
+    // Non-destructive counterpart to remove_earliest_fresh(): read-only,
+    // touches no state (head/number_fresh_entropies/usable_lifetime
+    // untouched). Returns false instead of throwing when there's nothing
+    // fresh to pop, leaving *out untouched. Used to predict which CC window
+    // a not-yet-drawn EV will land in, before the real (destructive) draw.
+    bool peek_earliest_fresh(T& out) const;
+    // ===== END ADDED (dual-window-reps-mprdma) ===========================
     int getSize() const;
     int getNumberFreshEntropies() const;
     bool containsEntropy(uint16_t ev);

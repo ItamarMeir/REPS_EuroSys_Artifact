@@ -28,6 +28,7 @@ collective runtime -- no baseline.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import matplotlib
@@ -38,12 +39,30 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXP_DIR = SCRIPT_DIR.parent
-DATA_DIR = EXP_DIR / "data"
-PLOTS_DIR = EXP_DIR / "plots"
+# EXP26_DATA / EXP26_PLOTS let a variant run (e.g. the 128-rank DC sweep)
+# read and write in an isolated tree without touching the primary results.
+DATA_DIR = Path(os.environ.get("EXP26_DATA", EXP_DIR / "data"))
+PLOTS_DIR = Path(os.environ.get("EXP26_PLOTS", EXP_DIR / "plots"))
+# comma list of figures to emit; EXP26_PANELS restricts panels within each.
+FIGS = os.environ.get("EXP26_FIGS", "fig2,fig4,fig7,fig8").split(",")
+PANELS = os.environ.get("EXP26_PANELS", "micro,dc,ai").split(",")
+# EXP26_ALL_SUFFIX renames the composite (fig2_<suffix>.png); when it is not
+# the default "all" the per-panel standalone PNGs are skipped so a variant
+# composite (e.g. dc swapped for the 128-rank run) does not clobber the mains.
+ALL_SUFFIX = os.environ.get("EXP26_ALL_SUFFIX", "all")
 
 OPS_COLOR = "#d95f02"      # the paper's OPS orange
 OPS_MARKER = "s"
 B_LADDER = [1, 2, 4, 8, 16, 32]   # global: a given B keeps its colour everywhere
+# distinct marker per B (cycled), REPS drawn hollow so overlapping points stay
+# legible; identical list to exp27 scripts/sweep_render.py _SHAPES.
+B_SHAPES = ["o", "D", "^", "v", "X", "P", "*"]
+# distinct bar hatch per arm, for the grouped-bar panels (matches exp27
+# plot_micro_bars.HATCH_POOL); OPS left plain.
+_HATCH_POOL = ["//", "\\\\", "xx", "..", "oo", "**", "++", "--"]
+B_HATCH = {"ops": ""}
+B_HATCH.update({f"reps_b{b}": _HATCH_POOL[i % len(_HATCH_POOL)]
+                for i, b in enumerate(B_LADDER)})
 
 # Headlines adapted from the paper's own figure captions (papers/REPS-new.pdf).
 CAPTION = {
@@ -89,18 +108,24 @@ def arm_style() -> dict[str, dict]:
     cmap = plt.get_cmap("viridis")
     n = len(B_LADDER) - 1
     style = {"ops": dict(color=OPS_COLOR, marker=OPS_MARKER, ls="--",
-                         label="OPS (EV domain = #paths)")}
+                         filled=True, label="OPS (EV domain = #paths)")}
     for i, b in enumerate(B_LADDER):
-        style[f"reps_b{b}"] = dict(color=cmap(i / n), marker="X", ls="-",
-                                   label=f"REPS  B={b}")
+        style[f"reps_b{b}"] = dict(color=cmap(i / n),
+                                   marker=B_SHAPES[i % len(B_SHAPES)], ls="-",
+                                   filled=False, label=f"REPS  B={b}")
     return style
 
 
 def handles_for(arms: list[str]) -> list:
     st = arm_style()
-    return [plt.Line2D([], [], color=st[a]["color"], marker=st[a]["marker"],
-                       ls=st[a]["ls"], lw=2, ms=8, label=st[a]["label"])
-            for a in arms]
+    out = []
+    for a in arms:
+        s = st[a]
+        mfc = s["color"] if s.get("filled", True) else "none"
+        out.append(plt.Line2D([], [], color=s["color"], marker=s["marker"],
+                              ls=s["ls"], lw=2, ms=8, mfc=mfc, mec=s["color"],
+                              mew=1.6, label=s["label"]))
+    return out
 
 
 def _load() -> pd.DataFrame:
@@ -140,8 +165,13 @@ def draw_scatter(ax, d: pd.DataFrame, *, y_of, y_order, metric_col, xlabel,
         if not xs:
             continue
         st = style[arm]
-        ax.scatter(xs, ys, s=130, marker=st["marker"], color=st["color"],
-                   edgecolors="none", alpha=0.85, zorder=3)
+        if st.get("filled", True):
+            ax.scatter(xs, ys, s=140, marker=st["marker"], color=st["color"],
+                       edgecolors="none", alpha=0.9, zorder=4)
+        else:
+            ax.scatter(xs, ys, s=140, marker=st["marker"], facecolors="none",
+                       edgecolors=st["color"], linewidths=1.9, alpha=0.95,
+                       zorder=3)
 
     # Rows where OPS stalled on flows every REPS arm completed: its FCT is then
     # measured over the finished (easier) subset, so the speedup shown there is
@@ -179,7 +209,9 @@ def draw_line_load(ax, d: pd.DataFrame) -> None:
             continue
         st = style[arm]
         ax.plot(s.load, s.mean_fct_us, st["ls"], marker=st["marker"],
-                color=st["color"], lw=2.6, ms=11, alpha=0.9)
+                color=st["color"], lw=2.6, ms=11, alpha=0.9,
+                mfc=st["color"] if st.get("filled", True) else "none",
+                mec=st["color"], mew=1.8)
     ax.set_xlabel("Load Level (%)", fontsize=13)
     ax.set_ylabel("Average FCT (μs)", fontsize=13)
     ax.set_ylim(0, d.mean_fct_us.max() * 1.15)
@@ -213,7 +245,8 @@ def draw_bar_collective(ax, d: pd.DataFrame) -> None:
         for c in colls:
             row = d[(d.coll == c) & (d.arm == arm)]
             vals.append(row.max_fct_us.iloc[0] / 1000.0 if len(row) else 0.0)
-        ax.bar(idx + i * bw, vals, bw, color=style[arm]["color"])
+        ax.bar(idx + i * bw, vals, bw, color=style[arm]["color"],
+               hatch=B_HATCH.get(arm, ""), edgecolor="black", lw=0.4)
     ax.set_xticks(idx + 0.4 - bw / 2)
     ax.set_xticklabels([AI_LABEL[c] for c in colls], fontsize=10)
     ax.set_ylabel("Collective Runtime (ms)", fontsize=13)
@@ -297,29 +330,32 @@ def all_arms(df: pd.DataFrame, fig_id: str) -> list[str]:
 def plot_three_panel(df: pd.DataFrame, fig_id: str) -> None:
     """Composite in the paper's panel order (synthetic | DC | AI), with the arm
     legend along the bottom -- plus each panel again on its own."""
-    panels = ["micro", "dc", "ai"]
-    if df[df.fig == fig_id].empty:
+    panels = [q for q in ("micro", "dc", "ai") if q in PANELS]
+    if df[df.fig == fig_id].empty or not panels:
         print(f"skip {fig_id}: no rows")
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.2),
-                             gridspec_kw=dict(width_ratios=[1.05, 1, 1]))
-    for i, (ax, panel) in enumerate(zip(axes, panels)):
-        draw_panel(ax, df, fig_id, panel)
-        if i:   # only the leftmost panel of a composite carries the y title
-            ax.set_ylabel("")
-
     arms = all_arms(df, fig_id)
-    fig.legend(handles=handles_for(arms), loc="lower center",
-               ncol=min(len(arms), 7), fontsize=11, frameon=False,
-               bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle(CAPTION[fig_id] + "\n" + SUBCAP, fontsize=11.5, y=0.995,
-                 va="top")
-    fig.tight_layout(rect=(0, 0.07, 1, 0.93))
-    fig.savefig(PLOTS_DIR / f"{fig_id}_all.png", dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"wrote {fig_id}_all.png")
+    if len(panels) == 3:
+        fig, axes = plt.subplots(1, 3, figsize=(16.5, 5.2),
+                                 gridspec_kw=dict(width_ratios=[1.05, 1, 1]))
+        for i, (ax, panel) in enumerate(zip(axes, panels)):
+            draw_panel(ax, df, fig_id, panel)
+            if i:
+                ax.set_ylabel("")
+        fig.legend(handles=handles_for(arms), loc="lower center",
+                   ncol=min(len(arms), 7), fontsize=11, frameon=False,
+                   bbox_to_anchor=(0.5, 0.0))
+        fig.suptitle(CAPTION[fig_id] + "\n" + SUBCAP, fontsize=11.5, y=0.995,
+                     va="top")
+        fig.tight_layout(rect=(0, 0.07, 1, 0.93))
+        fig.savefig(PLOTS_DIR / f"{fig_id}_{ALL_SUFFIX}.png", dpi=150,
+                    bbox_inches="tight")
+        plt.close(fig)
+        print(f"wrote {fig_id}_{ALL_SUFFIX}.png")
 
+    if ALL_SUFFIX != "all":
+        return
     for panel in panels:
         w, h = (7.0, 6.4) if fig_id == "fig7" or panel == "micro" else (7.0, 4.4)
         fig, ax = plt.subplots(figsize=(w, h))
@@ -362,7 +398,9 @@ def plot_fig8(df: pd.DataFrame) -> None:
         s = d[d.arm == arm].sort_values("pct")
         st = style[arm]
         ax.plot(s.pct, s.max_fct_us, st["ls"], marker=st["marker"],
-                color=st["color"], lw=2.2, ms=7)
+                color=st["color"], lw=2.2, ms=7,
+                mfc=st["color"] if st.get("filled", True) else "none",
+                mec=st["color"], mew=1.6)
     ax.plot(xs, ideal, ":", color="#e7298a", lw=2, marker="^", ms=6)
 
     # % slowdown vs ideal at each B=8 point (the paper's default buffer)
@@ -450,8 +488,10 @@ def main() -> None:
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
     df = _load()
     for fig_id in ("fig2", "fig4", "fig7"):
-        plot_three_panel(df, fig_id)
-    plot_fig8(df)
+        if fig_id in FIGS:
+            plot_three_panel(df, fig_id)
+    if "fig8" in FIGS:
+        plot_fig8(df)
     legend_and_doc(df)
 
 

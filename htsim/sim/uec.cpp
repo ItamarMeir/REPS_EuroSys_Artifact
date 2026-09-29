@@ -12,6 +12,121 @@
 
 using namespace std;
 
+// ===== ADDED (metrics-counters) =====
+// Per-source diagnostic counters kept in a file-static side table, keyed by
+// _node_num, so UecSrc's memory layout is left completely untouched: growing
+// the struct (even by one member) deterministically corrupts the heap during
+// init on this codebase. These feed the extra fields appended to the flow-finish
+// line, consumed by exp28's link-degradation aggregator (RTO rate, freeze
+// dynamics, EV exploration rate). Always compiled; no behavior change.
+namespace {
+struct RepsMetrics {
+    uint64_t        rto               = 0;   // rtxTimerExpired() fires
+    uint64_t        freeze_entries    = 0;   // transitions into FREEZING frozen mode
+    simtime_picosec time_in_freeze    = 0;   // cumulative time spent frozen
+    simtime_picosec freeze_started_at = 0;   // start of the current frozen interval
+    bool            frozen_prev       = false;
+    uint64_t        ev_explore        = 0;   // forced post-unfreeze exploration draws
+    uint64_t        ev_random         = 0;   // random draws (buffer empty / no fresh EV)
+    // ===== ADDED (timed-failure) =====
+    uint64_t        ecn_acks          = 0;   // ECN-marked ACKs seen (mirror of _ecn_ack_count)
+    uint64_t        fast_loss_entries = 0;   // transitions into fastLossRecovery mode
+    // ===== END ADDED (timed-failure) =====
+};
+// ===== FIXED (dual-window-reps-mprdma review pass) =====
+// Keyed by _srcaddr (the physical host id set by setSrc(), stable across every
+// flow originating from that host) so multiple flows from one sender collapse
+// into a single row, matching this table's own "per-host" framing and the
+// -log_reps_window/exp29 documentation. Previously keyed by _node_num, which
+// is assigned once per UecSrc *object* (i.e. per flow, uec.cpp ~1045's
+// _node_num = _global_node_count++) — under any multi-flow-per-host workload
+// (this repo's standard permutation/incast matrices) that produced one row
+// per flow instead of per host, and grew unboundedly with flow count instead
+// of being bounded by host count.
+// ===== END FIXED =====
+std::unordered_map<uint32_t, RepsMetrics> g_reps_metrics;
+inline RepsMetrics& RM(uint32_t node_num) { return g_reps_metrics[node_num]; }
+// Fold any open frozen interval into time_in_freeze and count entries. Called
+// from nextEntropy_freezing() (every SEND) and rtxTimerExpired(), so every
+// entry/exit transition is caught promptly.
+inline void accrueFreeze(RepsMetrics& m, bool now_frozen, simtime_picosec now) {
+    if (now_frozen && !m.frozen_prev) {
+        m.freeze_started_at = now;
+        m.freeze_entries++;
+    } else if (!now_frozen && m.frozen_prev) {
+        m.time_in_freeze += now - m.freeze_started_at;
+    }
+    m.frozen_prev = now_frozen;
+}
+inline simtime_picosec totalFreeze(const RepsMetrics& m, simtime_picosec now) {
+    return m.time_in_freeze + (m.frozen_prev ? now - m.freeze_started_at : 0);
+}
+}
+// ===== END ADDED (metrics-counters) =====
+
+// ===== ADDED (timed-failure) =====
+// Periodic per-host dump of g_reps_metrics deltas. Pattern: clock.cpp Clock
+// (re-arm first, unconditionally, until past t_end). Lives in this TU so it can
+// read the anonymous-namespace side table directly. exp29 (transient-failure
+// crossover) consumes runs/<...>/window.csv.
+namespace {
+class UecWindowLogger : public EventSource {
+  public:
+    UecWindowLogger(EventList& el, FILE* fh, simtime_picosec interval,
+                    simtime_picosec t0, simtime_picosec t1)
+        : EventSource(el, "reps_window_log"),
+          _fh(fh), _interval(interval), _t1(t1) {
+        // First tick at t0 (absolute); do not keep the sim alive before then.
+        eventlist().sourceIsPending(*this, t0);
+    }
+    void doNextEvent() override {
+        simtime_picosec now = eventlist().now();
+        if (now + _interval <= _t1)
+            eventlist().sourceIsPendingRel(*this, _interval);   // re-arm first
+        for (auto& kv : g_reps_metrics) {
+            uint32_t node = kv.first;
+            const RepsMetrics& m = kv.second;
+            RepsMetrics& last = _last[node];
+            simtime_picosec tf_now = totalFreeze(m, now);
+            double frozen_frac = _interval
+                ? (double)(tf_now - _last_tf[node]) / (double)_interval : 0.0;
+            fprintf(_fh,
+                "%.3f,%u,%llu,%llu,%llu,%.4f,%llu,%llu,%llu,%d\n",
+                timeAsUs(now), node,
+                (unsigned long long)(m.rto               - last.rto),
+                (unsigned long long)(m.freeze_entries    - last.freeze_entries),
+                (unsigned long long)(m.fast_loss_entries - last.fast_loss_entries),
+                frozen_frac,
+                (unsigned long long)(m.ev_random         - last.ev_random),
+                (unsigned long long)(m.ev_explore        - last.ev_explore),
+                (unsigned long long)(m.ecn_acks          - last.ecn_acks),
+                m.frozen_prev ? 1 : 0);
+            last = m;
+            _last_tf[node] = tf_now;
+        }
+    }
+  private:
+    FILE* _fh;
+    simtime_picosec _interval, _t1;
+    std::unordered_map<uint32_t, RepsMetrics>        _last;
+    std::unordered_map<uint32_t, simtime_picosec>    _last_tf;
+};
+}  // namespace
+
+void UecSrc::startRepsWindowLog(EventList& el, const char* path,
+                                simtime_picosec interval_ps,
+                                simtime_picosec t0_ps, simtime_picosec t1_ps) {
+    FILE* fh = fopen(path, "w");
+    if (!fh) {
+        cerr << "Cannot open -log_reps_window file " << path << endl;
+        exit(1);
+    }
+    fprintf(fh, "t_us,node,d_rto,d_freeze_entries,d_fast_loss,frozen_frac,"
+                "d_ev_random,d_ev_explore,d_ecn_acks,frozen_now\n");
+    new UecWindowLogger(el, fh, interval_ps, t0_ps, t1_ps);
+}
+// ===== END ADDED (timed-failure) =====
+
 // Static stuff
 bool UecSrc::_use_timeouts = true;
 bool UecSink::_use_timeouts = true;
@@ -21,6 +136,11 @@ uint32_t UecSrc::_path_entropy_size = 256;
 int UecSrc::_global_node_count = 0;
 bool UecSrc::_shown = false;
 bool UecSrc::mprdma_fast_recovery = false;
+// ===== ADDED (dual-window-reps-mprdma) =====
+mem_b UecSrc::_dual_safe_cwnd_init_flag = 0;
+mem_b UecSrc::_dual_random_cwnd_init_flag = 0;
+uint32_t UecSrc::_dual_window_idle_reset_rtts = 2;
+// ===== END ADDED (dual-window-reps-mprdma) =====
 bool UecSrc::_trim_disbled = false;
 /* _min_rto can be tuned using setMinRTO. Don't change it here.  */
 simtime_picosec UecSrc::_min_rto = timeFromUs((uint32_t)DEFAULT_UEC_RTO_MIN);
@@ -133,6 +253,11 @@ std::map<uint32_t, UecSrc::LoadBalancing_Algo> UecSrc::_per_host_lb_override;
 // corresponding Route* from _paths[] (source routing, bypasses ECMP).
 bool UecSrc::_use_srv6 = false;
 // ===== END ADDED (srv6) ================================================
+
+// ===== ADDED (fail-src-paths) =========================================
+// exp30 Part B: <src node_num> -> <dead path count>. Empty by default.
+std::map<int, int> UecSrc::_fail_src_paths;
+// ===== END ADDED (fail-src-paths) =====================================
 
 // ===== ADDED (freezing-pxr) ============================================
 // Sliding-window timer for FREEZING_PXR. Default 200 ms (matches FREEZING's
@@ -599,6 +724,30 @@ void UecSrc::initNscc(mem_b cwnd, simtime_picosec peer_rtt) {
         _cwnd = cwnd;
     }
 
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Asymmetric-by-design init (locked decision, see experiments/ARCHITECTURE.md):
+    // safe window defaults to the full ceiling (_maxwnd) so its first clean
+    // ACK after a reset doesn't underutilize relative to a random window that
+    // may already have grown large; random window defaults to the same
+    // conservative cwnd_init_total NSCC/MPRDMA use. Both independently
+    // overridable via -dual_safe_cwnd_init / -dual_random_cwnd_init.
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        _safe_cwnd_init = (_dual_safe_cwnd_init_flag > 0) ? (mem_b)_dual_safe_cwnd_init_flag * _mtu : _maxwnd;
+        _random_cwnd_init = (_dual_random_cwnd_init_flag > 0) ? (mem_b)_dual_random_cwnd_init_flag * _mtu : _cwnd;
+        _win_safe.cwnd = _safe_cwnd_init;
+        _win_random.cwnd = _random_cwnd_init;
+        _win_safe.in_flight = 0;
+        _win_random.in_flight = 0;
+        syncDualCwnd();
+        cout << "Initialize per-instance DUAL_MPRDMA_REPS windows:"
+            << " flowid " << _flow.flow_id()
+            << " safe_cwnd_init=" << _safe_cwnd_init
+            << " random_cwnd_init=" << _random_cwnd_init
+            << " maxwnd=" << _maxwnd
+            << endl;
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =====
+
     cout << "Initialize per-instance NSCC parameters:"
         << " flowid " << _flow.flow_id()
         << " _base_rtt=" << _base_rtt
@@ -607,7 +756,7 @@ void UecSrc::initNscc(mem_b cwnd, simtime_picosec peer_rtt) {
         << " _maxwnd=" << _maxwnd
         << " _cwnd=" << _cwnd
         << endl;
-    
+
 }
 
 void UecSrc::initRccc(mem_b cwnd, simtime_picosec peer_rtt) {
@@ -1054,6 +1203,18 @@ UecSrc::UecSrc(TrafficLogger* trafficLogger, EventList& eventList, UecNIC& nic, 
                 updateCwndOnNack = &UecSrc::updateCwndOnNack_NSCC;
                 break;
             // ===== END ADDED (swift-cc) =====================================
+            // ===== ADDED (dual-window-reps-mprdma) =====
+            // Real dispatch for this algo is NOT via these function pointers
+            // (their fixed (bool,...) signature can't carry a WindowTag) -
+            // processAck()/processNack() call updateCwndOnAck_DualMPRDMA/
+            // updateCwndOnNack_DualMPRDMA directly, gated on
+            // _sender_cc_algo == DUAL_MPRDMA_REPS. These pointers are bound to
+            // no-ops only so nothing accidentally calls through them.
+            case DUAL_MPRDMA_REPS:
+                updateCwndOnAck  = &UecSrc::dontUpdateCwndOnAck;
+                updateCwndOnNack = &UecSrc::dontUpdateCwndOnNack;
+                break;
+            // ===== END ADDED (dual-window-reps-mprdma) =====
             default:
                 cout << "Unknown CC algo specified " << _sender_cc_algo << endl;
                 assert(0);
@@ -1182,13 +1343,14 @@ void UecSrc::receivePacket(Packet& pkt, uint32_t portnum) {
     }
 }
 
-mem_b UecSrc::handleAckno(UecDataPacket::seq_t ackno) {
+// ===== ADDED (dual-window-reps-mprdma): safe_bytes/random_bytes output params =====
+mem_b UecSrc::handleAckno(UecDataPacket::seq_t ackno, mem_b* safe_bytes, mem_b* random_bytes) {
     auto i = _tx_bitmap.find(ackno);
     if (i == _tx_bitmap.end()) {
         // The ackno is either in tx_bitmap or in rtx_queue
         // or in neither, but never in both.
-        // Hence, if it's not in _tx_bitmap, check if it's 
-        // in _rtx_queue and remove and correct. 
+        // Hence, if it's not in _tx_bitmap, check if it's
+        // in _rtx_queue and remove and correct.
         // If ackno is in neither, there is nothing else
         // to do here.
         auto rtx_i = _rtx_queue.find(ackno);
@@ -1197,28 +1359,58 @@ mem_b UecSrc::handleAckno(UecDataPacket::seq_t ackno) {
             mem_b pkt_size = rtx_i->second;
             _rtx_queue.erase(rtx_i);
             _rtx_backlog -= pkt_size;
-            _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
+            // ===== FIXED (dual-window-reps-mprdma review pass) =====
+            // For DUAL_MPRDMA_REPS, _in_flight no longer tracks the receiver-
+            // reported newly_recvd_bytes (see processAck's dual correction) -
+            // it's derived purely from dual_safe_acked/dual_random_acked, the
+            // sum of tx_bitmap entries erased THIS round. This packet was
+            // already erased from tx_bitmap and fully decremented from both
+            // _in_flight and its window's in_flight back at RTO time
+            // (mark_packet_for_retransmission), and it is NOT part of
+            // dual_safe_acked/dual_random_acked (it isn't in tx_bitmap to be
+            // erased). So nothing needs restoring: the original
+            // "_in_flight += pkt_size" compensation below exists only to
+            // cancel a double-decrement that the dual correction doesn't
+            // perform in the first place. Applying it under dual_active
+            // creates a permanent phantom increment - both counters end up
+            // +pkt_size for a packet that no longer exists, which the
+            // invariant assert cannot catch (both sides leak equally), and
+            // which can eventually wedge a window's admission gate shut
+            // (maybeIdleReset requires in_flight==0, unreachable once leaked).
+            if (_sender_cc_algo != DUAL_MPRDMA_REPS) {
+                _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
+            } else {
+                _rtx_win_tag.erase(ackno);
+            }
+            // ===== END FIXED =====
             if (_debug_src) {
                 cout << "found pkt " << ackno << " in rtx queue\n";
             }
         }
         return 0;
     } else {
-        // If ackno is in tx_bitmap, it means we have recentely 
+        // If ackno is in tx_bitmap, it means we have recentely
         // send out an packet, either for the first time or
         // an rtx packet. Since the current ack tells us that
-        // it has been received already, we can remove it from 
+        // it has been received already, we can remove it from
         // _tx_bitmap.
         simtime_picosec send_time = i->second.send_time;
 
         mem_b pkt_size = i->second.pkt_size;
-        
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (i->second.win_tag == WIN_SAFE && safe_bytes) {
+            *safe_bytes += pkt_size;
+        } else if (i->second.win_tag == WIN_RANDOM && random_bytes) {
+            *random_bytes += pkt_size;
+        }
+        // ===== END ADDED (dual-window-reps-mprdma) =====
+
         if (_debug_src)
             cout << _flow.str() << " " << _nodename << " handleAck " << ackno << " flow " << _flow.str() << endl;
         if(_flow.flow_id() == _debug_flowid ) {
               cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " handleAck ackno " << ackno
                    << endl;
-        } 
+        }
 
         _tx_bitmap.erase(i);
         // _send_times.erase(send_time);
@@ -1235,7 +1427,8 @@ mem_b UecSrc::handleAckno(UecDataPacket::seq_t ackno) {
     abort(); // dead code below
 }
 
-mem_b UecSrc::handleCumulativeAck(UecDataPacket::seq_t cum_ack) {
+// ===== ADDED (dual-window-reps-mprdma): safe_bytes/random_bytes output params =====
+mem_b UecSrc::handleCumulativeAck(UecDataPacket::seq_t cum_ack, mem_b* safe_bytes, mem_b* random_bytes) {
     mem_b newly_acked = 0;
 
     // free up anything cumulatively acked
@@ -1246,7 +1439,18 @@ mem_b UecSrc::handleCumulativeAck(UecDataPacket::seq_t cum_ack) {
             mem_b pkt_size = _rtx_queue.begin()->second;
             _rtx_queue.erase(_rtx_queue.begin());
             _rtx_backlog -= pkt_size;
-            _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
+            // ===== FIXED (dual-window-reps-mprdma review pass) =====
+            // Same reasoning as the identical fix in handleAckno's rtx_queue
+            // branch above: under DUAL_MPRDMA_REPS this packet was already
+            // fully decremented at RTO time and is not part of
+            // dual_safe_acked/dual_random_acked, so the give-back would be a
+            // permanent phantom increment on both counters.
+            if (_sender_cc_algo != DUAL_MPRDMA_REPS) {
+                _in_flight += pkt_size; // don't double count - we decremented when we marked for rtx
+            } else {
+                _rtx_win_tag.erase(seqno);
+            }
+            // ===== END FIXED =====
         } else {
             break;
         }
@@ -1263,13 +1467,20 @@ mem_b UecSrc::handleCumulativeAck(UecDataPacket::seq_t cum_ack) {
         simtime_picosec send_time = i->second.send_time;
 
         newly_acked += i->second.pkt_size;
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (i->second.win_tag == WIN_SAFE && safe_bytes) {
+            *safe_bytes += i->second.pkt_size;
+        } else if (i->second.win_tag == WIN_RANDOM && random_bytes) {
+            *random_bytes += i->second.pkt_size;
+        }
+        // ===== END ADDED (dual-window-reps-mprdma) =====
 
         if (_debug_src)
             cout << _flow.str() << " " << _nodename << " handleCumAck " << seqno << " flow " << _flow.str() << endl;
         if(_flow.flow_id() == _debug_flowid ){
             cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " handleCumulativeAck seqno " << seqno
                 << endl;
-        }  
+        }
         _tx_bitmap.erase(i);
         i = _tx_bitmap.begin();
         // _send_times.erase(send_time);
@@ -1315,7 +1526,26 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              " bg traffic " << background_traffic <<
              " swift_md_fires " << _swift_md_fires <<  // ===== ADDED (swift-md-counter) =====
              " ecn_acks " << _ecn_ack_count <<         // ===== ADDED (ecn-counter) =====
+             // ===== ADDED (metrics-counters) =====
+             " rtos " << RM(_srcaddr).rto <<
+             " freeze_entries " << RM(_srcaddr).freeze_entries <<
+             " freeze_us " << timeAsUs(totalFreeze(RM(_srcaddr), eventlist().now())) <<
+             " ev_explore " << RM(_srcaddr).ev_explore <<
+             " ev_random " << RM(_srcaddr).ev_random <<
+             // ===== END ADDED (metrics-counters) =====
+             " fast_loss " << RM(_srcaddr).fast_loss_entries <<  // ===== ADDED (timed-failure) =====
              endl;
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Runtime proof of the predictor/actual-draw invariant: must print 0
+        // in every run. Nonzero means window attribution is unreliable.
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            cout << "Flow " << _name << " DUAL_MPRDMA_REPS final state:"
+                 << " predict_mismatch_count=" << _dual_predict_mismatch_count
+                 << " safe_cwnd=" << _win_safe.cwnd << " safe_in_flight=" << _win_safe.in_flight
+                 << " random_cwnd=" << _win_random.cwnd << " random_in_flight=" << _win_random.in_flight
+                 << endl;
+        }
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         _speculating = false;
         
 
@@ -1456,6 +1686,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     if (pkt.ecn_echo()) {
         last_ecn = eventlist().now();
         _ecn_ack_count++;   // ===== ADDED (ecn-counter) =====
+        RM(_srcaddr).ecn_acks++;   // ===== ADDED (timed-failure) =====
         if (_collect_data) {
             _list_ecn_received.push_back(std::make_pair(eventlist().now() / 1000, 1));
         }
@@ -1507,7 +1738,20 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         delay = get_avg_delay();
     }
 
-    handleCumulativeAck(cum_ack);
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Per-packet byte attribution accumulated across this ACK's cumulative +
+    // SACK-bitmap coverage. This is the sender-side reconstruction (sum of
+    // actually-erased tx_bitmap entries' pkt_size, split by win_tag), and is
+    // used as the per-window "newly_acked_bytes" below instead of trying to
+    // force-split the receiver-side newly_recvd_bytes counter (accepted
+    // approximation - see experiments/ARCHITECTURE.md: an aggregate ACK's
+    // single ECN bit can legitimately straddle both windows).
+    mem_b dual_safe_acked = 0, dual_random_acked = 0;
+    bool dual_active = (_sender_cc_algo == DUAL_MPRDMA_REPS);
+    // ===== END ADDED (dual-window-reps-mprdma) =====
+
+    handleCumulativeAck(cum_ack, dual_active ? &dual_safe_acked : nullptr,
+                                  dual_active ? &dual_random_acked : nullptr);
 
     if (_debug_src)
         cout << "At " << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " processAck cum_ack: " << cum_ack << " flow " << _flow.str() << endl;
@@ -1524,7 +1768,8 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
             if (_debug_src)
                 cout << "    Sack " << ackno << " flow " << _flow.str() << endl;
 
-            handleAckno(ackno);
+            handleAckno(ackno, dual_active ? &dual_safe_acked : nullptr,
+                                dual_active ? &dual_random_acked : nullptr);
             if (_highest_recv_seqno < ackno){
                 _highest_recv_seqno = ackno;
             }
@@ -1532,6 +1777,24 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         ackno++;
         bitmap >>= 1;
     }
+
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // The aggregate _in_flight -= newly_recvd_bytes at the top of this
+    // function used the receiver-reported cumulative counter; the per-window
+    // sums below are a sender-side reconstruction from which tx_bitmap
+    // entries were actually erased this round. Under real loss/reordering
+    // (proven by a multi-flow run: the assert below fired without this
+    // correction) these two quantities can diverge, which would silently
+    // break the invariant. Fix: make _in_flight track the SAME sum the
+    // per-window counters use, for this algo only - undo the original
+    // decrement and reapply it as (dual_safe_acked + dual_random_acked).
+    if (dual_active) {
+        mem_b dual_total_acked = dual_safe_acked + dual_random_acked;
+        _in_flight += (mem_b)newly_recvd_bytes - dual_total_acked;
+        _win_safe.in_flight -= dual_safe_acked;
+        _win_random.in_flight -= dual_random_acked;
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =====
 
     // We ran both potential _in_flight correcting functions
     // now check if we are in the negative.
@@ -1640,6 +1903,20 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         // (Mode A: cc_ecn_view stays = pkt.ecn_echo(); gain applied in MD)
         // ===== END ADDED (smart-filter) ==================================
 
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (dual_active) {
+            if (dual_safe_acked > 0)
+                updateCwndOnAck_DualMPRDMA(WIN_SAFE, cc_ecn_view, delay, dual_safe_acked);
+            if (dual_random_acked > 0)
+                updateCwndOnAck_DualMPRDMA(WIN_RANDOM, cc_ecn_view, delay, dual_random_acked);
+            // code-review fix: same reasoning as dualWindowBlocked() - never
+            // idle-reset a window while the flow is in loss recovery.
+            if (!_loss_recovery_mode) {
+                maybeIdleReset(_win_safe, _safe_cwnd_init);
+                maybeIdleReset(_win_random, _random_cwnd_init);
+            }
+        } else
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         (this->*updateCwndOnAck)(cc_ecn_view, delay, newly_recvd_bytes);
 
         // ===== ADDED (swift-sack-hole-md) =====================================
@@ -1785,10 +2062,12 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         return;
     }
 
+    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
+
     sendIfPermitted();
 }
 
-/* 
+/*
     Register per flow metrics (flow size, flow start time, flow end time, flow completion time, base rtt,
     target rtt, rto, bdp and max cwnd)
 */
@@ -1869,6 +2148,56 @@ void UecSrc::updateCwndOnAck_MPRDMA(bool skip, simtime_picosec rtt, mem_b newly_
         _cwnd = max((mem_b)_mtu, _cwnd);
     }
 }
+
+// ===== ADDED (dual-window-reps-mprdma) ======================================
+// Identical MPRDMA AIMD formula as updateCwndOnAck_MPRDMA/updateCwndOnNack_MPRDMA
+// above, applied against one of _win_safe/_win_random by explicit tag instead
+// of the single scalar _cwnd. No fast_increase/_fi_count (mprdma_fast_recovery
+// is global/singleton state, not designed for per-window duplication -
+// deliberately excluded, see plan). Locked decisions: both windows use the
+// SAME formula (no asymmetry between safe/random); ceiling is the full
+// _maxwnd independently per window (not split); MD floor stays exactly
+// MPRDMA's existing 1 MTU (max(_mtu, cwnd)) - no new floor parameter. That
+// floor means a window pinned there admits only 1 outstanding packet, so
+// exploration under sustained ECN pressure on the random window caps near 1
+// attempt/RTT - a known, deliberately-deferred tunable, not an oversight
+// (see experiments/ARCHITECTURE.md).
+void UecSrc::updateCwndOnNack_DualMPRDMA(WindowTag tag, mem_b nacked_bytes) {
+    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // WIN_NONE (e.g. an RTS control-packet record, which createSendRecord
+    // tags WIN_NONE since RTS isn't attributed to either window) must be a
+    // true no-op here. The old (tag==WIN_SAFE)?safe:random ternary silently
+    // mapped WIN_NONE to _win_random, applying a spurious MD to a window
+    // that never sent the packet.
+    if (tag == WIN_NONE) return;
+    // ===== END FIXED =====
+    MprdmaWindow& w = (tag == WIN_SAFE) ? _win_safe : _win_random;
+    w.cwnd -= nacked_bytes;
+    w.cwnd = max(w.cwnd, (mem_b)_mtu);
+    w.last_active = eventlist().now();
+    syncDualCwnd();
+}
+
+void UecSrc::updateCwndOnAck_DualMPRDMA(WindowTag tag, bool skip, simtime_picosec rtt, mem_b newly_acked_bytes) {
+    if (tag == WIN_NONE) return; // ===== FIXED (dual-window-reps-mprdma review pass): same as Nack twin =====
+    MprdmaWindow& w = (tag == WIN_SAFE) ? _win_safe : _win_random;
+    // Defensive floor (review-pass hardening): the -sender_cc_only startup
+    // guard should make w.cwnd==0 unreachable, but a zero divisor here is an
+    // integer division by zero (SIGFPE), not a graceful failure - cheap to
+    // make impossible outright rather than rely solely on the startup check.
+    if (w.cwnd < (mem_b)_mtu) w.cwnd = _mtu;
+    if (skip == false) { // additive increase, 1 pkt/RTT
+        w.cwnd += newly_acked_bytes * _mtu / w.cwnd;
+        if (w.cwnd > _maxwnd)
+            w.cwnd = _maxwnd;
+    } else { // multiplicative decrease, per mark, floor = 1 MTU (kept as-is; see banner above)
+        w.cwnd -= newly_acked_bytes / 4;
+        w.cwnd = max((mem_b)_mtu, w.cwnd);
+    }
+    w.last_active = eventlist().now();
+    syncDualCwnd();
+}
+// ===== END ADDED (dual-window-reps-mprdma) ==================================
 
 void UecSrc::updateCwndOnNack_DCTCP(bool skip, mem_b nacked_bytes) {
     _cwnd -= nacked_bytes;
@@ -1995,14 +2324,37 @@ void UecSrc::fulfill_adjustment(){
     _last_adjust_time = eventlist().now();
 }
 
-void UecSrc::mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t pktsize){
-    _in_flight -= pktsize;
+// ===== ADDED (dual-window-reps-mprdma): tag param =====
+void UecSrc::mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t pktsize, WindowTag tag){
+    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // A WIN_NONE record (RTS control packet - createSendRecord tags it
+    // WIN_NONE since RTS isn't attributed to either window, and it never
+    // increments _in_flight when sent, see sendRTS()) must not decrement the
+    // aggregate _in_flight either, or the invariant permanently breaks by
+    // exactly pktsize (aggregate down, per-window branches below correctly
+    // no-op on WIN_NONE, so nothing on that side to match it).
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS || tag != WIN_NONE) {
+        _in_flight -= pktsize;
+    }
+    // ===== END FIXED =====
     //assert (_in_flight>=0);
     if (_sender_cc_algo != CONSTANT) {
-        
+
         _cwnd = max(_cwnd - pktsize, (mem_b)_mtu);
     }
-    
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Third site (besides ACK/NACK) touching _in_flight and _cwnd together;
+    // easy to miss if only following the ACK/NACK/RTO triad.
+    if (tag == WIN_SAFE) {
+        _win_safe.in_flight -= pktsize;
+        _win_safe.cwnd = max(_win_safe.cwnd - pktsize, (mem_b)_mtu);
+    } else if (tag == WIN_RANDOM) {
+        _win_random.in_flight -= pktsize;
+        _win_random.cwnd = max(_win_random.cwnd - pktsize, (mem_b)_mtu);
+    }
+    syncDualCwnd(); // supersedes the standalone _cwnd -= above for this algo
+    // ===== END ADDED (dual-window-reps-mprdma) =====
+
     //_rtx_count ++;
 }
 
@@ -2616,6 +2968,7 @@ void UecSrc::fastLossRecovery(uint32_t ooo, UecBasePacket::seq_t cum_ack) {
         return;
     if (!_loss_recovery_mode){
         _loss_recovery_mode = true;
+        RM(_srcaddr).fast_loss_entries++;   // ===== ADDED (timed-failure) =====
         _loss_counter = 0;
         _recovery_seqno = _highest_recv_seqno;
         cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " enter_loss " <<endl;
@@ -2646,16 +2999,33 @@ void UecSrc::fastLossRecovery(uint32_t ooo, UecBasePacket::seq_t cum_ack) {
         assert(pkt_size >= _hdr_size); // check we're not seeing NACKed RTS packets.
         auto seqno = i->first;
         simtime_picosec send_time = i->second.send_time;
+        WindowTag win_tag = i->second.win_tag; // ===== ADDED (dual-window-reps-mprdma) =====
         _tx_bitmap.erase(i);
         assert(_tx_bitmap.find(seqno) == _tx_bitmap.end()); // xxx remove when working
 
-        _in_flight -= pkt_size;
+        // ===== FIXED (dual-window-reps-mprdma review pass) =====
+        // Despite the comment above, pkt_size == _hdr_size (an RTS record)
+        // passes ">=" and reaches here with win_tag == WIN_NONE (RTS is never
+        // attributed to a window and never incremented _in_flight when
+        // sent) - skip the aggregate decrement to match, same reasoning as
+        // mark_packet_for_retransmission's identical fix.
+        if (_sender_cc_algo != DUAL_MPRDMA_REPS || win_tag != WIN_NONE) {
+            _in_flight -= pkt_size;
+        }
+        // ===== END FIXED =====
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (win_tag == WIN_SAFE) {
+            _win_safe.in_flight -= pkt_size;
+        } else if (win_tag == WIN_RANDOM) {
+            _win_random.in_flight -= pkt_size;
+        }
+        // ===== END ADDED (dual-window-reps-mprdma) =====
 
         // _send_times.erase(send_time);
         delFromSendTimes(send_time, rtx_seqno);
         _highest_rtx_sent = seqno+1;
         _loss_counter ++;
-        queueForRtx(seqno, pkt_size);
+        queueForRtx(seqno, pkt_size, win_tag);
 
         if (send_time == _rto_send_time)
         {
@@ -2711,6 +3081,7 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
 
     auto seqno = i->first;
     simtime_picosec send_time = i->second.send_time;
+    WindowTag win_tag = i->second.win_tag; // ===== ADDED (dual-window-reps-mprdma) =====
 
     _raw_rtt = eventlist().now() - send_time;
     if(_raw_rtt > _base_rtt)
@@ -2720,11 +3091,16 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
         _exp_avg_ecn = _ecn_alpha * 1.0  + (1 - _ecn_alpha) * _exp_avg_ecn;
     }
     if(_flow.flow_id() == _debug_flowid){
-        cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " ev " << ev 
+        cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " ev " << ev
             << " seqno " << seqno
             << " trimming " << endl;
     }
     if (_sender_based_cc){
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            updateCwndOnNack_DualMPRDMA(win_tag, pkt_size);
+        } else
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         (this->*updateCwndOnNack)(ev, pkt_size);
     }
 
@@ -2734,14 +3110,28 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
     _tx_bitmap.erase(i);
     assert(_tx_bitmap.find(seqno) == _tx_bitmap.end());  // xxx remove when working
 
-    _in_flight -= pkt_size;
+    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // Same as the identical fix in fastLossRecovery/mark_packet_for_retransmission:
+    // an RTS record (win_tag == WIN_NONE) never incremented _in_flight when
+    // sent, so skip the aggregate decrement to match.
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS || win_tag != WIN_NONE) {
+        _in_flight -= pkt_size;
+    }
+    // ===== END FIXED =====
     //assert(_in_flight >= 0);
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    if (win_tag == WIN_SAFE) {
+        _win_safe.in_flight -= pkt_size;
+    } else if (win_tag == WIN_RANDOM) {
+        _win_random.in_flight -= pkt_size;
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =====
 
     // _send_times.erase(send_time);
     delFromSendTimes(send_time, seqno);
 
     stopSpeculating();
-    queueForRtx(seqno, pkt_size);
+    queueForRtx(seqno, pkt_size, win_tag);
 
     if (send_time == _rto_send_time) {
         recalculateRTO();
@@ -2752,6 +3142,8 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
     // ===== ADDED (reps-event-trace) =====
     logRepsEvent("NACK", (int)ev, -1, (uint64_t)nacked_seqno, EVSRC_NONE);
     // ===== END ADDED (reps-event-trace) =====
+
+    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
 
     sendIfPermitted();
 }
@@ -2855,6 +3247,18 @@ void UecSrc::startFlow() {
     } */
     clearRTO();
     _in_flight = 0;
+    _win_safe.in_flight = 0;    // ===== ADDED (dual-window-reps-mprdma) =====
+    _win_random.in_flight = 0;  // ===== ADDED (dual-window-reps-mprdma) =====
+    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // startFlow() re-enters on every reactivation of a long-lived UecSrc (see
+    // the _owns_circular_buffer_reps comment above) - a stale _rtx_win_tag
+    // entry from a previous activation, if a seqno is ever reused, would be
+    // consumed as authoritative by sendRtxPacket and misattribute the
+    // packet; a stale _dual_gate_predicted_tag would compare against an
+    // unrelated future send.
+    _rtx_win_tag.clear();
+    _dual_gate_predicted_tag = WIN_NONE;
+    // ===== END FIXED =====
     _pull_target = INIT_PULL;
     _pull = INIT_PULL;
     _last_rts = 0;
@@ -2968,9 +3372,16 @@ void UecSrc::sendIfPermitted() {
         return;
     }
 
-    //cout << timeAsUs(eventlist().now()) << " " << nodename() << " FOO " << _cwnd << " " << _in_flight << endl;                                                  
+    //cout << timeAsUs(eventlist().now()) << " " << nodename() << " FOO " << _cwnd << " " << _in_flight << endl;
 
     if (_sender_based_cc) {
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            if (dualWindowBlocked()) {
+                return;
+            }
+        } else
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         if ((_cwnd <= _in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())) {
             return;
         }
@@ -3458,23 +3869,41 @@ void UecSrc::processEv_ecmp(uint16_t path_id, PathFeedback feedback) {
 
 
 uint16_t UecSrc::nextEntropy_freezing(){
+    // ===== ADDED (metrics-counters): catch freeze entry/exit each send =====
+    accrueFreeze(RM(_srcaddr),
+                 circular_buffer_reps && circular_buffer_reps->isFrozenMode(),
+                 eventlist().now());
+    // ===== END ADDED (metrics-counters) =====
     if (circular_buffer_reps->explore_counter > 0) {
         circular_buffer_reps->explore_counter--;
         _last_ev_source = EVSRC_EXPLORE; // ===== ADDED (reps-event-trace) =====
+        RM(_srcaddr).ev_explore++;      // ===== ADDED (metrics-counters) =====
         return rand() % _no_of_paths;
     }
 
     if (circular_buffer_reps->isFrozenMode()) {
         if (circular_buffer_reps->isEmpty()) {
             _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
+            RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
             return rand() % _no_of_paths;
         } else {
+            // ===== ADDED (dual-window-reps-mprdma) =====
+            // Only the dual algo distinguishes valid vs. stale frozen pops;
+            // every other algo keeps emitting plain EVSRC_FROZEN_POP so its
+            // trace output (-log_reps_events) stays byte-identical.
+            if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+                bool was_valid = circular_buffer_reps->is_valid_frozen();
+                _last_ev_source = was_valid ? EVSRC_FROZEN_POP_VALID : EVSRC_FROZEN_POP_STALE;
+                return circular_buffer_reps->remove_frozen();
+            }
+            // ===== END ADDED (dual-window-reps-mprdma) =====
             _last_ev_source = EVSRC_FROZEN_POP; // ===== ADDED (reps-event-trace) =====
             return circular_buffer_reps->remove_frozen();
         }
     } else {
         if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
             _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
+            RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
             return _crt_path = rand() % _no_of_paths;
         } else {
             _last_ev_source = EVSRC_FRESH_POP; // ===== ADDED (reps-event-trace) =====
@@ -3482,6 +3911,136 @@ uint16_t UecSrc::nextEntropy_freezing(){
         }
     }
 }
+
+// ===== ADDED (dual-window-reps-mprdma) =====================================
+// Read-only prediction of which window nextEntropy_freezing()'s upcoming draw
+// will land in. Mirrors its branch order exactly, but never mutates
+// circular_buffer_reps (no explore_counter decrement, no accrueFreeze, no
+// buffer pop) so it is safe to call before deciding whether to admit a send.
+//
+// Invariant this whole mechanism depends on: no event can run between this
+// call and the real (destructive) draw inside sendNewPacket/sendRtxPacket,
+// since htsim is single-threaded/event-driven and nothing else touches
+// circular_buffer_reps in that gap. The predicted tag is therefore guaranteed
+// to match the tag derived from the real draw's _last_ev_source afterward;
+// _dual_predict_mismatch_count (incremented at the send sites, see
+// sendNewPacket) is the runtime proof of this, not just a comment.
+UecSrc::WindowTag UecSrc::predictWindowForNextEntropy_freezing() {
+    if (circular_buffer_reps->explore_counter > 0) {
+        return WIN_RANDOM;
+    }
+    if (circular_buffer_reps->isFrozenMode()) {
+        if (circular_buffer_reps->isEmpty()) {
+            return WIN_RANDOM;
+        }
+        return circular_buffer_reps->is_valid_frozen() ? WIN_SAFE : WIN_RANDOM;
+    }
+    if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
+        return WIN_RANDOM;
+    }
+    return WIN_SAFE;
+}
+
+// Maps a resolved EvSource (from the real draw, _last_ev_source) to the
+// window it is attributed to. See the plan's locked decision: FRESH_POP/
+// FROZEN_POP_VALID/PXR_POP -> safe; RANDOM/EXPLORE/FROZEN_POP_STALE/
+// PXR_RANDOM -> random. EVSRC_NONE/EVSRC_FROZEN_POP (undifferentiated, other
+// algos only) -> WIN_NONE; never reached for DUAL_MPRDMA_REPS sends.
+UecSrc::WindowTag UecSrc::evSourceToWindowTag(EvSource src) {
+    switch (src) {
+        case EVSRC_FRESH_POP:
+        case EVSRC_FROZEN_POP_VALID:
+        case EVSRC_PXR_POP:
+            return WIN_SAFE;
+        case EVSRC_RANDOM:
+        case EVSRC_EXPLORE:
+        case EVSRC_FROZEN_POP_STALE:
+        case EVSRC_PXR_RANDOM:
+            return WIN_RANDOM;
+        default:
+            return WIN_NONE;
+    }
+}
+
+// Lazily resets one idle window to its own configured init value. Called
+// independently per window (never coupled) from the admission gate and
+// feedback paths for DUAL_MPRDMA_REPS only.
+void UecSrc::maybeIdleReset(MprdmaWindow& w, mem_b init_val) {
+    if (w.last_active == 0) {
+        return; // never active yet; flow-start init already set cwnd correctly
+    }
+    // Only reset cwnd, never in_flight: if a packet attributed to this window
+    // is still genuinely outstanding (no ACK/NACK/RTO resolved it yet), its
+    // bytes are still counted in the aggregate _in_flight elsewhere, and
+    // zeroing w.in_flight here would silently break the
+    // _win_safe.in_flight+_win_random.in_flight==_in_flight invariant. A window with
+    // real in-flight bytes isn't meaningfully "idle" regardless of the timer.
+    if (w.in_flight == 0 &&
+        eventlist().now() - w.last_active > (simtime_picosec)_dual_window_idle_reset_rtts * _base_rtt) {
+        w.cwnd = init_val;
+        w.last_active = eventlist().now();
+        syncDualCwnd();
+    }
+}
+
+// Which window the NEXT send (rtx, if queued, else new) will be attributed
+// to. For rtx, looks up the tag carried over from the original send (never
+// re-predicted - see plan's "tag at send time, never re-derive" rule); falls
+// back to WIN_RANDOM if somehow untracked (defensive only, should not happen
+// since queueForRtx always records the tag it's given). For a new packet,
+// defers to the read-only predictor.
+UecSrc::WindowTag UecSrc::dualPeekNextWindowTag() {
+    if (!_rtx_queue.empty()) {
+        auto it = _rtx_win_tag.find(_rtx_queue.begin()->first);
+        return (it != _rtx_win_tag.end()) ? it->second : WIN_RANDOM;
+    }
+    return predictWindowForNextEntropy_freezing();
+}
+
+// Admission gate for DUAL_MPRDMA_REPS: true => this send should be blocked
+// (mirrors the semantics of the single-window
+// "(_cwnd<=_in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())"
+// check it replaces). Also stashes the predicted tag for sendNewPacket's
+// mismatch counter, and lazily idle-resets both windows.
+bool UecSrc::dualWindowBlocked() {
+    // ===== ADDED (dual-window-reps-mprdma): code-review fix =====
+    // Loss recovery must be checked BEFORE idle-reset: resetting an idle
+    // window's cwnd to its ceiling mid-recovery would silently undo whatever
+    // multiplicative decrease already applied to it, since the window then
+    // resumes sending at full ceiling once recovery ends instead of at the
+    // MD-reduced value. A window can legitimately be idle (0 in-flight)
+    // while the FLOW is in loss recovery on its other window.
+    if (_loss_recovery_mode) {
+        return _rtx_queue.empty();
+    }
+    // ===== END ADDED (dual-window-reps-mprdma): code-review fix =====
+    maybeIdleReset(_win_safe, _safe_cwnd_init);
+    maybeIdleReset(_win_random, _random_cwnd_init);
+    WindowTag tag = dualPeekNextWindowTag();
+    if (_rtx_queue.empty()) {
+        // Only a NEW-packet prediction is meaningful to compare later in
+        // sendNewPacket() against the real draw's resolved tag.
+        _dual_gate_predicted_tag = tag;
+    }
+    MprdmaWindow& w = (tag == WIN_SAFE) ? _win_safe : _win_random;
+    return w.cwnd <= w.in_flight;
+}
+
+// Invariant chokepoint: _win_safe.in_flight + _win_random.in_flight == _in_flight.
+// Gated to DUAL_MPRDMA_REPS only, so it never fires (or costs anything) for
+// any other algo/run. Called from processAck, processNack, and
+// rtxTimerExpired - see plan's Step 4 site list for what a violation would
+// mean (a missed _in_flight mutation site).
+void UecSrc::assertDualWindowInvariant() {
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS) return;
+    assert(_win_safe.in_flight + _win_random.in_flight == _in_flight);
+}
+
+void UecSrc::syncDualCwnd() {
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS) return;
+    _cwnd = _win_safe.cwnd + _win_random.cwnd;
+}
+// ===== END ADDED (dual-window-reps-mprdma) ==================================
 
 void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
 
@@ -3498,6 +4057,17 @@ void UecSrc::processEv_freezing(uint16_t path_id, PathFeedback feedback) {
         circular_buffer_reps->resetBuffer();
         circular_buffer_reps->explore_counter = _bdp / _mtu;
         //circular_buffer_reps->explore_counter = 8;
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Unfreeze wipes buffer state entirely; treat both windows as
+        // fresh-start, each back to its own configured init value.
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            _win_safe.cwnd = _safe_cwnd_init;
+            _win_random.cwnd = _random_cwnd_init;
+            _win_safe.last_active = eventlist().now();
+            _win_random.last_active = eventlist().now();
+            syncDualCwnd();
+        }
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         printf("%s exited freezing mode at %lu\n", _name.c_str(), eventlist().now() / 1000);
         logRepsEvent("UNFREEZE", -1, -1, (uint64_t)-1, EVSRC_NONE); // ===== ADDED (reps-event-trace) =====
     }
@@ -3744,10 +4314,40 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
 
     p->flow().logTraffic(*p, *this, TrafficLogger::PKT_CREATESEND);
 
-    if (_backlog == 0 || (_receiver_based_cc && _credit < 0) || ( _sender_based_cc &&  _in_flight >= _cwnd ))
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    WindowTag dual_tag = WIN_NONE;
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        dual_tag = evSourceToWindowTag(_last_ev_source);
+        // Runtime proof of the predictor/actual-draw invariant (see
+        // predictWindowForNextEntropy_freezing's comment): must stay 0.
+        // Only meaningful when a prediction was actually made this round -
+        // startFlow()'s own initial send loop (uec.cpp:~3181) calls
+        // sendNewPacket() directly, bypassing the _sender_based_cc admission
+        // gate entirely (true for every CC algo, not just this one: it only
+        // checks credit()/backlog, not cwnd), so no predictWindowForNext...()
+        // call precedes those sends. _dual_gate_predicted_tag stays WIN_NONE
+        // (its default/reset value) whenever that happens; comparing against
+        // it would be a false mismatch, not a real invariant violation.
+        if (_dual_gate_predicted_tag != WIN_NONE) {
+            if (dual_tag != _dual_gate_predicted_tag) {
+                _dual_predict_mismatch_count++;
+            }
+        }
+        _dual_gate_predicted_tag = WIN_NONE; // consumed either way
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =====
+
+    if (_backlog == 0 || (_receiver_based_cc && _credit < 0) ||
+        (_sender_based_cc && _sender_cc_algo != DUAL_MPRDMA_REPS && _in_flight >= _cwnd) ||
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        (_sender_based_cc && _sender_cc_algo == DUAL_MPRDMA_REPS &&
+         ((dual_tag == WIN_SAFE) ? (_win_safe.in_flight >= _win_safe.cwnd)
+                                  : (_win_random.in_flight >= _win_random.cwnd)))
+        // ===== END ADDED (dual-window-reps-mprdma) =====
+        )
         p->set_ar(true);
 
-    createSendRecord(_highest_sent, full_pkt_size, ev);
+    createSendRecord(_highest_sent, full_pkt_size, ev, dual_tag);
     if (_debug_src)
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " sending pkt " << _highest_sent
              << " size " << full_pkt_size << " pull target " << _pull_target << " ack request " << p->ar()
@@ -3762,6 +4362,15 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     // ===== ADDED (reps-event-trace) =====
     logRepsEvent("SEND", (int)ev, -1, (uint64_t)_highest_sent, _last_ev_source);
     // ===== END ADDED (reps-event-trace) =====
+    // ===== ADDED (fail-src-paths) =====
+    // exp30 Part B: if this source's path index is in its dead set, blackhole
+    // the packet at emit (== a first-hop failed Pipe: free + no sendOn). The
+    // sender still bumps _highest_sent and arms the RTO below, so recovery runs
+    // exactly as for a real fabric drop.
+    if (pathDeadForThisSrc(route_path_idx))
+        p->free();
+    else
+    // ===== END ADDED (fail-src-paths) =====
     p->sendOn();
     _highest_sent++;
     _new_packets_sent++;
@@ -3780,6 +4389,25 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     auto seq_no = _rtx_queue.begin()->first;
     mem_b full_pkt_size = _rtx_queue.begin()->second;
     spendCredit(full_pkt_size);
+
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Rtx never re-predicts: it carries forward the tag decided when this
+    // seqno was originally sent (see plan's "tag at send time, never
+    // re-derive" rule), regardless of which EV the draw below lands on.
+    // ===== FIXED (review pass): queueForRtx now always stores an entry
+    // (including WIN_NONE), so "not found" here would mean a bug elsewhere,
+    // not a legitimately-untagged packet - default to WIN_NONE (inert), not
+    // WIN_RANDOM (which used to silently misattribute e.g. an RTS retransmit
+    // into the random window's accounting). =====
+    WindowTag dual_tag = WIN_NONE;
+    if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+        auto tag_it = _rtx_win_tag.find(seq_no);
+        if (tag_it != _rtx_win_tag.end()) {
+            dual_tag = tag_it->second;
+            _rtx_win_tag.erase(tag_it);
+        }
+    }
+    // ===== END FIXED / END ADDED (dual-window-reps-mprdma) =====
 
     _rtx_queue.erase(_rtx_queue.begin());
     _rtx_backlog -= full_pkt_size;
@@ -3822,7 +4450,7 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
         p->no_bg = false;
     }
 
-    createSendRecord(seq_no, full_pkt_size, ev);
+    createSendRecord(seq_no, full_pkt_size, ev, dual_tag);
 
     if (_debug_src)
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename << " sending rtx pkt " << seq_no
@@ -3839,6 +4467,11 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     // ===== ADDED (reps-event-trace) =====
     logRepsEvent("RTX", (int)ev, -1, (uint64_t)seq_no, _last_ev_source);
     // ===== END ADDED (reps-event-trace) =====
+    // ===== ADDED (fail-src-paths) =====
+    if (pathDeadForThisSrc(route_path_idx))
+        p->free();
+    else
+    // ===== END ADDED (fail-src-paths) =====
     p->sendOn();
     _rtx_packets_sent++;
     startRTO(eventlist().now());
@@ -3876,20 +4509,43 @@ void UecSrc::sendRTS() {
     startRTO(eventlist().now());
 }
 
-void UecSrc::createSendRecord(UecBasePacket::seq_t seqno, mem_b full_pkt_size, uint16_t ev) {
+// ===== ADDED (dual-window-reps-mprdma): tag param =====
+void UecSrc::createSendRecord(UecBasePacket::seq_t seqno, mem_b full_pkt_size, uint16_t ev, WindowTag tag) {
     // assert(full_pkt_size > 64);
     if (_debug_src)
         cout << _flow.str() << " " << _nodename << " createSendRecord seqno: " << seqno << " size " << full_pkt_size
              << endl;
     assert(_tx_bitmap.find(seqno) == _tx_bitmap.end());
-    _tx_bitmap.emplace(seqno, sendRecord(full_pkt_size, eventlist().now(), ev));
+    _tx_bitmap.emplace(seqno, sendRecord(full_pkt_size, eventlist().now(), ev, tag));
     _send_times.emplace(eventlist().now(), seqno);
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Single chokepoint for every send (new/rtx/RTS), so the per-window
+    // in_flight increment doesn't need duplicating at each call site.
+    // WIN_NONE (every other algo, and RTS) is a no-op.
+    if (tag == WIN_SAFE) {
+        _win_safe.in_flight += full_pkt_size;
+        _win_safe.last_active = eventlist().now();
+    } else if (tag == WIN_RANDOM) {
+        _win_random.in_flight += full_pkt_size;
+        _win_random.last_active = eventlist().now();
+    }
+    // ===== END ADDED (dual-window-reps-mprdma) =====
 }
 
-void UecSrc::queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size) {
+// ===== ADDED (dual-window-reps-mprdma): tag param =====
+void UecSrc::queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size, WindowTag tag) {
     assert(_rtx_queue.find(seqno) == _rtx_queue.end());
     _rtx_queue.emplace(seqno, pkt_size);
     _rtx_backlog += pkt_size;
+    // ===== FIXED (dual-window-reps-mprdma review pass) =====
+    // Always store the tag, including WIN_NONE (an RTS record) - not just
+    // "!= WIN_NONE". Otherwise a WIN_NONE-tagged rtx has no map entry, and
+    // sendRtxPacket's lookup silently falls back to WIN_RANDOM for it,
+    // permanently misattributing a control-packet retransmit into the
+    // random window's admission/cwnd accounting. An explicit WIN_NONE entry
+    // lets sendRtxPacket tell "genuinely untagged" apart from "not found".
+    _rtx_win_tag[seqno] = tag;
+    // ===== END FIXED =====
     if (!_speculating || !_receiver_based_cc)
         sendIfPermitted();
 }
@@ -3928,7 +4584,12 @@ void UecSrc::timeToSend(const Route& route) {
     }
 
     if (_sender_based_cc) {
-        if ((_cwnd <= _in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())) {
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        bool dual_blocked = (_sender_cc_algo == DUAL_MPRDMA_REPS) && dualWindowBlocked();
+        if (dual_blocked ||
+            // ===== END ADDED (dual-window-reps-mprdma) =====
+            (_sender_cc_algo != DUAL_MPRDMA_REPS &&
+             ((_cwnd <= _in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())))) {
             if (_debug_src)
                 cout << _flow.str() << " " << _node_num << "cantSend, limited by sender CWND " << _cwnd << " _in_flight "
                      << _in_flight << "\n";
@@ -3968,6 +4629,23 @@ void UecSrc::timeToSend(const Route& route) {
     }
     
     if (_sender_based_cc) {
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Loose post-send re-check, not correctness-critical (doesn't send
+        // anything itself - just decides whether to ask for another send
+        // opportunity later, which will re-gate correctly via dualWindowBlocked()).
+        if (_sender_cc_algo == DUAL_MPRDMA_REPS) {
+            // review-pass fix: match dualWindowBlocked()'s own loss-recovery
+            // exception - during recovery, sending from _rtx_queue is
+            // permitted regardless of window occupancy. Without this, both
+            // windows full during recovery with a non-empty _rtx_queue would
+            // skip re-requesting a send slot, stalling retransmission until
+            // the next unrelated ACK/NACK/RTO re-enters sendIfPermitted.
+            bool dual_full = _win_safe.cwnd <= _win_safe.in_flight && _win_random.cwnd <= _win_random.in_flight;
+            if ((dual_full && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())) {
+                return;
+            }
+        } else
+        // ===== END ADDED (dual-window-reps-mprdma) =====
         if ((_cwnd <= _in_flight && !_loss_recovery_mode) || (_loss_recovery_mode && _rtx_queue.empty())) {
             return;
         }
@@ -4009,6 +4687,7 @@ void UecSrc::recalculateRTO() {
 
 void UecSrc::rtxTimerExpired() {
     assert(eventlist().now() == _rtx_timeout);
+    RM(_srcaddr).rto++;   // ===== ADDED (metrics-counters) =====
     clearRTO();
 
     auto first_entry = _send_times.begin();
@@ -4030,6 +4709,9 @@ void UecSrc::rtxTimerExpired() {
     // ===== ADDED (frozen-ev-log): save triggering EV before erasing the record =====
     uint16_t rto_trigger_ev = send_record->second.sent_ev;
     // ===== END ADDED (frozen-ev-log) =====
+    // ===== ADDED (dual-window-reps-mprdma): save window tag before erasing =====
+    WindowTag rto_win_tag = send_record->second.win_tag;
+    // ===== END ADDED (dual-window-reps-mprdma) =====
     _tx_bitmap.erase(send_record);
     recalculateRTO();
 
@@ -4101,6 +4783,12 @@ void UecSrc::rtxTimerExpired() {
 
     
 
+    // ===== ADDED (metrics-counters): timestamp a freeze entered during this RTO =====
+    accrueFreeze(RM(_srcaddr),
+                 circular_buffer_reps && circular_buffer_reps->isFrozenMode(),
+                 eventlist().now());
+    // ===== END ADDED (metrics-counters) =====
+
     if (_load_balancing_algo == PLB && eventlist().now() > plb_timeout_wait) {
         plb_timeout_wait = eventlist().now() + _rto * 1;
         plb_congested_rounds = 0;
@@ -4125,16 +4813,18 @@ void UecSrc::rtxTimerExpired() {
     } */
 
     if (_sender_based_cc)
-        mark_packet_for_retransmission(seqno, pkt_size);
+        mark_packet_for_retransmission(seqno, pkt_size, rto_win_tag);
+
+    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
 
     if (!_rtx_queue.empty()) {
         // there's already a queue, so clearly we shouldn't just
         // resend right now.  But send an RTS (no more than once per
         // RTT) to cover the case where the receiver doesn't know
         // we're waiting.
-        stopSpeculating();  
+        stopSpeculating();
 
-        queueForRtx(seqno, pkt_size);
+        queueForRtx(seqno, pkt_size, rto_win_tag);
 
         if (_receiver_based_cc) {
             if (_debug_src)
@@ -4146,7 +4836,7 @@ void UecSrc::rtxTimerExpired() {
     }
 
     // there's no queue, so maybe we could just resend now?
-    queueForRtx(seqno, pkt_size);
+    queueForRtx(seqno, pkt_size, rto_win_tag);
 
     if (_sender_based_cc) {
         if (_cwnd < pkt_size + _in_flight) {

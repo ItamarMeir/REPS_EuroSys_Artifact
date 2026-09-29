@@ -48,6 +48,8 @@ along the bottom. The same three panels are also written standalone as
 `<fig>_micro.png`, `<fig>_dc.png`, `<fig>_ai.png`. Axis labels are the paper
 generators' own strings; per-panel titles use the paper's vocabulary.
 
+`fig2_full.png` / `fig4_full.png` are the same composites with the **DC panel swapped for the 128-rank traffic** (`{40,60,80,100}load.cm`, ~6x the flows) from `full_128_load/`; the synthetic and AI panels are unchanged from `*_all.png`. See `full_128_load/README.md` for why both matrix sizes exist and the per-cell numbers.
+
 **Forced deviation — speedup baseline.** Paper `fig_2`/`fig_4` micro panels plot
 *Speedup vs ECMP*. exp26 has no ECMP arm, so the baseline is the `ops` arm and
 the axis reads **Speedup vs OPS**. `fig_7` already uses OPS as its baseline in

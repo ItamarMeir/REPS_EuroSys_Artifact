@@ -386,8 +386,31 @@ public:
         EVSRC_FRESH_POP,   // remove_earliest_fresh()
         EVSRC_FROZEN_POP,  // remove_frozen()
         EVSRC_PXR_RANDOM,  // freezing_pxr random draw after exclusion filter
-        EVSRC_PXR_POP      // freezing_pxr buffer pop after exclusion filter
+        EVSRC_PXR_POP,     // freezing_pxr buffer pop after exclusion filter
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Only emitted by nextEntropy_freezing() when _sender_cc_algo ==
+        // DUAL_MPRDMA_REPS; all other algos keep emitting plain EVSRC_FROZEN_POP,
+        // so flag-off trace output (-log_reps_events) is byte-identical.
+        EVSRC_FROZEN_POP_VALID, // remove_frozen(), is_valid_frozen() was true
+        EVSRC_FROZEN_POP_STALE  // remove_frozen(), is_valid_frozen() was false
+        // ===== END ADDED (dual-window-reps-mprdma) =====
     };
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Which of the two independent CC windows a packet/ACK/NACK is attributed
+    // to. WIN_NONE is used by every algo other than DUAL_MPRDMA_REPS (stored in
+    // sendRecord but never read outside that algo's code paths).
+    enum WindowTag : uint8_t { WIN_NONE = 0, WIN_SAFE, WIN_RANDOM };
+    static WindowTag evSourceToWindowTag(EvSource src);
+    struct MprdmaWindow {
+        mem_b cwnd = 0;
+        mem_b in_flight = 0;
+        simtime_picosec last_active = 0;
+    };
+    // CLI-set knobs (main_uec.cpp), so must be public.
+    static mem_b _dual_safe_cwnd_init_flag;   // pkts; 0 = default to _maxwnd
+    static mem_b _dual_random_cwnd_init_flag; // pkts; 0 = default to cwnd/_maxwnd
+    static uint32_t _dual_window_idle_reset_rtts; // default 2
+    // ===== END ADDED (dual-window-reps-mprdma) =====
     static FILE* _reps_events_log;
     static std::set<uint32_t> _reps_events_log_srcs;  // empty -> fallback to _reps_state_log_srcs
     static uint64_t _reps_events_max;                 // row cap, default 200000
@@ -402,6 +425,18 @@ public:
     // from an earlier send out of non-send rows.
     void logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvSource ev_src);
     // ===== END ADDED (reps-event-trace) =====
+
+    // ===== ADDED (timed-failure) =====
+    // Periodic per-host dump of the g_reps_metrics side table (deltas since the
+    // previous tick), for exp29's transient-failure crossover study. Opened by
+    // -log_reps_window <file> <interval_us> from main_uec.cpp; the logger class
+    // and the file handle live entirely in uec.cpp (it needs file-scope access
+    // to g_reps_metrics). Diagnostic only; nothing reads it back in-sim.
+    static void startRepsWindowLog(EventList& el, const char* path,
+                                   simtime_picosec interval_ps,
+                                   simtime_picosec t0_ps,
+                                   simtime_picosec t1_ps);
+    // ===== END ADDED (timed-failure) =====
 
     enum Sender_CC {
         DCTCP,
@@ -418,8 +453,18 @@ public:
         SWIFT,    // Delay-based AI/MD; identical target to NSCC (_target_Qdelay)
         LSWIFT,   // Swift + 5-consecutive high-delay trigger (reordering resilience)
         MSWIFT,   // LSwift + median delay window H = max(cwnd_pkts/2, 1)
-        MNSCC     // NSCC + median delay window H = max(min(cwnd_pkts/2,4), 1)
+        MNSCC,    // NSCC + median delay window H = max(min(cwnd_pkts/2,4), 1)
         // ===== END ADDED (swift-cc) =========================================
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Two independent MPRDMA-AIMD windows per flow: _win_safe gates/updates
+        // from EVs verified-valid at pop time (fresh/valid-frozen buffer pops),
+        // _win_random gates/updates from unverified EVs (random draws, explore
+        // bursts, stale frozen pops). Requires -load_balancing_algo freezing.
+        // Dispatch is NOT via the shared updateCwndOnAck/updateCwndOnNack
+        // function pointers (see processAck/processNack); this enum value is
+        // used only to select behavior at those explicit call sites.
+        DUAL_MPRDMA_REPS
+        // ===== END ADDED (dual-window-reps-mprdma) =====
     };
     // ===== ADDED (path-rr) =====
     // PATH_RR: true round-robin over distinct physical paths using full source
@@ -436,6 +481,16 @@ public:
     // algorithm: any existing algo can be paired with -use_srv6.
     static bool _use_srv6;
     // ===== END ADDED (srv6) =====
+
+    // ===== ADDED (fail-src-paths) =====
+    // Targeted single-source path loss (exp30 Part B). Maps a source node_num to
+    // a count C: for that source only, physical path indices [0, C) are dead --
+    // a packet drawn onto such a path is freed at emit instead of sent, so the
+    // sender sees a first-hop blackhole (no ACK -> RTO -> freeze -> rotate),
+    // scoped to one src by construction. Set via -fail_src_paths <src> <count>.
+    // Empty => feature off, binary behaves byte-identically.
+    static std::map<int, int> _fail_src_paths;
+    // ===== END ADDED (fail-src-paths) =====
 
     // ===== ADDED (freezing-pxr) =====
     // Sliding-window timer for FREEZING_PXR (picoseconds). Settable via
@@ -516,11 +571,21 @@ public:
     vector <UecSrcPort*> _ports;
     struct sendRecord {
         // need a constructor to be able to put this in a map
-        sendRecord(mem_b psize, simtime_picosec stime, uint16_t ev = 0)
-            : pkt_size(psize), send_time(stime), sent_ev(ev) {}
+        sendRecord(mem_b psize, simtime_picosec stime, uint16_t ev = 0,
+                   WindowTag tag = WIN_NONE) // ===== ADDED (dual-window-reps-mprdma) =====
+            : pkt_size(psize), send_time(stime), sent_ev(ev), win_tag(tag) {}
         mem_b pkt_size;
         simtime_picosec send_time;
         uint16_t sent_ev; // EV used when this packet was sent (for RTO freeze attribution)
+        // ===== ADDED (dual-window-reps-mprdma) =====
+        // Window this packet was attributed to at send time. Decided once, from
+        // _last_ev_source, and never re-derived from sent_ev later: by ACK/NACK/
+        // RTO time the buffer slot may have been popped, invalidated, or wiped
+        // by resetBuffer() on unfreeze, so the EV alone no longer says which
+        // window it was attributed to. WIN_NONE for every algo but
+        // DUAL_MPRDMA_REPS.
+        WindowTag win_tag;
+        // ===== END ADDED (dual-window-reps-mprdma) =====
     };
     UecLogger* _logger;
     TrafficLogger* _pktlogger;
@@ -543,8 +608,19 @@ public:
     mem_b sendNewPacket(const Route& route);
     mem_b sendRtxPacket(const Route& route);
     void sendRTS();
-    void createSendRecord(UecDataPacket::seq_t seqno, mem_b pkt_size, uint16_t ev = 0);
-    void queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size);
+    // ===== ADDED (fail-src-paths) =====
+    // True iff -fail_src_paths named this source and route_path_idx is one of
+    // its dead indices [0, count). O(1) empty-map fast path.
+    bool pathDeadForThisSrc(uint64_t route_path_idx) const {
+        if (_fail_src_paths.empty()) return false;
+        auto it = _fail_src_paths.find(_node_num);
+        return it != _fail_src_paths.end() && (int)route_path_idx < it->second;
+    }
+    // ===== END ADDED (fail-src-paths) =====
+    void createSendRecord(UecDataPacket::seq_t seqno, mem_b pkt_size, uint16_t ev = 0,
+                           WindowTag tag = WIN_NONE); // ===== ADDED (dual-window-reps-mprdma): tag param =====
+    void queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size,
+                      WindowTag tag = WIN_NONE); // ===== ADDED (dual-window-reps-mprdma): tag param =====
     void recalculateRTO();
     void startRTO(simtime_picosec send_time);
     void clearRTO();   // timer just expired, clear the state
@@ -578,8 +654,10 @@ public:
     void rtxTimerExpired();
     UecBasePacket::pull_quanta computePullTarget();
     void handlePull(UecBasePacket::pull_quanta pullno);
-    mem_b handleAckno(UecDataPacket::seq_t ackno);
-    mem_b handleCumulativeAck(UecDataPacket::seq_t cum_ack);
+    mem_b handleAckno(UecDataPacket::seq_t ackno,
+                      mem_b* safe_bytes = nullptr, mem_b* random_bytes = nullptr); // ===== ADDED (dual-window-reps-mprdma): output params =====
+    mem_b handleCumulativeAck(UecDataPacket::seq_t cum_ack,
+                              mem_b* safe_bytes = nullptr, mem_b* random_bytes = nullptr); // ===== ADDED (dual-window-reps-mprdma): output params =====
     void processAck(const UecAckPacket& pkt);
     void processNack(const UecNackPacket& pkt);
     void processPull(const UecPullPacket& pkt);
@@ -598,6 +676,18 @@ public:
     
     void updateCwndOnAck_MPRDMA(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
     void updateCwndOnNack_MPRDMA(bool skip, mem_b nacked_bytes);
+
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Same MPRDMA AIMD formula as updateCwndOnAck_MPRDMA/updateCwndOnNack_MPRDMA,
+    // applied against one of _win_safe/_win_random by explicit tag rather than
+    // through the shared updateCwndOnAck/updateCwndOnNack function pointers
+    // (which are shared by ~15 other algos with a fixed signature). Called
+    // directly from processAck()/processNack(), not via those pointers.
+    void updateCwndOnAck_DualMPRDMA(WindowTag tag, bool skip, simtime_picosec rtt, mem_b newly_acked_bytes);
+    void updateCwndOnNack_DualMPRDMA(WindowTag tag, mem_b nacked_bytes);
+    WindowTag predictWindowForNextEntropy_freezing();
+    void maybeIdleReset(MprdmaWindow& w, mem_b init_val);
+    // ===== END ADDED (dual-window-reps-mprdma) =====
 
     void dontUpdateCwndOnAck(bool skip, simtime_picosec delay, mem_b newly_acked_bytes);
     void dontUpdateCwndOnNack(bool skip, mem_b nacked_bytes);
@@ -704,6 +794,53 @@ public:
     UecDataPacket::seq_t _highest_sent;
     UecDataPacket::seq_t _highest_rtx_sent;
     mem_b _in_flight;
+    // ===== ADDED (dual-window-reps-mprdma) =====
+    // Invariant (checked at processAck/processNack/RTO chokepoints, guarded to
+    // _sender_cc_algo == DUAL_MPRDMA_REPS only):
+    //   _win_safe.in_flight + _win_random.in_flight == _in_flight
+    // _in_flight itself is kept and updated in parallel at every site (not
+    // derived after the fact), so any other reader of plain _in_flight is
+    // unaffected. Per-window in_flight lives only on MprdmaWindow (single
+    // source of truth - avoid a second, easily-diverging counter).
+    // WIN_NONE-tagged packets (every other algo) never touch these.
+    MprdmaWindow _win_safe;
+    MprdmaWindow _win_random;
+    mem_b _safe_cwnd_init = 0;
+    mem_b _random_cwnd_init = 0;
+    // Moved to public below (main_uec.cpp CLI parsing sets these directly).
+    // Diagnostics: predicted window (from predictWindowForNextEntropy_freezing)
+    // vs. the window actually derived from _last_ev_source after the real draw.
+    // Printed at flow end; must be 0 in every run, see plan's verification step.
+    uint64_t _dual_predict_mismatch_count = 0;
+    // Predicted tag for the next NEW-packet send, stashed by the admission
+    // gate right before sendNewPacket() is called (see dualWindowBlocked()),
+    // consumed by sendNewPacket() to populate the mismatch counter above.
+    WindowTag _dual_gate_predicted_tag = WIN_NONE;
+    // Window tag carried across retransmissions of a given seqno: captured
+    // from the original sendRecord's win_tag right before _tx_bitmap erases
+    // it (NACK/RTO/fast-loss paths), consumed (and erased) by sendRtxPacket.
+    std::map<UecDataPacket::seq_t, WindowTag> _rtx_win_tag;
+    bool dualWindowBlocked(); // true => admission gate should block this send
+    WindowTag dualPeekNextWindowTag();
+    void assertDualWindowInvariant(); // no-op unless DUAL_MPRDMA_REPS active
+    // ===== FIXED (dual-window-reps-mprdma review pass, MEDIUM) =====
+    // Under this algo updateCwndOnAck/updateCwndOnNack are bound to no-ops
+    // (dispatch is explicit, see uec.cpp), so _cwnd itself never grows and
+    // only ever decays (mark_packet_for_retransmission's unconditional
+    // decrement, the receiver-window penalty in processAck). But several
+    // pre-existing readers still consult plain _cwnd: the RTS-gate check
+    // ("_cwnd < pkt_size + _in_flight" in rtxTimerExpired), fastLossRecovery's
+    // threshold/loss_counter pacing, computePullTarget's clamp. Left alone,
+    // _cwnd would ratchet toward _mtu and never recover, making every RTO
+    // spuriously send an RTS instead of retransmitting immediately (an extra
+    // RTT added to every loss-recovery cycle) and collapsing fast-loss's
+    // pacing. Fix: keep _cwnd as a derived mirror of the two windows' sum,
+    // called after every write to either window's cwnd, so every pre-existing
+    // reader gets a sane aggregate value without needing to be individually
+    // made dual-aware. No-op for every other algo.
+    void syncDualCwnd();
+    // ===== END FIXED =====
+    // ===== END ADDED (dual-window-reps-mprdma) =====
     mem_b _bdp;
     bool _send_blocked_on_nic;
     bool _speculating;
@@ -790,7 +927,8 @@ private:
     // void fair_decrease(bool can_decrease, uint32_t newly_acked_bytes);
     void multiplicative_decrease(uint32_t newly_acked_bytes);
     void fulfill_adjustment();
-    void mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t pktsize);
+    void mark_packet_for_retransmission(UecBasePacket::seq_t psn, uint16_t pktsize,
+                                         WindowTag tag = WIN_NONE); // ===== ADDED (dual-window-reps-mprdma): tag param =====
     void update_delay(simtime_picosec delay, bool update_avg, bool skip);
     void update_base_rtt(simtime_picosec raw_rtt, uint16_t packet_size);
     simtime_picosec get_avg_delay();

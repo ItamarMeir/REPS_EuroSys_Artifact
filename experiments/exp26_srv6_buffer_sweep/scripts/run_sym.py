@@ -62,6 +62,9 @@ MICRO_SIZES = [4194304, 8388608, 16777216]
 MICRO_PATTERNS = ["perm", "tornado", "incast"]     # incast -> _d8 suffix
 
 DC_TMS = ["40load_ae", "60load_ae", "80load_ae", "100load_ae"]
+# --dc-full: the 128-rank DC matrices (git-tracked; used when run_dc.py runs
+# with --ae_runs falsy). Much heavier (~6x the flows).
+DC_TMS_FULL = ["40load", "60load", "80load", "100load"]
 AI_TMS = ["alltoall4", "alltoall8", "alltoall16", "allreduce", "allreduce_t"]
 
 MICRO_SEED = 42
@@ -169,7 +172,8 @@ def ai_flags(tm: str, failed: bool) -> list[str]:
     return f
 
 
-def build_cells(figure: str, panels: list[str], quick: bool):
+def build_cells(figure: str, panels: list[str], quick: bool,
+                dc_full: bool = False):
     """Yield (panel, workload, condition, topo_key, n_paths, base_flags, expect_cm_nodes).
 
     ``expect_cm_nodes`` is the connection-matrix rank count run_one() should see;
@@ -193,10 +197,11 @@ def build_cells(figure: str, panels: list[str], quick: bool):
             out.append(("micro", wl, cond, micro_topo_key, micro_n,
                         micro_flags(tm, micro_topo_key, failed), None))
     if "dc" in panels:
-        tms = ["100load_ae"] if quick else DC_TMS
+        pool = DC_TMS_FULL if dc_full else DC_TMS
+        tms = [pool[-1]] if quick else pool
         for tm in tms:
             out.append(("dc", tm, cond, "fat_tree_128_1os_2t_400g", dc_n,
-                        dc_flags(tm, failed), 32))
+                        dc_flags(tm, failed), None if dc_full else 32))
     if "ai" in panels:
         tms = ["allreduce"] if quick else AI_TMS
         for tm in tms:
@@ -215,10 +220,13 @@ def main() -> None:
                     help="regenerate the collective .cm files at the ai panel's "
                          "topology size first, then restore the git-tracked "
                          "32-rank ones (which fig_7 needs) on the way out")
+    ap.add_argument("--dc-full", action="store_true",
+                    help="dc panel: use the 128-rank {40,60,80,100}load.cm "
+                         "instead of the 32-rank *load_ae.cm (~6x heavier)")
     args = ap.parse_args()
 
     panels = args.panels.split(",")
-    cells = build_cells(args.figure, panels, args.quick)
+    cells = build_cells(args.figure, panels, args.quick, args.dc_full)
 
     # expand over arms
     expanded = []
