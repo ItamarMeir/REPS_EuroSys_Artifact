@@ -1795,6 +1795,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         _win_random.in_flight -= dual_random_acked;
     }
     // ===== END ADDED (dual-window-reps-mprdma) =====
+    assertDualWindowInvariant("processAck:after_dual_correction"); // ===== ADDED (dual-window-reps-mprdma): debug =====
 
     // We ran both potential _in_flight correcting functions
     // now check if we are in the negative.
@@ -2055,6 +2056,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     if (_sender_based_cc && _enable_fast_loss_recovery) {
         fastLossRecovery(ooo, cum_ack);
     }
+    assertDualWindowInvariant("processAck:after_fastLossRecovery"); // ===== ADDED (dual-window-reps-mprdma): debug =====
 
     stopSpeculating();
 
@@ -2062,7 +2064,7 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         return;
     }
 
-    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
+    assertDualWindowInvariant("processAck:end"); // ===== ADDED (dual-window-reps-mprdma) =====
 
     sendIfPermitted();
 }
@@ -3143,7 +3145,7 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
     logRepsEvent("NACK", (int)ev, -1, (uint64_t)nacked_seqno, EVSRC_NONE);
     // ===== END ADDED (reps-event-trace) =====
 
-    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
+    assertDualWindowInvariant("processNack:end"); // ===== ADDED (dual-window-reps-mprdma) =====
 
     sendIfPermitted();
 }
@@ -4031,9 +4033,18 @@ bool UecSrc::dualWindowBlocked() {
 // any other algo/run. Called from processAck, processNack, and
 // rtxTimerExpired - see plan's Step 4 site list for what a violation would
 // mean (a missed _in_flight mutation site).
-void UecSrc::assertDualWindowInvariant() {
+void UecSrc::assertDualWindowInvariant(const char* site) {
     if (_sender_cc_algo != DUAL_MPRDMA_REPS) return;
-    assert(_win_safe.in_flight + _win_random.in_flight == _in_flight);
+    mem_b sum = _win_safe.in_flight + _win_random.in_flight;
+    if (sum != _in_flight) {
+        printf("DUALDEBUG site=%s name=%s now=%lu safe_if=%lld random_if=%lld "
+               "sum=%lld in_flight=%lld delta=%lld\n", site, _name.c_str(),
+               eventlist().now(), (long long)_win_safe.in_flight,
+               (long long)_win_random.in_flight, (long long)sum,
+               (long long)_in_flight, (long long)(sum - _in_flight));
+        fflush(stdout);
+    }
+    assert(sum == _in_flight);
 }
 
 void UecSrc::syncDualCwnd() {
@@ -4412,7 +4423,20 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     _rtx_queue.erase(_rtx_queue.begin());
     _rtx_backlog -= full_pkt_size;
     assert(_rtx_backlog >= 0);
-    _in_flight += full_pkt_size;
+    // ===== FIXED (dual-window-reps-mprdma): missing WIN_NONE guard =====
+    // An RTS record (pkt_size==_hdr_size) can end up in _rtx_queue (fastLossRecovery
+    // / processNack / mark_packet_for_retransmission's "pkt_size >= _hdr_size"
+    // asserts pass it through unlike a true DATA packet) and gets retransmitted
+    // here with dual_tag resolved to WIN_NONE. createSendRecord's WIN_NONE branch
+    // correctly no-ops on window in_flight for it, so the aggregate increment must
+    // no-op too, mirroring the decrement-side fix already applied at every
+    // WIN_NONE site (mark_packet_for_retransmission, processNack, fastLossRecovery,
+    // handleAckno/handleCumulativeAck's rtx give-back). Without this, retransmitting
+    // an RTS permanently inflates _in_flight by _hdr_size with no window counterpart.
+    if (_sender_cc_algo != DUAL_MPRDMA_REPS || dual_tag != WIN_NONE) {
+        _in_flight += full_pkt_size;
+    }
+    // ===== END FIXED =====
     _pull_target = computePullTarget();
 
     // ===== ADDED (path-rr) =====
@@ -4815,7 +4839,7 @@ void UecSrc::rtxTimerExpired() {
     if (_sender_based_cc)
         mark_packet_for_retransmission(seqno, pkt_size, rto_win_tag);
 
-    assertDualWindowInvariant(); // ===== ADDED (dual-window-reps-mprdma) =====
+    assertDualWindowInvariant("rtxTimerExpired:after_mark_for_rtx"); // ===== ADDED (dual-window-reps-mprdma) =====
 
     if (!_rtx_queue.empty()) {
         // there's already a queue, so clearly we shouldn't just

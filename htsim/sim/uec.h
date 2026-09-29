@@ -822,7 +822,7 @@ public:
     std::map<UecDataPacket::seq_t, WindowTag> _rtx_win_tag;
     bool dualWindowBlocked(); // true => admission gate should block this send
     WindowTag dualPeekNextWindowTag();
-    void assertDualWindowInvariant(); // no-op unless DUAL_MPRDMA_REPS active
+    void assertDualWindowInvariant(const char* site = ""); // no-op unless DUAL_MPRDMA_REPS active
     // ===== FIXED (dual-window-reps-mprdma review pass, MEDIUM) =====
     // Under this algo updateCwndOnAck/updateCwndOnNack are bound to no-ops
     // (dispatch is explicit, see uec.cpp), so _cwnd itself never grows and

@@ -568,7 +568,16 @@ for the full rationale):
   send if its window's own `cwnd > in_flight`.
 - Each window gets the **full existing `_maxwnd`** ceiling independently (not split) —
   aggregate in-flight can exceed `1.5*BDP` if both windows are simultaneously near full;
-  accepted trade-off vs. underutilizing a skewed traffic mix.
+  accepted trade-off vs. underutilizing a skewed traffic mix. **Future-fix idea (user note,
+  2026-09-29, not implemented):** enforce `_win_safe.cwnd + _win_random.cwnd <= _maxwnd`
+  instead. Two options raised: (1) on an AI step, skip the increase if it would push the sum
+  over `_maxwnd` (simplest, but caps total throughput below today's up-to-2x-BDP headroom);
+  (2) on an AI step, take the headroom from the *other* window's cwnd (grow one, shrink the
+  other by the same amount) — keeps the sum pinned at `_maxwnd` continuously, closer in
+  spirit to a single shared budget split by trust tier rather than two independent ceilings.
+  Confirmed cause (see exp29 dashboard investigation) of dual-window B=8 showing far higher
+  ECN/RTO/random-EV-draw counts than plain MPRDMA B=8 at the same F: dual-window's summed
+  cwnd runs up to ~2x MPRDMA's single ceiling, not a REPS/LB-layer difference.
 - Each window's init defaults **asymmetrically**: `_win_safe` starts at the full ceiling
   (`_maxwnd`) so its first clean ACK after a reset doesn't underutilize; `_win_random`
   starts at the same conservative `cwnd_init_total` NSCC/MPRDMA use. Both independently
