@@ -909,6 +909,20 @@ int main(int argc, char **argv) {
                  << UecSrc::_wtd_threshold << ")" << endl;
         // ===== END ADDED (wtd-in-nscc) ======================================
 
+        // ===== ADDED (reps-soft-replay): off by default. =====
+        } else if (!strcmp(argv[i],"-reps_soft_replay")){
+            UecSrc::_reps_soft_replay = true;
+            cout << "REPS soft-replay enabled (EWMA-gated fallback replay)" << endl;
+        } else if (!strcmp(argv[i],"-reps_soft_replay_fixed_p")){
+            UecSrc::_reps_soft_replay_fixed_p = atof(argv[i+1]);
+            cout << "REPS soft-replay: fixed P=" << UecSrc::_reps_soft_replay_fixed_p
+                 << " (validation ablation, overrides EWMA)" << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-reps_soft_replay_no_filter")){
+            UecSrc::_reps_soft_replay_no_filter = true;
+            cout << "REPS soft-replay: ECN-skip filter DISABLED (validation ablation)" << endl;
+        // ===== END ADDED (reps-soft-replay) ======================================
+
         } else if (!strcmp(argv[i],"-reps_buffer_size")){
             // Set the FREEZING circular-buffer capacity (default 8).
             // Must be parsed before UecSrc objects are constructed.
@@ -981,6 +995,21 @@ int main(int argc, char **argv) {
             cout << "Filtering cwnd log to src " << argv[i+1] << endl;
             i++;
         // ===== END ADDED (cwnd-log) =====
+        } else if (!strcmp(argv[i],"-log_dual_cwnd")) { // ===== ADDED (dual-cwnd-log) =====
+            UecSrc::_dual_cwnd_log = fopen(argv[i+1], "w");
+            if (!UecSrc::_dual_cwnd_log) {
+                cerr << "Could not open dual cwnd log: " << argv[i+1] << endl; exit(1);
+            }
+            fprintf(UecSrc::_dual_cwnd_log,
+                    "time_us,srcaddr,node_num,flow_id,safe_cwnd,random_cwnd,maxwnd,"
+                    "safe_in_flight,random_in_flight,frozen\n");
+            cout << "Logging dual-window cwnd (safe/random) to " << argv[i+1] << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-log_dual_cwnd_src")) { // ===== ADDED (dual-cwnd-log) =====
+            UecSrc::_dual_cwnd_log_srcs.insert((uint32_t)atoi(argv[i+1]));
+            cout << "Filtering dual cwnd log to src " << argv[i+1] << endl;
+            i++;
+        // ===== END ADDED (dual-cwnd-log) =====
         } else if (!strcmp(argv[i],"-fail_link_time")){
             fail_link_fail_us    = atof(argv[i+1]);
             fail_link_recover_us = atof(argv[i+2]);

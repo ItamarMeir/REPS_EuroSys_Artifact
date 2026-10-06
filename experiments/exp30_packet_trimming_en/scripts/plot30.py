@@ -58,19 +58,24 @@ _CC_LABEL = {"mprdma": "MPRDMA", "nscc": "NSCC",
 _CC_ORDER = ["mprdma", "nscc", "dual_mprdma_reps", "dual_mprdma_reps_cap"]
 
 
+LADDER = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+
+
 def style30(arm):
     b = _buf_size(arm)
     cc = _cc(arm)
-    base = style_for_orig(f"reps_b{b}")
+    # Full ladder incl. c1 sizes (64..256). exp28's style_for only knows 1..32.
+    i = LADDER.index(b)
     if cc == "nscc":
         # NSCC gets its own colour ramp (magma) so it never shares a colour with
         # the MPRDMA viridis ladder at the same B; same B ordering, light->dark.
-        i = [1, 2, 4, 8, 16, 32].index(b)
-        base = dict(base, color=plt.get_cmap("magma")(0.15 + 0.6 * i / 5))
+        color = plt.get_cmap("magma")(0.15 + 0.6 * i / (len(LADDER) - 1))
+    else:
+        color = plt.get_cmap("viridis")(i / (len(LADDER) - 1))
     marker = {"mprdma": "o", "nscc": "s", "dual_mprdma_reps": "^",
               "dual_mprdma_reps_cap": "^"}[cc]
     filled = cc == "nscc"
-    return dict(color=base["color"], marker=marker, filled=filled,
+    return dict(color=color, marker=marker, filled=filled,
                 label=f"REPS B={b} ({_CC_LABEL[cc]})")
 
 
@@ -89,7 +94,10 @@ def _cc(arm):
 
 
 def _arms(df):
-    arms = sorted(df.arm.unique(), key=lambda a: (_CC_ORDER.index(_cc(a)), _buf_size(a)))
+    # B>32 (c1 buffer-size study) is plotted by its own analysis, not here: the
+    # shared bar/hatch helpers only know the exp28 ladder 1..32.
+    arms = sorted((a for a in df.arm.unique() if _buf_size(a) <= 32),
+                  key=lambda a: (_CC_ORDER.index(_cc(a)), _buf_size(a)))
     return list(arms)
 
 

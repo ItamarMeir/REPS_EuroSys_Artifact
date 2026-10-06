@@ -28,6 +28,10 @@ struct RepsMetrics {
     bool            frozen_prev       = false;
     uint64_t        ev_explore        = 0;   // forced post-unfreeze exploration draws
     uint64_t        ev_random         = 0;   // random draws (buffer empty / no fresh EV)
+    // ===== ADDED (c1-ev-source-split): per-packet EV source counts =====
+    uint64_t        ev_valid          = 0;   // draws from a valid buffer entry (clean-ACK fresh pop, or frozen pop of a valid slot)
+    uint64_t        ev_stale          = 0;   // frozen pops of an invalid slot (Freezing Mode only)
+    // ===== END ADDED (c1-ev-source-split) =====
     // ===== ADDED (timed-failure) =====
     uint64_t        ecn_acks          = 0;   // ECN-marked ACKs seen (mirror of _ecn_ack_count)
     uint64_t        fast_loss_entries = 0;   // transitions into fastLossRecovery mode
@@ -229,6 +233,14 @@ bool   UecSrc::_nscc_wtd_enabled = false;
 double UecSrc::_wtd_threshold    = 0.25;   // paper value (§3.6.1)
 // ===== END ADDED (wtd-in-nscc) ========================================
 
+// ===== ADDED (reps-soft-replay) =======================================
+// Off by default so runs without -reps_soft_replay are byte-for-byte
+// identical to vanilla FREEZING.
+bool UecSrc::_reps_soft_replay = false;
+double UecSrc::_reps_soft_replay_fixed_p   = -1.0;  // default: use EWMA
+bool   UecSrc::_reps_soft_replay_no_filter = false; // default: filter on
+// ===== END ADDED (reps-soft-replay) ===================================
+
 // ===== ADDED (swift-cc) ===============================================
 // Static parameters for Swift/LSwift/MSwift/MNSCC.  All CCAs share
 // _target_Qdelay with NSCC (paper: "set NSCC's target queueing delay to
@@ -332,6 +344,10 @@ std::set<uint32_t> UecSrc::_reps_state_log_srcs;
 FILE* UecSrc::_cwnd_log = nullptr;
 std::set<uint32_t> UecSrc::_cwnd_log_srcs;
 // ===== END ADDED (cwnd-log) =====
+// ===== ADDED (dual-cwnd-log) =====
+FILE* UecSrc::_dual_cwnd_log = nullptr;
+std::set<uint32_t> UecSrc::_dual_cwnd_log_srcs;
+// ===== END ADDED (dual-cwnd-log) =====
 // ===== ADDED (buffer-contents-log) =====
 bool UecSrc::_log_buffer_contents = false;
 // ===== END ADDED (buffer-contents-log) =====
@@ -350,13 +366,23 @@ simtime_picosec UecSrc::_reps_events_t1 = (simtime_picosec)-1; // ~UINT64_MAX
 // of _reps_state_log — that CSV's schema is untouched.
 static const char* evSourceStr(UecSrc::EvSource s) {
     switch (s) {
-        case UecSrc::EVSRC_EXPLORE:    return "explore";
-        case UecSrc::EVSRC_RANDOM:     return "random";
-        case UecSrc::EVSRC_FRESH_POP:  return "fresh_pop";
-        case UecSrc::EVSRC_FROZEN_POP: return "frozen_pop";
-        case UecSrc::EVSRC_PXR_RANDOM: return "pxr_random";
-        case UecSrc::EVSRC_PXR_POP:    return "pxr_pop";
-        default:                       return "";
+        case UecSrc::EVSRC_EXPLORE:            return "explore";
+        case UecSrc::EVSRC_RANDOM:             return "random";
+        case UecSrc::EVSRC_FRESH_POP:          return "fresh_pop";
+        case UecSrc::EVSRC_FROZEN_POP:         return "frozen_pop";
+        // ===== FIXED (reps-event-trace): dual-window-reps-mprdma added these
+        // two EvSource values (uec.h) for DUAL_MPRDMA_REPS/_CAP's valid-vs-
+        // stale frozen-pop distinction, but never added them here, so every
+        // dual-window frozen-mode draw logged ev_src="" instead of
+        // "frozen_pop_valid"/"frozen_pop_stale". Cosmetic only - nothing
+        // reads this string back into control flow - but it silently broke
+        // any analysis joining on ev_src for dual-window traces. =====
+        case UecSrc::EVSRC_FROZEN_POP_VALID:   return "frozen_pop_valid";
+        case UecSrc::EVSRC_FROZEN_POP_STALE:   return "frozen_pop_stale";
+        // ===== END FIXED (reps-event-trace) =====
+        case UecSrc::EVSRC_PXR_RANDOM:         return "pxr_random";
+        case UecSrc::EVSRC_PXR_POP:            return "pxr_pop";
+        default:                               return "";
     }
 }
 
@@ -1582,6 +1608,8 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              " ev_explore " << RM(_srcaddr).ev_explore <<
              " ev_random " << RM(_srcaddr).ev_random <<
              // ===== END ADDED (metrics-counters) =====
+             " ev_valid " << RM(_srcaddr).ev_valid <<    // ===== ADDED (c1-ev-source-split) =====
+             " ev_stale " << RM(_srcaddr).ev_stale <<    // ===== ADDED (c1-ev-source-split) =====
              " fast_loss " << RM(_srcaddr).fast_loss_entries <<  // ===== ADDED (timed-failure) =====
              endl;
         // ===== ADDED (dual-window-reps-mprdma) =====
@@ -1874,6 +1902,21 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     
 
     average_ecn_bytes(pkt_size,newly_recvd_bytes, pkt.ecn_echo());
+
+    // ===== ADDED (reps-soft-replay) ======================================
+    // This feature's own per-EV last-seen-ECN scoreboard (not a dependency
+    // on ev-health-counter's _ev_last_ecn_state -- see brainstorm plan).
+    // Updated on every ACK regardless of mode/flag, same as average_ecn_
+    // bytes() just above, so it's always correct the moment the flag is
+    // turned on; cheap (one vector write) when the flag is off, too.
+    {
+        uint16_t soft_replay_ev = pkt.ev();
+        if (_soft_replay_ev_ecn.empty() && _no_of_paths > 0)
+            _soft_replay_ev_ecn.assign(_no_of_paths, false);
+        if (!_soft_replay_ev_ecn.empty() && soft_replay_ev < _soft_replay_ev_ecn.size())
+            _soft_replay_ev_ecn[soft_replay_ev] = pkt.ecn_echo();
+    }
+    // ===== END ADDED (reps-soft-replay) ==================================
 
     // ===== ADDED (smart-filter) ==========================================
     // Update the per-source ECN counter and (Mode A only) compute the MD gain.
@@ -3464,10 +3507,10 @@ UecBasePacket::pull_quanta UecSrc::computePullTarget() {
 }
 
 void UecSrc::sendIfPermitted() {
-    // send if the NIC, credit and window allow.           
+    // send if the NIC, credit and window allow.
 
     if (_receiver_based_cc && credit() <= 0) {
-        // can send if we have *any* credit, but we don't                                                                                                         
+        // can send if we have *any* credit, but we don't
         return;
     }
 
@@ -3988,12 +4031,16 @@ uint16_t UecSrc::nextEntropy_freezing(){
             RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
             return rand() % _no_of_paths;
         } else {
+            // ===== ADDED (c1-ev-source-split): count valid vs stale for every algo.
+            // is_valid_frozen() is read-only, so the trace stays byte-identical.
+            bool was_valid = circular_buffer_reps->is_valid_frozen();
+            if (was_valid) RM(_srcaddr).ev_valid++; else RM(_srcaddr).ev_stale++;
+            // ===== END ADDED (c1-ev-source-split) =====
             // ===== ADDED (dual-window-reps-mprdma) =====
             // Only the dual algos distinguish valid vs. stale frozen pops;
             // every other algo keeps emitting plain EVSRC_FROZEN_POP so its
             // trace output (-log_reps_events) stays byte-identical.
             if (_sender_cc_algo == DUAL_MPRDMA_REPS || _sender_cc_algo == DUAL_MPRDMA_REPS_CAP) {
-                bool was_valid = circular_buffer_reps->is_valid_frozen();
                 _last_ev_source = was_valid ? EVSRC_FROZEN_POP_VALID : EVSRC_FROZEN_POP_STALE;
                 return circular_buffer_reps->remove_frozen();
             }
@@ -4003,11 +4050,39 @@ uint16_t UecSrc::nextEntropy_freezing(){
         }
     } else {
         if (circular_buffer_reps->isEmpty() || circular_buffer_reps->getNumberFreshEntropies() == 0) {
+            // ===== ADDED (reps-soft-replay) =====================================
+            // Off (default) or nothing in the ring to replay: fall straight
+            // through to the original unconditional random draw below,
+            // byte-identical to vanilla FREEZING.
+            if (_reps_soft_replay && circular_buffer_reps->getSize() > 0) {
+                double r = (double)rand() / ((double)RAND_MAX + 1.0);
+                double p = (_reps_soft_replay_fixed_p >= 0.0) ? _reps_soft_replay_fixed_p
+                                                               : _exp_avg_ecn;
+                if (r < p) {
+                    if (_soft_replay_ev_ecn.empty() && _no_of_paths > 0)
+                        _soft_replay_ev_ecn.assign(_no_of_paths, false);
+                    for (int tries = 0; tries < _no_of_paths; ++tries) {
+                        uint16_t cand = _soft_replay_cursor;
+                        _soft_replay_cursor = (_soft_replay_cursor + 1) % _no_of_paths;
+                        bool unhealthy = !_reps_soft_replay_no_filter
+                                          && cand < _soft_replay_ev_ecn.size()
+                                          && _soft_replay_ev_ecn[cand];
+                        if (!unhealthy && circular_buffer_reps->containsEntropy(cand)) {
+                            _last_ev_source = EVSRC_RANDOM; // reuse: same trace category as the random fallback it replaces
+                            RM(_srcaddr).ev_random++;
+                            return _crt_path = cand;
+                        }
+                    }
+                    // every candidate skipped (all unhealthy or none in ring) -- fall through to random
+                }
+            }
+            // ===== END ADDED (reps-soft-replay) =================================
             _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
             RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
             return _crt_path = rand() % _no_of_paths;
         } else {
             _last_ev_source = EVSRC_FRESH_POP; // ===== ADDED (reps-event-trace) =====
+            RM(_srcaddr).ev_valid++;           // ===== ADDED (c1-ev-source-split) =====
             return circular_buffer_reps->remove_earliest_fresh();
         }
     }
@@ -4161,6 +4236,26 @@ void UecSrc::syncDualCwnd() {
     if (_sender_cc_algo != DUAL_MPRDMA_REPS && _sender_cc_algo != DUAL_MPRDMA_REPS_CAP) return;
     // ===== END FIXED =====
     _cwnd = _win_safe.cwnd + _win_random.cwnd;
+    // ===== ADDED (dual-cwnd-log): single choke point every dual-window cwnd
+    // mutation (AI, NACK/MD, RTO decrease, idle reset, unfreeze reset, init)
+    // already calls through, so hooking here (rather than the ACK/NACK call
+    // sites) captures all of them. Raw bytes, not packets - per-ACK AI
+    // increments are sub-packet and would truncate to 0 otherwise. Filtered
+    // on _srcaddr (physical src id, what exp30's "affected" grouping uses),
+    // not _node_num - see reps-metrics-per-host-key in MODIFICATIONS.md for
+    // why that distinction matters. =====
+    if (_dual_cwnd_log &&
+        (_dual_cwnd_log_srcs.empty() ||
+         _dual_cwnd_log_srcs.find(_srcaddr) != _dual_cwnd_log_srcs.end())) {
+        fprintf(_dual_cwnd_log, "%.3f,%u,%u,%lu,%ld,%ld,%ld,%ld,%ld,%d\n",
+                (double)eventlist().now() / 1000.0,
+                _srcaddr, (unsigned)_node_num, // _node_num is `int`, cast for %u
+                (unsigned long)_flow.flow_id(),
+                (long)_win_safe.cwnd, (long)_win_random.cwnd, (long)_maxwnd,
+                (long)_win_safe.in_flight, (long)_win_random.in_flight,
+                (circular_buffer_reps && circular_buffer_reps->isFrozenMode()) ? 1 : 0);
+    }
+    // ===== END ADDED (dual-cwnd-log) =====
 }
 // ===== END ADDED (dual-window-reps-mprdma) =====
 

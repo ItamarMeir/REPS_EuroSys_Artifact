@@ -49,14 +49,19 @@ def main() -> None:
     ap.add_argument("--sizes", default=",".join(str(s) for s in C.SIZES))
     ap.add_argument("--arms", default=",".join(C.ARMS))
     ap.add_argument("--seeds", default=",".join(str(s) for s in C.SEEDS))
+    # Restrict to some x points (a1: # degraded uplinks, e.g. 0,32). Empty = all.
+    ap.add_argument("--xs", default="",
+                    help="comma-separated x values to run (default: all)")
     args = ap.parse_args()
 
     sizes = [int(s) for s in args.sizes.split(",")]
     arms = [a for a in C.ARMS if a in args.arms.split(",")]
     seeds = [int(s) for s in args.seeds.split(",")]
 
+    xs = {int(x) for x in args.xs.split(",") if x.strip()}
     cells = [(p, sz, x, ef, kw, seed, arm)
              for (p, sz, x, ef, kw) in _cells(args.part, sizes)
+             if not xs or int(x) in xs
              for seed in seeds for arm in arms]
     print(f"exp30-trim-en {args.part}: {len(cells)} runs  "
           f"(sizes={sizes}, arms={arms}, seeds={seeds})", flush=True)

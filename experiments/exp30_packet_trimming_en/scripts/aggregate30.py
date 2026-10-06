@@ -52,12 +52,37 @@ FIN_RE = re.compile(
     r"\bfreeze_us\s+(?P<frz_us>[\d.eE+-]+).*?"
     r"\bev_explore\s+(?P<ev_explore>\d+)\b.*?"
     r"\bev_random\s+(?P<ev_random>\d+)\b.*?"
+    # c1-ev-source-split: optional, so runs made before these counters still parse
+    r"(?:\bev_valid\s+(?P<ev_valid>\d+)\b.*?\bev_stale\s+(?P<ev_stale>\d+)\b.*?)?"
     r"\bfast_loss\s+(?P<fast_loss>\d+)\b")
 
 FCT_COLS = ["p50_fct_us", "p90_fct_us", "p95_fct_us", "p99_fct_us", "max_fct_us"]
 DIAG_COLS = ["ecn_per_host", "rto_per_host", "rts_per_host", "fast_loss_per_host",
              "freeze_entries_per_host", "freeze_hosts_frac", "freeze_us_mean",
-             "ev_random_per_host", "ev_explore_per_host", "ev_random_rate"]
+             "ev_random_per_host", "ev_explore_per_host", "ev_random_rate",
+             # per-packet EV source split: fractions of all EV draws, sum to 1
+             "ev_valid_per_host", "ev_stale_per_host",
+             "valid_frac", "random_frac", "stale_frac"]
+
+
+def _source_split(gg: pd.DataFrame) -> dict:
+    """EV-source split for one (run, group). Denominator is ALL EV draws of the
+    group: valid + random + stale, so valid_frac + random_frac + stale_frac == 1.
+    random = ev_random + ev_explore (explore is counted in ev_explore, not in
+    ev_random). NaN when the run predates the c1 counters."""
+    out = dict(ev_valid_per_host=np.nan, ev_stale_per_host=np.nan,
+               valid_frac=np.nan, random_frac=np.nan, stale_frac=np.nan)
+    if gg.ev_valid.isna().any():
+        return out
+    rnd = gg.ev_random + gg.ev_explore
+    total = float((gg.ev_valid + rnd + gg.ev_stale).sum())
+    out["ev_valid_per_host"] = float(gg.ev_valid.mean())
+    out["ev_stale_per_host"] = float(gg.ev_stale.mean())
+    if total > 0:
+        out["valid_frac"] = float(gg.ev_valid.sum()) / total
+        out["random_frac"] = float(rnd.sum()) / total
+        out["stale_frac"] = float(gg.ev_stale.sum()) / total
+    return out
 
 
 def _ci95(v: np.ndarray) -> float:
@@ -147,7 +172,10 @@ def _flow_rows(runs: Path):
                 fct_us=float(g["fct"]), pkts=int(g["pkts"]), rts=int(g["rts"]),
                 ecn=int(g["ecn"]), rtos=int(g["rtos"]), frz=int(g["frz"]),
                 frz_us=float(g["frz_us"]), ev_explore=int(g["ev_explore"]),
-                ev_random=int(g["ev_random"]), fast_loss=int(g["fast_loss"])))
+                ev_random=int(g["ev_random"]), fast_loss=int(g["fast_loss"]),
+                # NaN for runs made before the c1 counters existed
+                ev_valid=int(g["ev_valid"]) if g["ev_valid"] is not None else np.nan,
+                ev_stale=int(g["ev_stale"]) if g["ev_stale"] is not None else np.nan))
         if not per:
             print(f"  WARN 0 flows: {sp}")
             continue
@@ -160,7 +188,7 @@ def _flow_rows(runs: Path):
             d = pd.concat([d, pd.DataFrame([dict(
                 src=s, group="affected", fct_us=END_US, pkts=1, rts=0, ecn=0,
                 rtos=0, frz=0, frz_us=0.0, ev_explore=0, ev_random=0,
-                fast_loss=0) for s in missing])], ignore_index=True)
+                fast_loss=0, ev_valid=0, ev_stale=0) for s in missing])], ignore_index=True)
         for grp, gg in d.groupby("group"):
             fct_rows.append(dict(
                 part=part, size=size, x=x, ef=ef, seed=seed, arm=arm, group=grp,
@@ -181,7 +209,8 @@ def _flow_rows(runs: Path):
                 ev_random_per_host=float(gg.ev_random.mean()),
                 ev_explore_per_host=float(gg.ev_explore.mean()),
                 ev_random_rate=float((gg.ev_random + gg.ev_explore).sum()
-                                     / max(1, gg.pkts.sum()))))
+                                     / max(1, gg.pkts.sum())),
+                **_source_split(gg)))
     return pd.DataFrame(fct_rows), pd.DataFrame(diag_rows)
 
 

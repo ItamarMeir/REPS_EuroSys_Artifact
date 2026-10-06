@@ -102,6 +102,8 @@ assert (Q, ECN, CWND) == (101, (25, 76), 151), (Q, ECN, CWND)
 # Full B ladder -- exp30 is explicitly testing the memo's predicted B knee at 4,
 # so B=16 is kept (exp28/29 dropped it as "nothing resolvable above B=4").
 ARMS = ["reps_b1", "reps_b2", "reps_b4", "reps_b8", "reps_b16", "reps_b32",
+        # c1: buffer sizes beyond the 32 distinct EVs of -paths 32 (duplicates)
+        "reps_b64", "reps_b128", "reps_b256",
         "reps_b8_dual", "reps_b8_dual_cap",
         "reps_b1_nscc", "reps_b2_nscc", "reps_b4_nscc", "reps_b8_nscc",
         "reps_b16_nscc", "reps_b32_nscc"]
