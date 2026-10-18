@@ -91,7 +91,7 @@ A first run of exp03 with leaf ECN accidentally enabled was not preserved; the l
 
 | Dir | What it is | Status |
 |---|---|---|
-| [meeting_06_10_26](meeting_06_10_26/) | Items from the 2026-10-06 supervisor meeting: C1 (valid EVs under backlog; k is small and stable), C1.1 (send-time k vs link rate), C2 (drain time in Freezing Mode; null), C3 (bursty sender), T1 (FCT vs lost bandwidth; model holds). | All five items run and written up in their own READMEs (single-seed except T1, C3). |
+| [meeting_06_10_26](meeting_06_10_26/) | Items from the 2026-10-06 supervisor meeting: C1 (valid EVs under backlog; k is small and stable), C1.1 (send-time k vs link rate), C2 (dead-EV clearing in Freezing Mode; slower for larger B), C3 (bursty sender), T1 (FCT vs lost bandwidth; model holds). | All five items run and written up in their own READMEs (single-seed except T1, C3). |
 | [meetings](meetings/) | Written plans derived from meetings. | Plan for 2026-10-06 |
 | [workloads](workloads/) | Shared traffic matrices and their generators (composite, mice-heavy, elephant-heavy, and the paper workloads). | Reference |
 | [tools](tools/) | `reps_event_viewer.py`: interactive viewer for the `-log_reps_events` trace, with CSV schema and tests. | Reference |

@@ -1,7 +1,7 @@
 # C2 - does a larger buffer drain more slowly in Freezing Mode?
 
 ## Claim under test
-From the 2026-10-06 meeting: once a sender enters Freezing Mode, the REPS buffer is replayed instead of refilled, so a larger buffer holds more stale entries (EVs already drawn once, possibly from dead paths) and should take longer to stop drawing stale EVs. If true, bigger B costs recovery time. Pass criterion in `PLAN.md`: the number of sends until the last stale draw increases with B; a null result is acceptable.
+From the 2026-10-06 meeting: once a sender enters Freezing Mode, the REPS buffer is replayed instead of refilled, so a larger buffer holds more stale entries (EVs already drawn once, possibly from dead paths) and should take longer to stop drawing stale EVs. If true, bigger B costs recovery time. `PLAN.md` set the pass criterion as the number of sends until the last stale draw increasing with B. The data also contains a second, more direct measure of the same claim: how long dead-path EVs stay in the buffer after the kill. The two measures disagree (see Results), so both are reported.
 
 Freezing Mode in this code: a retransmission timeout (RTO) puts the sender in frozen mode. While frozen it stops sampling new EVs and replays the buffer's entries (valid or stale) until a timer (`-exit_freeze`) fires, which wipes the buffer and returns to normal.
 
@@ -31,11 +31,22 @@ Correctness gates (smoke cell F = 16, B = 8): FREEZE lands inside [10, 110] us f
 | 256 | 1076 | 60% | 27 / 32 | 500 / 537 |
 Healthy (F = 0) FCT is 356 us at every B.
 
-- **The claim is not supported.** Sends to the last stale draw do not grow with B (about 1180 to 1220 for B <= 128, and lower, 1076, at B = 256). Per epoch the outcome is about two thirds "stale until unfreeze" and one third "cleared before unfreeze" at every B.
-- **The median host enters Freezing Mode 39.7 us after the kill** (RTO-driven, the same for every B). By then ACK overwrites have usually cleaned the dead EVs from the buffer (median 0 dead entries at freeze for B <= 128; B = 256 holds a median 49 and 5 of 32 hosts still have dead EVs at recovery).
+- **Dead EVs are cleared more slowly from larger buffers - the claim holds on buffer content.** Share of written slots that still cache a dead EV (0 to 15), averaged over the 32 hosts, by time since the kill (5 us buckets, `data/c2_failed_ev_timeseries.csv`):
+
+| Time since kill | B = 1 to 8 | B = 16 | B = 32 | B = 64 | B = 128 | B = 256 |
+|---|---|---|---|---|---|---|
+| 0 us | 0.50 | 0.51 | 0.51 | 0.51 | 0.51 | 0.51 |
+| 5 us | 0.29 to 0.34 | 0.39 | 0.45 | 0.47 | 0.49 | 0.49 |
+| 10 us | 0.00 | 0.00 | 0.08 | 0.27 | 0.38 | 0.39 |
+| 20 us | 0 | 0 | 0 | 0.00 | 0.18 | 0.28 |
+| 40 us | 0 | 0 | 0 | 0 | 0 | 0.17 |
+| 60 us | 0 | 0 | 0 | 0 | 0 | 0.02 |
+
+  The time until the dead-EV share first drops below 0.1% rises monotonically with B: about 10 us for B <= 8, 15 us for B = 16 and 32, 20 us for B = 64, 40 us for B = 128 and 85 us for B = 256. Dead entries leave the buffer only when an ACK from a live path overwrites their slot, so a bigger buffer takes proportionally longer to turn over. At B = 256 the median host still holds 49 dead entries when it freezes, and 5 of 32 hosts still have dead EVs when the links recover at 110 us (B <= 128: all 32 hosts clean before recovery).
+- **The draw-based metric does not show it.** Sends to the last stale draw do not grow with B (about 1180 to 1220 for B <= 128, 1076 at B = 256). Per epoch the outcome is about two thirds "stale until unfreeze" and one third "cleared before unfreeze" at every B. Reason: by the time the median host enters Freezing Mode (39.7 us after the kill, RTO-driven, the same for every B) the buffer is already clean for B <= 64, and (a likely explanation, not separately tested) frozen-mode draws mostly replay old, already-drawn slots, which count as stale whether or not they were dead.
 - More than half of frozen draws are stale at every B (0.52 to 0.60); there are no random draws while frozen. The stale share is lowest at B = 8 to 16 (0.52) and highest at B = 128 to 256 (0.59 to 0.60), so it rises only at the large end.
 - FCT under the kill is about 490 us (p50) for B = 2 to 128; B = 1 is slightly faster at the median but has a higher max; **B = 256 is the worst** (p50 500 us, max 537 us). With one seed these differences are not resolved.
-- Net: C2 is a null result for "bigger B drains slower"; the only visible cost of a very large buffer is at B = 256.
+- Net: a larger buffer holds dead EVs for longer (monotone in B, clear from B = 32 up, large at B = 128 to 256), but this does not turn into a measurable FCT cost except at B = 256 (and with one seed, even that is unresolved).
 
 ## Caveats
 - One seed (42); no confidence intervals. Differences of a few microseconds are within what other experiments (exp28 to exp31) found to be noise.
