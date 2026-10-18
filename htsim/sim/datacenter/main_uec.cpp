@@ -77,6 +77,99 @@ private:
     int _state;
 };
 
+// ===== ADDED (sol-avoid-timed-failure) =====
+// Oracle SoL arm for a transient ToR-uplink kill (-timed_window +
+// -timed_fail_tor_uplinks). At t_fail-delta: lowers ALL ToR0 flows' cwnd to
+// the kill-phase value and re-pins the *displaced* flows (those pinned to a
+// dying uplink) onto a live uplink, naturally landing 2 flows/live uplink
+// (kept-in-place flows are untouched path-wise). At t_recover: repins
+// displaced flows back and restores their cwnd immediately (their own
+// uplink was idle throughout the kill, so no contention risk). At
+// t_recover+delta (one base RTT later): restores the kept-in-place flows'
+// cwnd, staggered so their ex-sharing partner's in-flight packets have
+// drained off the shared link first (avoids a 1-RTT queue spike/trim under
+// trim-ON). Also reroutes ToR0-as-RECEIVER flows' ACKs (which ride the same
+// dying uplink to travel back upstream, even though their own data rides the
+// never-failing downlink): at t_fail-delta swaps the affected UecSinkPort's
+// reverse route onto a live uplink (data path/cwnd untouched, src is
+// non-ToR0), restored at t_recover. No stagger needed for the ACK swap --
+// ACKs can't cause a queue spike.
+class SolAvoidTimedFailureEvent : public EventSource {
+public:
+    SolAvoidTimedFailureEvent(EventList& el,
+                               vector<UecSrc*> srcs,
+                               vector<const Route*> normal_routes,
+                               vector<const Route*> kill_routes,
+                               vector<bool> displaced,
+                               mem_b normal_cwnd, mem_b kill_cwnd,
+                               simtime_picosec t_fail, simtime_picosec t_recover,
+                               simtime_picosec delta,
+                               vector<UecSinkPort*> ack_ports,
+                               vector<const Route*> ack_normal_routes,
+                               vector<const Route*> ack_kill_routes)
+        : EventSource(el, "sol_avoid_timed_failure"),
+          _srcs(srcs), _normal_routes(normal_routes), _kill_routes(kill_routes),
+          _displaced(displaced), _normal_cwnd(normal_cwnd), _kill_cwnd(kill_cwnd),
+          _t_recover(t_recover), _delta(delta), _state(0),
+          _ack_ports(ack_ports), _ack_normal_routes(ack_normal_routes),
+          _ack_kill_routes(ack_kill_routes) {
+        simtime_picosec t0 = (delta < t_fail) ? (t_fail - delta) : 0;
+        eventlist().sourceIsPending(*this, t0);
+    }
+    void doNextEvent() override {
+        if (_state == 0) {
+            for (size_t i = 0; i < _srcs.size(); i++) {
+                _srcs[i]->setCwnd(_kill_cwnd);
+                _srcs[i]->setMaxWnd(_kill_cwnd);
+                if (_displaced[i]) _srcs[i]->setPaths({_kill_routes[i]});
+            }
+            // Receiver-side ACK reroute: these flows' data path never fails,
+            // so only the sink port's reverse route moves -- no cwnd touched.
+            for (size_t i = 0; i < _ack_ports.size(); i++) {
+                _ack_ports[i]->setRoute(*_ack_kill_routes[i]);
+            }
+            cout << "[sol_avoid] kill-phase cwnd/paths applied at "
+                 << timeAsUs(eventlist().now()) << " us" << endl;
+            _state = 1;
+            eventlist().sourceIsPending(*this, _t_recover);
+        } else if (_state == 1) {
+            for (size_t i = 0; i < _srcs.size(); i++) {
+                if (_displaced[i]) {
+                    _srcs[i]->setPaths({_normal_routes[i]});
+                    _srcs[i]->setCwnd(_normal_cwnd);
+                    _srcs[i]->setMaxWnd(_normal_cwnd);
+                }
+            }
+            for (size_t i = 0; i < _ack_ports.size(); i++) {
+                _ack_ports[i]->setRoute(*_ack_normal_routes[i]);
+            }
+            cout << "[sol_avoid] displaced flows repinned+restored at "
+                 << timeAsUs(eventlist().now()) << " us" << endl;
+            _state = 2;
+            eventlist().sourceIsPending(*this, _t_recover + _delta);
+        } else {
+            for (size_t i = 0; i < _srcs.size(); i++) {
+                if (!_displaced[i]) {
+                    _srcs[i]->setCwnd(_normal_cwnd);
+                    _srcs[i]->setMaxWnd(_normal_cwnd);
+                }
+            }
+            cout << "[sol_avoid] kept-in-place flows cwnd restored at "
+                 << timeAsUs(eventlist().now()) << " us" << endl;
+        }
+    }
+private:
+    vector<UecSrc*> _srcs;
+    vector<const Route*> _normal_routes, _kill_routes;
+    vector<bool> _displaced;
+    mem_b _normal_cwnd, _kill_cwnd;
+    simtime_picosec _t_recover, _delta;
+    int _state;
+    vector<UecSinkPort*> _ack_ports;
+    vector<const Route*> _ack_normal_routes, _ack_kill_routes;
+};
+// ===== END ADDED (sol-avoid-timed-failure) =====
+
 // ===== ADDED (path-random queue logging) =====
 // Samples agg→core uplink queue depths every interval_us µs and writes
 // time_us,agg,core,bytes rows to a CSV. Gated by -log_core_queues <file>.
@@ -297,6 +390,11 @@ int main(int argc, char **argv) {
     string reps_window_path = "";      // -log_reps_window <file> <interval_us> <t0_us> <t1_us>
     double reps_window_interval_us = 0.0, reps_window_t0_us = 0.0, reps_window_t1_us = 0.0;
     // ===== END ADDED (timed-failure) =====
+    // ===== ADDED (sol-avoid-timed-failure) =====
+    bool   sol_avoid_timed_failure = false;  // -sol_avoid_timed_failure <kill_cwnd_pkts> <delta_us>
+    int    sol_kill_cwnd_pkts = 0;
+    double sol_switch_delta_us = 0.0;
+    // ===== END ADDED (sol-avoid-timed-failure) =====
 
     string data_collection_dir = "";
     htsim::DataCollector& data_collector = htsim::DataCollector::get_instance();
@@ -460,6 +558,38 @@ int main(int argc, char **argv) {
                  << " hosts" << endl;
             i++;
         // ===== END ADDED (per-host-lb) =====
+        // ===== ADDED (per-host-cwnd) =====
+        // Override cwnd (bytes) for specific source hosts. Format:
+        //   -host_cwnd_overrides 0:38400,1:38400,...
+        // Overridden hosts use the given cwnd/maxwnd; all others use the
+        // global -cwnd. Lets a CONSTANT-CC cwnd sweep (which never updates
+        // cwnd after init) target one subset of hosts (e.g. a degraded ToR)
+        // without under/over-provisioning every other host in the same run.
+        } else if (!strcmp(argv[i],"-host_cwnd_overrides")) {
+            if (!UecSrc::_parseHostCwndString(argv[i+1])) {
+                cerr << "Failed to parse -host_cwnd_overrides: " << argv[i+1] << endl;
+                exit(1);
+            }
+            cout << "Per-host cwnd overrides set for " << UecSrc::_per_host_cwnd_override.size()
+                 << " hosts" << endl;
+            i++;
+        // ===== END ADDED (per-host-cwnd) =====
+        // ===== ADDED (sol-avoid-timed-failure) =====
+        // Oracle SoL arm for C2's transient ToR-uplink kill: avoids the dying
+        // uplinks during the kill window (re-pin displaced ToR0 flows onto a
+        // live uplink, 2 flows/live uplink), and runs a lower cwnd for the
+        // whole kill window, restoring the global -cwnd at recovery. Schedule
+        // and dead-uplink set are read from -timed_window/-timed_fail_tor_uplinks
+        // (not separate args, so it can't drift from the real failure). Scoped
+        // to ToR0-SENDER FCT only -- ToR0-as-receiver flows' ACKs riding the
+        // dying uplink are out of scope (see experiments/MODIFICATIONS.md).
+        //   -sol_avoid_timed_failure <kill_cwnd_pkts> <switch_delta_us>
+        } else if (!strcmp(argv[i],"-sol_avoid_timed_failure")) {
+            sol_avoid_timed_failure = true;
+            sol_kill_cwnd_pkts = atoi(argv[i+1]);
+            sol_switch_delta_us = atof(argv[i+2]);
+            i += 2;
+        // ===== END ADDED (sol-avoid-timed-failure) =====
         // ===== ADDED (path-rr-order) =====
         } else if (!strcmp(argv[i], "-path_rr_start_mode")) {
             const char* m = argv[i+1];
@@ -960,7 +1090,11 @@ int main(int argc, char **argv) {
                 exit(1);
             }
             fprintf(UecSrc::_reps_events_log,
-                    "n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,head,frozen_head,cwnd_pkts,inflight_pkts,slots,fifo\n"); // ===== ADDED (reps-fifo-trace): fifo column =====
+                    // srcaddr appended last (purely additive) -- ===== ADDED (c3-burst-host-id) =====
+                    // src_id (_node_num) is per-flow; srcaddr (_srcaddr) is per physical
+                    // host, stable across a host's multiple flows (e.g. C3's bursty
+                    // sender). Lets post-hoc analysis regroup a host's several bursts.
+                    "n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,head,frozen_head,cwnd_pkts,inflight_pkts,slots,fifo,srcaddr\n"); // ===== END ADDED (c3-burst-host-id) =====
             cout << "Logging REPS event trace to " << argv[i+1] << endl;
             i++;
         } else if (!strcmp(argv[i],"-log_reps_events_src")){
@@ -1635,6 +1769,24 @@ int main(int argc, char **argv) {
 
     // ===== ADDED (path-static-greedy) =====
     std::map<PacketSink*, int> path_static_edge_load;
+    // ===== ADDED (sol-avoid-timed-failure) =====
+    // Collected here per ToR0 flow, consumed below (after this loop) to build
+    // SolAvoidTimedFailureEvent. kill_route==normal best route for a kept-in-
+    // place flow (0 moves); a distinct live-uplink route for a displaced one.
+    std::map<PacketSink*, int> sol_kill_edge_load;
+    std::vector<UecSrc*> sol_tor0_srcs;
+    std::vector<const Route*> sol_tor0_kill_routes;
+    std::vector<const Route*> sol_tor0_normal_routes;
+    std::vector<bool> sol_tor0_displaced;
+    // Receiver-side (ACK-only) companion: flows whose DEST is on the ToR
+    // under test. Their data path never fails (rides the never-failing
+    // downlink); only their ACK (ToR0->spine hop) needs rerouting.
+    std::map<PacketSink*, int> sol_ack_edge_load;
+    std::vector<UecSinkPort*> sol_ack_ports;
+    std::vector<const Route*> sol_ack_kill_routes;
+    std::vector<const Route*> sol_ack_normal_routes;
+    std::vector<bool> sol_ack_displaced;
+    // ===== END ADDED (sol-avoid-timed-failure) =====
     // ===== END ADDED (path-static-greedy) =====
     for (size_t c = 0; c < all_conns->size(); c++){
         connection* crt = all_conns->at(c);
@@ -1675,6 +1827,9 @@ int main(int argc, char **argv) {
         // with the overridden algorithm. No-op if no override is set.
         uec_src->applyHostLBOverride();
         // ===== END ADDED (per-host-lb) =====
+        // ===== ADDED (per-host-cwnd) =====
+        uec_src->applyHostCwndOverride();
+        // ===== END ADDED (per-host-cwnd) =====
 
         uec_src->from = src;
         uec_src->to = dest;
@@ -1836,8 +1991,9 @@ int main(int argc, char **argv) {
                                 // paths->at(best_idx) is the pre-copy route from get_bidir_paths
                                 // which has _reverse populated; the copy used in full_paths does not.
                                 const Route* orig_r = (*paths)[best_idx];
+                                Route* rev = nullptr; // ===== ADDED (sol-avoid-timed-failure): hoisted out of the if below so the ACK-reroute block can see the normal reverse route =====
                                 if (orig_r->reverse()) {
-                                    Route* rev = new Route(*orig_r->reverse(), *uec_src->getPort(p));
+                                    rev = new Route(*orig_r->reverse(), *uec_src->getPort(p));
                                     // Cross-link forward↔reverse so bounced packets (trims) can
                                     // traverse both ways without hitting a null-reverse assert.
                                     const_cast<Route*>(best)->set_reverse(rev);
@@ -1847,6 +2003,86 @@ int main(int argc, char **argv) {
                                 // ===== END ADDED (path-static-revroute) =====
                                 cout << "PATH_STATIC: " << src << "->" << dest
                                      << " plane=" << p << " max_edge_load=" << best_max << "\n";
+                                // ===== ADDED (sol-avoid-timed-failure) =====
+                                if (sol_avoid_timed_failure) {
+                                    auto isDeadHop = [&](PacketSink* hop) {
+                                        auto& tor_arr = topo[p]->pipes_nlp_nup[timed_fail_ul_tor];
+                                        for (int s = 0; s < timed_fail_ul_count && s < (int)tor_arr.size(); s++)
+                                            for (Pipe* dp : tor_arr[s])
+                                                if ((PacketSink*)dp == hop) return true;
+                                        return false;
+                                    };
+                                    // ----- sender side: flow's DATA rides the dying uplink -----
+                                    if ((int)topo[p]->HOST_POD_SWITCH(src) == timed_fail_ul_tor) {
+                                    bool displaced = false;
+                                    for (PacketSink* hop : *best) if (isDeadHop(hop)) { displaced = true; break; }
+                                    const Route* kill_route = best; // default: kept in place
+                                    if (displaced) {
+                                        // Greedy-assign onto a LIVE uplink only, seeded with
+                                        // kept-in-place flows' load already added below ->
+                                        // naturally lands 2 displaced flows/live uplink.
+                                        const Route* best2 = nullptr;
+                                        int best_max2 = 0x7fffffff;
+                                        for (const Route* rc : full_paths) {
+                                            bool uses_dead = false;
+                                            for (PacketSink* hop : *rc) if (isDeadHop(hop)) { uses_dead = true; break; }
+                                            if (uses_dead) continue;
+                                            int max_load = 0;
+                                            for (PacketSink* hop : *rc) {
+                                                auto it = sol_kill_edge_load.find(hop);
+                                                if (it != sol_kill_edge_load.end())
+                                                    max_load = std::max(max_load, it->second);
+                                            }
+                                            if (max_load < best_max2) { best_max2 = max_load; best2 = rc; }
+                                        }
+                                        if (best2) kill_route = best2;
+                                    }
+                                    for (PacketSink* hop : *kill_route) sol_kill_edge_load[hop]++;
+                                    sol_tor0_srcs.push_back(uec_src);
+                                    sol_tor0_normal_routes.push_back(best);
+                                    sol_tor0_kill_routes.push_back(kill_route);
+                                    sol_tor0_displaced.push_back(displaced);
+                                    }
+                                    // ----- receiver side: flow's ACK (ToR0->spine hop) rides the
+                                    // dying uplink even though its DATA (spine->ToR0 downlink) never
+                                    // fails. Reroute only the sink port's reverse route; forward
+                                    // route/cwnd for this flow are untouched (src is non-ToR0, and
+                                    // only ToR0 hosts' cwnd may ever change, per standing rule). -----
+                                    if (rev && (int)topo[p]->HOST_POD_SWITCH(dest) == timed_fail_ul_tor) {
+                                        bool ack_displaced = false;
+                                        for (PacketSink* hop : *rev) if (isDeadHop(hop)) { ack_displaced = true; break; }
+                                        const Route* kill_rev = rev; // default: unchanged
+                                        if (ack_displaced) {
+                                            const Route* best_rev = nullptr;
+                                            int best_max2 = 0x7fffffff;
+                                            for (const Route* rc : *paths) {
+                                                const Route* rrev = rc->reverse();
+                                                if (!rrev) continue;
+                                                bool uses_dead = false;
+                                                for (PacketSink* hop : *rrev) if (isDeadHop(hop)) { uses_dead = true; break; }
+                                                if (uses_dead) continue;
+                                                int max_load = 0;
+                                                for (PacketSink* hop : *rrev) {
+                                                    auto it = sol_ack_edge_load.find(hop);
+                                                    if (it != sol_ack_edge_load.end())
+                                                        max_load = std::max(max_load, it->second);
+                                                }
+                                                if (max_load < best_max2) { best_max2 = max_load; best_rev = rrev; }
+                                            }
+                                            if (best_rev) {
+                                                Route* kr = new Route(*best_rev, *uec_src->getPort(p));
+                                                kr->set_reverse(const_cast<Route*>(best));
+                                                kill_rev = kr;
+                                            }
+                                        }
+                                        for (PacketSink* hop : *kill_rev) sol_ack_edge_load[hop]++;
+                                        sol_ack_ports.push_back(uec_snk->getPort(p));
+                                        sol_ack_normal_routes.push_back(rev);
+                                        sol_ack_kill_routes.push_back(kill_rev);
+                                        sol_ack_displaced.push_back(ack_displaced);
+                                    }
+                                }
+                                // ===== END ADDED (sol-avoid-timed-failure) =====
                             } else {
                             // ===== END ADDED (path-static) =====
                             // ===== ADDED (path-rr-npaths): truncate path list for constrained hosts =====
@@ -1991,6 +2227,21 @@ int main(int argc, char **argv) {
         exit(1);
     }
     // ===== END FIXED =====
+    // ===== ADDED (sol-avoid-timed-failure) =====
+    if (sol_avoid_timed_failure) {
+        if (timed_fail_start_us <= 0.0 || timed_fail_ul_tor < 0) {
+            cerr << "ERROR: -sol_avoid_timed_failure requires -timed_window and "
+                 << "-timed_fail_tor_uplinks (schedule/dead-set are read from them, "
+                 << "never set separately)." << endl;
+            exit(1);
+        }
+        if (UecSrc::_load_balancing_algo != UecSrc::PATH_STATIC) {
+            cerr << "ERROR: -sol_avoid_timed_failure requires "
+                 << "-load_balancing_algo path_static." << endl;
+            exit(1);
+        }
+    }
+    // ===== END ADDED (sol-avoid-timed-failure) =====
     if (timed_fail_start_us > 0.0 && !topo.empty() && topo[0] != nullptr) {
         FatTreeTopology* t0 = topo[0];
         simtime_picosec ts = (simtime_picosec)(timed_fail_start_us   * 1000000.0);
@@ -2031,6 +2282,45 @@ int main(int argc, char **argv) {
         cout << "[timed_failure] scheduled " << n_sched << " pipe failures, fail@"
              << timed_fail_start_us << "us recover@" << timed_fail_recover_us
              << "us" << endl;
+        // ===== ADDED (sol-avoid-timed-failure) =====
+        if (sol_avoid_timed_failure) {
+            mem_b kill_cwnd_b = (mem_b)sol_kill_cwnd_pkts * Packet::data_packet_size();
+            simtime_picosec delta_ps = (simtime_picosec)(sol_switch_delta_us * 1000000.0);
+            // ===== ADDED (sol-avoid-timed-failure debug) =====
+            {
+                int ndisp = 0, nkilldiff = 0;
+                std::map<PacketSink*, int> per_uplink_data;
+                for (size_t i = 0; i < sol_tor0_displaced.size(); i++) {
+                    if (sol_tor0_displaced[i]) ndisp++;
+                    if (sol_tor0_kill_routes[i] != sol_tor0_normal_routes[i]) nkilldiff++;
+                    for (PacketSink* hop : *sol_tor0_kill_routes[i]) per_uplink_data[hop]++;
+                }
+                int ack_ndisp = 0, ack_nkilldiff = 0;
+                std::map<PacketSink*, int> per_uplink_ack;
+                for (size_t i = 0; i < sol_ack_displaced.size(); i++) {
+                    if (sol_ack_displaced[i]) ack_ndisp++;
+                    if (sol_ack_kill_routes[i] != sol_ack_normal_routes[i]) ack_nkilldiff++;
+                    for (PacketSink* hop : *sol_ack_kill_routes[i]) per_uplink_ack[hop]++;
+                }
+                cout << "[sol_avoid_debug] tor0_flows=" << sol_tor0_srcs.size()
+                     << " displaced=" << ndisp << " kill_route_differs=" << nkilldiff << endl;
+                cout << "[sol_avoid_debug] ack_flows=" << sol_ack_ports.size()
+                     << " ack_displaced=" << ack_ndisp << " ack_kill_route_differs=" << ack_nkilldiff << endl;
+                for (auto& kv : per_uplink_data)
+                    cout << "[sol_avoid_debug] data_uplink_load " << kv.first << "=" << kv.second << endl;
+                for (auto& kv : per_uplink_ack)
+                    cout << "[sol_avoid_debug] ack_uplink_load " << kv.first << "=" << kv.second << endl;
+            }
+            // ===== END ADDED =====
+            new SolAvoidTimedFailureEvent(eventlist, sol_tor0_srcs, sol_tor0_normal_routes,
+                                           sol_tor0_kill_routes, sol_tor0_displaced,
+                                           cwnd_b, kill_cwnd_b, ts, tr, delta_ps,
+                                           sol_ack_ports, sol_ack_normal_routes, sol_ack_kill_routes);
+            cout << "[sol_avoid] scheduled for " << sol_tor0_srcs.size()
+                 << " ToR0 flows, " << sol_ack_ports.size() << " ACK-reroute flows, kill_cwnd="
+                 << sol_kill_cwnd_pkts << " pkts, delta=" << sol_switch_delta_us << "us" << endl;
+        }
+        // ===== END ADDED (sol-avoid-timed-failure) =====
     }
 
     // exp29: periodic per-host metric window log.

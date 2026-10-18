@@ -82,7 +82,11 @@ def _buf_size(arm: str) -> int:
 
 
 def _cc(arm: str) -> str:
-    return "dual_mprdma_reps" if arm.endswith("_dual") else "mprdma"
+    if arm.endswith("_dual_cap"):
+        return "dual_mprdma_reps_cap"
+    if arm.endswith("_dual"):
+        return "dual_mprdma_reps"
+    return "mprdma"
 
 
 def _collapse(frame: pd.DataFrame, keys: list[str], cols: list[str]) -> pd.DataFrame:

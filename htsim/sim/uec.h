@@ -187,6 +187,11 @@ public:
     // algorithm (overwrites nextEntropy/processEv function pointers).
     void applyHostLBOverride();
     // ===== END ADDED (per-host-lb) =====
+    // ===== ADDED (per-host-cwnd) =====
+    // Called after setSrc(). If `_per_host_cwnd_override` has an entry for
+    // this sender's host id, overwrites cwnd/maxwnd with the overridden value.
+    void applyHostCwndOverride();
+    // ===== END ADDED (per-host-cwnd) =====
     void setDst(uint32_t dst) { _dstaddr = dst; }
     const Route *get_route() { return _route_fail; }
     UecSink *get_sink() { return _sink; }
@@ -318,6 +323,34 @@ public:
     // ====================================================================
 
     // ====================================================================
+    // ADDED (reps-soft-replay): continuous randomize<->safety knob for
+    // nextEntropy_freezing()'s non-frozen fallback branch (buffer empty or
+    // no fresh entropies left). Off by default -- vanilla FREEZING behavior
+    // (always a pure random draw in that branch) is unchanged when absent.
+    // When enabled, with probability _exp_avg_ecn (the flow's own existing
+    // per-ACK ECN EWMA -- original code, not another addition's state) the
+    // fallback instead replays a recently-seen EV from the ring (via
+    // containsEntropy(), which matches a slot's stored value whether or not
+    // it's still marked valid) rather than drawing fully random, skipping
+    // any candidate this feature's own scoreboard below last saw ECN-marked.
+    // Depends only on original UecSrc/CircularBufferREPS members
+    // (containsEntropy, getSize, _exp_avg_ecn) -- no other addition's flag
+    // needs to be set for this to work standalone.
+    // See the brainstorm plan for full design rationale.
+    // ====================================================================
+    static bool _reps_soft_replay;  // default false
+    // Validation-ablation knobs (same feature, same flag family): a negative
+    // value (default) means "use _exp_avg_ecn as P"; >=0 fixes P to that
+    // value instead (e.g. 1.0 = always attempt replay on fallback). Lets the
+    // "fixed-P=1 vs EWMA-gated" and "filter on/off" arms in the validation
+    // plan reuse one code path instead of duplicating it.
+    static double _reps_soft_replay_fixed_p;    // default -1 (use EWMA)
+    static bool   _reps_soft_replay_no_filter;  // default false (filter on)
+    // ====================================================================
+    // END ADDED (reps-soft-replay)
+    // ====================================================================
+
+    // ====================================================================
     // ADDED (swift-cc)
     // Static parameters shared by Swift/LSwift/MSwift (all use _target_Qdelay
     // as their queue-delay target, same as NSCC, matching the paper's setup).
@@ -370,6 +403,14 @@ public:
     static FILE* _cwnd_log;
     static std::set<uint32_t> _cwnd_log_srcs; // empty = log all sources
     // ===== END ADDED (cwnd-log) =====
+    // ===== ADDED (dual-cwnd-log): per-window cwnd time series for
+    // DUAL_MPRDMA_REPS / DUAL_MPRDMA_REPS_CAP, logged from syncDualCwnd() so
+    // every cwnd mutation (AI, NACK/MD, RTO decrease, idle reset, unfreeze
+    // reset, init) is captured, not just per-ACK. See experiments/
+    // MODIFICATIONS.md and experiments/tools/README.md for the CSV schema. =====
+    static FILE* _dual_cwnd_log;
+    static std::set<uint32_t> _dual_cwnd_log_srcs; // empty = log all dual-window sources
+    // ===== END ADDED (dual-cwnd-log) =====
     // ===== ADDED (buffer-contents-log) =====
     static bool _log_buffer_contents;  // append buf_contents column to reps_state_log
     // ===== END ADDED (buffer-contents-log) =====
@@ -518,6 +559,17 @@ public:
     static LoadBalancing_Algo _parseLBName(const std::string& name);
     static bool _parseHostLBString(const std::string& spec);
     // ===== END ADDED (per-host-lb) =====
+    // ===== ADDED (per-host-cwnd) =====
+    // Per-host cwnd override: map<src_host_id, cwnd_bytes>. Each UecSrc whose
+    // _srcaddr is in this map gets its cwnd/maxwnd set to the mapped value
+    // instead of the global -cwnd. Set via -host_cwnd_overrides
+    // "0:38400,1:38400,...". Empty by default. Used to isolate a cwnd sweep
+    // (e.g. CONSTANT CC under -sender_cc_algo constant, which never updates
+    // cwnd after init) to a subset of hosts without under/over-provisioning
+    // every other host's flows in the same run.
+    static std::map<uint32_t, mem_b> _per_host_cwnd_override;
+    static bool _parseHostCwndString(const std::string& spec);
+    // ===== END ADDED (per-host-cwnd) =====
     enum PathFeedback {PATH_GOOD,PATH_ECN,PATH_NACK,PATH_TIMEOUT};
     enum EvState {STATE_GOOD,STATE_SKIP,STATE_ASSUMED_BAD};
     static Sender_CC _sender_cc_algo;
@@ -1120,6 +1172,22 @@ private:
     uint16_t _crt_path;
     list<uint16_t> _next_pathid;
     list<uint16_t> _knowngood_pathid;
+
+    // ====================================================================
+    // ADDED (reps-soft-replay): this feature's own new, self-contained
+    // per-source state -- not reused from any other addition (e.g.
+    // ev-health-counter's _ev_last_ecn_state, which is a separate,
+    // independently-gated extension). _soft_replay_cursor cycles over EV-id
+    // space [0, _no_of_paths) across calls so replay candidates spread out
+    // rather than pinning the first match every time. _soft_replay_ev_ecn is
+    // lazily sized to _no_of_paths on first use, mirroring the lazy-init
+    // pattern already used for similar per-EV vectors elsewhere in this file.
+    // ====================================================================
+    uint16_t _soft_replay_cursor = 0;
+    vector<bool> _soft_replay_ev_ecn;
+    // ====================================================================
+    // END ADDED (reps-soft-replay)
+    // ====================================================================
 
     // Connectivity
     PacketFlow _flow;

@@ -123,6 +123,19 @@ REPS_EuroSys_Artifact/
 
 ---
 
+## Companion repo: thesis results
+
+Separate GitHub repo `ItamarMeir/Thesis_Itamar_BGU_Networking` (private), local `C:\git_repos\Thesis_Itamar_BGU_Networking`. Output-only: thesis-facing interactive `.html` plots (exp28+, meeting 2026-10-06) in `REPS Buffer/`. No sim code, no raw data.
+
+- This repo = source of truth. One-way flow: regenerate + commit here, then `.\sync_from_sim.ps1` in thesis repo copies, packs `DATA` blob (gzip+base64, still one `.html`), rewrites `SOURCES.md` with commit hash.
+- Touch thesis repo only when user asks. Never hand-edit its `REPS Buffer/` or `SOURCES.md`.
+- Sync from clean tree (script refuses dirty without `-Force`). Commit here first.
+- New experiment page: add row to `$map` in thesis `sync_from_sim.ps1`.
+- One repo per session (cwd); `/add-dir` other only for sync.
+- `.gitignore` here ignores `experiments/**/*.html`; thesis repo = where interactive pages published.
+
+---
+
 ## Building
 
 ```bash
@@ -262,6 +275,7 @@ Full recipe in `experiments/RUNNING_EXPERIMENTS.md`. Short version:
 | Single seed, claiming trend | Differences vanish on rerun | Sweep ≥ 3–5 seeds, plot 95% CI |
 | Committed raw `runs/` dir | Repo bloat (200+ files, 45 MB) | Compress to `runs.tar.gz` first |
 | Modifying `artifact_scripts/` or `artifact_results/` | Corrupts paper's original artifact | Leave those directories alone |
+| Looking for published interactive plots here | `experiments/**/*.html` gitignored, not on this remote | Live in thesis repo (see "Companion repo: thesis results"); sync only on user request |
 
 ---
 
@@ -323,3 +337,4 @@ Full detail for `htsim/sim/` moved to [`experiments/MODIFICATIONS.md`](experimen
 | `timed-failure` | `-timed_window` + `-timed_fail_tor_uplinks`/`-timed_fail_tor_downlinks` + `-log_reps_window` | Schedule transient failure of first F spine uplinks (or downlinks) of one ToR on 2-tier fabric (reuses `LinkFailureEvent` class, new 2-tier pipe resolution); periodic per-host CSV of `g_reps_metrics` deltas (`UecWindowLogger`). Adds `ecn_acks` + `fast_loss_entries` to side table (`fast_loss` also on finish line). No behavior change when flags absent. exp29. |
 | `fail-src-paths` | `-fail_src_paths <src> <count>` | For one source host only, physical SRv6 path indices `[0,count)` dead: packet drawn onto them is `free()`d at emit (== first-hop failed Pipe), sender still arms RTO. Scoped to one src by construction (no shared fabric pipe is per-path AND per-source). Static, whole-sim. No behavior change when flag absent. exp30 Part B. |
 | `dual-window-reps-mprdma` | `-sender_cc_algo dual_mprdma_reps` (requires `-load_balancing_algo freezing`) | Two independent MPRDMA-AIMD windows per flow: `_win_safe` gates/updates from REPS-buffer EVs verified valid at pop time, `_win_random` from unverified EVs (random draws, explore bursts, stale frozen pops). EV selection unchanged (still `nextEntropy_freezing`); only cwnd admission/update split and re-attributed by trust tier. See `experiments/MODIFICATIONS.md` for full design notes. |
+| `per-host-cwnd` | `-host_cwnd_overrides` | Per-host cwnd override, mirrors `per-host-lb` map pattern. Isolate CONSTANT-CC cwnd sweep to host subset w/o perturbing rest of run. meeting 2026-10-06 C1 SoL. |

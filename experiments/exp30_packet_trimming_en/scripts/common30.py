@@ -106,7 +106,9 @@ ARMS = ["reps_b1", "reps_b2", "reps_b4", "reps_b8", "reps_b16", "reps_b32",
         "reps_b64", "reps_b128", "reps_b256",
         "reps_b8_dual", "reps_b8_dual_cap",
         "reps_b1_nscc", "reps_b2_nscc", "reps_b4_nscc", "reps_b8_nscc",
-        "reps_b16_nscc", "reps_b32_nscc"]
+        "reps_b16_nscc", "reps_b32_nscc",
+        # c1 NSCC mirror: same B>32 extension as the plain-mprdma arms above.
+        "reps_b64_nscc", "reps_b128_nscc", "reps_b256_nscc"]
 # NSCC buffer sweep (meeting 2026-10-06: NSCC x B was never tested). Same LB/buffer
 # flags as the matching reps_bN arm; only the CC differs (see base_flags).
 # reps_b8_nscc = same LB/buffer as reps_b8, CC is nscc (the paper's own CC)

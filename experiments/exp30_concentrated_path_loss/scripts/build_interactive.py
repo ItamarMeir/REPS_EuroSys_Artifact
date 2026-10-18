@@ -34,6 +34,12 @@ DUAL_ARM = "reps_b8_dual"
 DUAL_COLOR = "#dc2626"
 DUAL_LABEL = "B=8 dual-window"
 
+# dual-window-cwnd-cap (v2) at B=8 -- same again, CC is dual_mprdma_reps_cap
+# (combined safe+random cwnd capped at _maxwnd, vs v1's independent ceilings).
+DUAL_CAP_ARM = "reps_b8_dual_cap"
+DUAL_CAP_COLOR = "#2563eb"
+DUAL_CAP_LABEL = "B=8 dual-window (cwnd-capped)"
+
 
 def payload():
     fct = pd.read_csv(D / "fct.csv")
@@ -45,6 +51,9 @@ def payload():
         "DUAL_ARM": DUAL_ARM,
         "DUAL_COLOR": DUAL_COLOR,
         "DUAL_LABEL": DUAL_LABEL,
+        "DUAL_CAP_ARM": DUAL_CAP_ARM,
+        "DUAL_CAP_COLOR": DUAL_CAP_COLOR,
+        "DUAL_CAP_LABEL": DUAL_CAP_LABEL,
         "fct": fct.round(4).to_dict(orient="records"),
         "diag": diag.round(5).to_dict(orient="records"),
         "rv": rv.to_dict(orient="records"),
@@ -136,7 +145,7 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">REPS EuroSys artifact &middot; exp30 &middot; 894 runs</p>
+  <p class="eyebrow">REPS EuroSys artifact &middot; exp30 &middot; 1020 runs</p>
   <h1>Concentrated path loss vs buffer size</h1>
   <p class="lede">exp28/29 found buffer size <strong>B</strong> does not move FCT
   &mdash; but exp28's degradation only slows packets (ECN, no loss) and exp29's
@@ -166,7 +175,19 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
 </section>
 
 <section>
-  <h2>2 &nbsp; FCT vs degradation depth &mdash; Part A ratio sweep</h2>
+  <h2>2 &nbsp; Diagnostics vs severity &mdash; Part A</h2>
+  <p>Per-affected-host counters off the flow-finish line, against the same
+  <em>n</em> as the FCT chart above. <code>random-EV rate</code> = (random +
+  explore EV draws) &divide; packets sent. Degradation drives ECN, not RTO, so
+  <code>freeze entries</code> should stay near zero (exp28's finding &mdash;
+  watch whether concentration changes that).</p>
+  <div class="controls" id="d1-size"><label>flow size</label></div>
+  <div class="controls" id="d1-ctl"><label>metric</label></div>
+  <div class="chart"><div id="d1"></div></div>
+</section>
+
+<section>
+  <h2>3 &nbsp; FCT vs degradation depth &mdash; Part A ratio sweep</h2>
   <p>8 ToR0 uplinks fixed degraded (1/4 of 32); x = how hard, 10&ndash;95&nbsp;%
   (95&nbsp;% &asymp; a full failure). Affected-host FCT percentiles.</p>
   <div class="controls" id="a2-size"><label>flow size</label></div>
@@ -175,18 +196,7 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
 </section>
 
 <section>
-  <h2>3 &nbsp; Diagnostics vs severity &mdash; Part A</h2>
-  <p>Per-affected-host counters off the flow-finish line, against <em>n</em>.
-  <code>random-EV rate</code> = (random + explore EV draws) &divide; packets sent.
-  Degradation drives ECN, not RTO, so <code>freeze entries</code> should stay
-  near zero (exp28's finding &mdash; watch whether concentration changes that).</p>
-  <div class="controls" id="d1-size"><label>flow size</label></div>
-  <div class="controls" id="d1-ctl"><label>metric</label></div>
-  <div class="chart"><div id="d1"></div></div>
-</section>
-
-<section>
-  <h2>4 &nbsp; FCT / diagnostics vs static real kill &mdash; Part B</h2>
+  <h2>4 &nbsp; FCT vs static real kill &mdash; Part B</h2>
   <p><code>-timed_fail_tor_uplinks 0 F</code> + <code>-timed_window 1 1</code>
   (recover&nbsp;&le;&nbsp;start, so the kill fires at t&asymp;0 and never
   recovers): <em>F</em> of ToR0's 32 uplinks are 100&nbsp;% dead &mdash; a real
@@ -201,7 +211,16 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
 </section>
 
 <section>
-  <h2>5 &nbsp; The verdict table</h2>
+  <h2>5 &nbsp; Diagnostics vs static real kill &mdash; Part B</h2>
+  <p>Per-affected-host counters off the flow-finish line, against the same
+  F as the FCT chart above (same static-kill population, ToR0's 32 senders).</p>
+  <div class="controls" id="bdiag-size"><label>flow size</label></div>
+  <div class="controls" id="bdiag-ctl"><label>metric</label></div>
+  <div class="chart"><div id="bdiag"></div></div>
+</section>
+
+<section>
+  <h2>6 &nbsp; The verdict table</h2>
   <p><code>resolvable</code> = best-B vs worst-B mean separated by more than the
   sum of their 95&nbsp;% CI half-widths (n=3 seeds). Affected group only. If this
   is <code>no</code> everywhere &mdash; including Part B's F=31 static kill &mdash;
@@ -226,7 +245,12 @@ const B_LADDER = DATA.B_LADDER, BC = DATA.B_COLOR;
 // differs (armFor below).
 const DUAL_KEY = 'dual';
 BC[DUAL_KEY] = DATA.DUAL_COLOR;
-const armFor = b => b === DUAL_KEY ? DATA.DUAL_ARM : 'reps_b'+b;
+const DUAL_CAP_KEY = 'dualcap';
+BC[DUAL_CAP_KEY] = DATA.DUAL_CAP_COLOR;
+const armFor = b => b === DUAL_KEY ? DATA.DUAL_ARM
+  : b === DUAL_CAP_KEY ? DATA.DUAL_CAP_ARM : 'reps_b'+b;
+const labelFor = b => b === DUAL_KEY ? DATA.DUAL_LABEL
+  : b === DUAL_CAP_KEY ? DATA.DUAL_CAP_LABEL : 'B='+b;
 const FCT = DATA.fct, DIAG = DATA.diag, RV = DATA.rv;
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const rgba = (hex, a) => { const n = parseInt(hex.slice(1),16);
@@ -247,7 +271,7 @@ function theme() {
     legend: { orientation: 'h', y: -0.22 },
     // 'x unified' kept so plotly_hover events + the x-axis crosshair still
     // fire/render; the native hover BOX itself is hidden via the
-    // .hoverlayer{display:none} CSS rule above, and our own high-to-low
+    // .hoverlayer{display:none} CSS rule above, and our own low-to-high
     // sorted tooltip (bindSortedHover below) replaces it visually.
     hovermode: 'x unified',
     modebar: { orientation: 'v' } };
@@ -298,7 +322,7 @@ function markerShapeSVG(divId, curveNumber, pointNumber, sym, c) {
 }
 
 // --- custom hover tooltip: same data Plotly's unified hover would show, but
-// sorted high-to-low by y instead of by trace order. One shared floating div,
+// sorted low-to-high by y instead of by trace order. One shared floating div,
 // positioned at the cursor; bound once per chart div (Plotly.react keeps the
 // DOM node + listeners across redraws, so re-binding on every draw() would
 // stack duplicate handlers).
@@ -326,7 +350,7 @@ function bindSortedHover(id) {
   el.on('plotly_hover', (ev) => {
     const pts = (ev.points || []).filter(p => p.data.hoverinfo !== 'skip');
     if (!pts.length) return;
-    const sorted = pts.slice().sort((a, b) => b.y - a.y);
+    const sorted = pts.slice().sort((a, b) => a.y - b.y);
     const rows = sorted.map(p => {
       const c = (p.data.line && p.data.line.color) || '#888';
       const sym = (p.data.marker && p.data.marker.symbol) || 'circle-open';
@@ -350,11 +374,23 @@ function bindSortedHover(id) {
   });
   el.on('plotly_unhover', () => { if (_tipEl) _tipEl.style.display = 'none'; });
 }
+// ===== FIXED (legend state persistence): Plotly.react rebuilds trace objects
+// from scratch on every redraw (metric/size switch etc), so a legend-click
+// hide (B=1 unchecked) was lost whenever the chart redrew. Carry prior
+// visibility forward by legendgroup before handing the new traces to React. =====
 function draw(id, traces, layout) {
+  const el = document.getElementById(id);
+  if (el && el.data) {
+    const visByGroup = {};
+    el.data.forEach(tr => { if (tr.legendgroup) visByGroup[tr.legendgroup] = tr.visible; });
+    traces.forEach(tr => { if (tr.legendgroup && visByGroup[tr.legendgroup] !== undefined)
+      tr.visible = visByGroup[tr.legendgroup]; });
+  }
   Plotly.react(id, traces, layout, CFG);
   bindSortedHover(id);
   requestAnimationFrame(() => Plotly.Plots.resize(document.getElementById(id)));
 }
+// ===== END FIXED =====
 function ciBand(xs, ys, cis, b) {
   return { x: [...xs, ...xs.slice().reverse()],
     y: [...ys.map((y,i)=>y+cis[i]), ...ys.map((y,i)=>Math.max(y-cis[i],0)).reverse()],
@@ -363,10 +399,10 @@ function ciBand(xs, ys, cis, b) {
 }
 function lineTrace(xs, ys, b) {
   const c = BC[b];
-  const name = b === DUAL_KEY ? DATA.DUAL_LABEL : 'B='+b;
+  const name = labelFor(b);
   return { x: xs, y: ys, name, mode: 'lines+markers', type: 'scatter',
     legendgroup: 'B'+b, line: { color: c, width: 2.4,
-      dash: b === DUAL_KEY ? 'dash' : 'solid' },
+      dash: (b === DUAL_KEY || b === DUAL_CAP_KEY) ? 'dash' : 'solid' },
     marker: { color: c, symbol: B_SYMBOL[b] ?? 'circle-open', size: 8,
               line: { color: c, width: 1.8 } } };
 }
@@ -374,7 +410,7 @@ function lineTrace(xs, ys, b) {
 // generic "metric vs x" for a filtered slice; rows already have x + col + col_ci
 function drawVsX(divId, rows, col, xlabel, ylabel, healthy) {
   const traces = [];
-  for (const b of [...B_LADDER, DUAL_KEY]) {
+  for (const b of [...B_LADDER, DUAL_KEY, DUAL_CAP_KEY]) {
     const rs = rows.filter(r => r.arm === armFor(b)).sort((p,q)=>p.x-q.x);
     if (!rs.length) continue;
     const xs = rs.map(r=>r.x), ys = rs.map(r=>r[col]);
@@ -410,9 +446,9 @@ function healthyFor(part, size, metric) {
   return r ? r[metric] : null;
 }
 
-const S = { a1: sizes[0], a2: sizes[0], d1: sizes[0], bSize: sizes[0],
+const S = { a1: sizes[0], a2: sizes[0], d1: sizes[0], bSize: sizes[0], bdSize: sizes[0],
             a1m:'p99 FCT (us)', a2m:'p99 FCT (us)', d1m:'random-EV draws / host',
-            bm:'p99 FCT (us)', rvm:'p99_fct_us' };
+            bm:'p99 FCT (us)', bdm:'random-EV draws / host', rvm:'p99_fct_us' };
 
 function drawA1(){ const c=FCT_METRICS[S.a1m];
   drawVsX('a1', affFCT.filter(r=>r.part==='a1'&&r.size===S.a1), c,
@@ -423,12 +459,17 @@ function drawA2(){ const c=FCT_METRICS[S.a2m];
 function drawD1(){ const c=DIAG_METRICS[S.d1m];
   drawVsX('d1', affDIAG.filter(r=>r.part==='a1'&&r.size===S.d1), c,
     '# degraded ToR0 uplinks n', S.d1m, null); }
-function drawB(){ const c=FCT_METRICS[S.bm] || DIAG_METRICS[S.bm];
-  const rows = (S.bm in FCT_METRICS ? affFCT : affDIAG)
-    .filter(r=>r.part==='b' && r.size===S.bSize);
-  drawVsX('b', rows, c, '# ToR0 uplinks permanently killed, F  (severity F/32, static)',
-    S.bm, (S.bm in FCT_METRICS) ? healthyFor('b', S.bSize, c) : null);
-}
+// ===== FIXED (dashboard reorg): Part B split into FCT-only + diagnostics-only
+// charts, each directly paired (adjacent section) the way Part A's a1/d1 are,
+// instead of one chart toggled across both metric families. =====
+function drawBFct(){ const c=FCT_METRICS[S.bm];
+  drawVsX('b', affFCT.filter(r=>r.part==='b' && r.size===S.bSize), c,
+    '# ToR0 uplinks permanently killed, F  (severity F/32, static)',
+    S.bm, healthyFor('b', S.bSize, c)); }
+function drawBDiag(){ const c=DIAG_METRICS[S.bdm];
+  drawVsX('bdiag', affDIAG.filter(r=>r.part==='b' && r.size===S.bdSize), c,
+    '# ToR0 uplinks permanently killed, F  (severity F/32, static)', S.bdm, null); }
+// ===== END FIXED =====
 
 function drawTable() {
   const rows = RV.filter(r => r.metric === S.rvm)
@@ -458,6 +499,7 @@ function tiles() {
   const b32 = at(affDIAG, r=>r.part==='b' && r.x===bFMax && r.arm==='reps_b32' && r.size===sizes[0]);
   const b8m = at(affFCT, r=>r.part==='b' && r.x===bFMax && r.arm==='reps_b8' && r.size===sizes[0]);
   const b8d = at(affFCT, r=>r.part==='b' && r.x===bFMax && r.arm===DATA.DUAL_ARM && r.size===sizes[0]);
+  const b8dc = at(affFCT, r=>r.part==='b' && r.x===bFMax && r.arm===DATA.DUAL_CAP_ARM && r.size===sizes[0]);
   const T = [
     ['B resolvable on FCT', anyRes ? 'somewhere' : 'nowhere', anyRes ? 'bad' : 'good',
      'see the verdict table'],
@@ -466,9 +508,9 @@ function tiles() {
     ['random-EV draws @ max kill',
      (b1&&b32) ? `${Math.round(b1.ev_random_per_host)} vs ${Math.round(b32.ev_random_per_host)}` : '?',
      '', 'B=1 vs B=32, ToR0 senders'],
-    ['dual-window vs mprdma, Part B max kill',
-     (b8m&&b8d) ? `${Math.round(b8d.p99_fct_us)} vs ${Math.round(b8m.p99_fct_us)} µs` : '?',
-     '', 'p99 FCT, B=8 both arms, ' + MiB(sizes[0])],
+    ['dual-window v1/v2 vs mprdma, Part B max kill',
+     (b8m&&b8d&&b8dc) ? `${Math.round(b8d.p99_fct_us)} / ${Math.round(b8dc.p99_fct_us)} vs ${Math.round(b8m.p99_fct_us)} µs` : '?',
+     '', 'p99 FCT, B=8 all three arms, ' + MiB(sizes[0])],
   ];
   document.getElementById('tiles').innerHTML = T.map(([k,v,c,s]) =>
     `<div class="tile"><p class="k">${k}</p><div class="v ${c}">${v}</div>
@@ -479,9 +521,9 @@ function cfgLine() {
   document.getElementById('cfg').innerHTML =
     '<code>fat_tree_1024_1os_2t_400g</code> &middot; tornado &middot; '
     + '<code>-use_srv6 -paths 32</code> &middot; <code>-sender_cc_algo mprdma</code> '
-    + '(B ladder) plus one <code>dual_mprdma_reps</code> point at B=8, same LB/'
-    + 'buffer/severity/exit_freeze flags, CC only &mdash; <em>' + DATA.DUAL_LABEL
-    + '</em> in red &middot; '
+    + '(B ladder) plus two dual-window points at B=8, same LB/buffer/severity/'
+    + 'exit_freeze flags, CC only &mdash; <em>' + DATA.DUAL_LABEL
+    + '</em> in red, <em>' + DATA.DUAL_CAP_LABEL + '</em> in blue &middot; '
     + '<code>-q 101 -ecn 25 76 -cwnd 151</code> &middot; <code>-exit_freeze 200us</code> '
     + '(both parts) &middot; seeds 42/43/44 &middot; '
     + '<code>-disable_tor_ecn</code> omitted (paper-faithful)';
@@ -504,14 +546,15 @@ radio('a2-size', sizes.map(MiB), MiB(S.a2), v => { S.a2 = sizes[sizes.map(MiB).i
 radio('a2-ctl', Object.keys(FCT_METRICS), S.a2m, v => { S.a2m = v; drawA2(); });
 radio('d1-size', sizes.map(MiB), MiB(S.d1), v => { S.d1 = sizes[sizes.map(MiB).indexOf(v)]; drawD1(); });
 radio('d1-ctl', Object.keys(DIAG_METRICS), S.d1m, v => { S.d1m = v; drawD1(); });
-radio('b-size', sizes.map(MiB), MiB(S.bSize), v => { S.bSize = sizes[sizes.map(MiB).indexOf(v)]; drawB(); });
-radio('b-ctl', [...Object.keys(FCT_METRICS), ...Object.keys(DIAG_METRICS)], S.bm,
-  v => { S.bm = v; drawB(); });
+radio('b-size', sizes.map(MiB), MiB(S.bSize), v => { S.bSize = sizes[sizes.map(MiB).indexOf(v)]; drawBFct(); });
+radio('b-ctl', Object.keys(FCT_METRICS), S.bm, v => { S.bm = v; drawBFct(); });
+radio('bdiag-size', sizes.map(MiB), MiB(S.bdSize), v => { S.bdSize = sizes[sizes.map(MiB).indexOf(v)]; drawBDiag(); });
+radio('bdiag-ctl', Object.keys(DIAG_METRICS), S.bdm, v => { S.bdm = v; drawBDiag(); });
 radio('rv-metric', ['p50_fct_us','p95_fct_us','p99_fct_us','max_fct_us',
   'ecn_per_host','rto_per_host','freeze_entries_per_host','ev_random_per_host','ev_random_rate'],
   S.rvm, v => { S.rvm = v; drawTable(); });
 
-function drawAll() { cfgLine(); tiles(); drawA1(); drawA2(); drawD1(); drawB(); drawTable(); }
+function drawAll() { cfgLine(); tiles(); drawA1(); drawD1(); drawA2(); drawBFct(); drawBDiag(); drawTable(); }
 drawAll();
 
 let rt;

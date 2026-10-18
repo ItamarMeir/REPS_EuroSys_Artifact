@@ -1,0 +1,42 @@
+{
+  "N": 4,
+  "gap_ps": 416856000,
+  "burst_bytes_each": 4194304,
+  "burst_estimate_ps": 83886080.0,
+  "total_span_ps": 1586112320.0,
+  "background_bytes": 118958424,
+  "bursts": [
+    {
+      "src": 0,
+      "dst": 512,
+      "start_ps": 0,
+      "size": 4194304,
+      "burst_index": 0,
+      "node_num": 0
+    },
+    {
+      "src": 0,
+      "dst": 512,
+      "start_ps": 500742080,
+      "size": 4194304,
+      "burst_index": 1,
+      "node_num": 1
+    },
+    {
+      "src": 0,
+      "dst": 512,
+      "start_ps": 1001484160,
+      "size": 4194304,
+      "burst_index": 2,
+      "node_num": 2
+    },
+    {
+      "src": 0,
+      "dst": 512,
+      "start_ps": 1502226240,
+      "size": 4194304,
+      "burst_index": 3,
+      "node_num": 3
+    }
+  ]
+}

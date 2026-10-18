@@ -53,3 +53,14 @@ experiments/**/*.html
 AGENTS.md
 code-review.md
 .history/
+
+# === Heavy experiment outputs: never commit (added) ===
+# Event traces, per-cell run dirs, compressed run bundles, old-result backups, scratch.
+experiments/**/traces/
+experiments/**/runs/
+experiments/**/*.csv.gz
+experiments/**/*.tar.gz
+experiments/**/_prev_*/
+experiments/**/temp/
+experiments/**/*.stdout
+experiments/**/*.log

@@ -1,0 +1,18 @@
+{
+  "N": 1,
+  "gap_ps": 0,
+  "burst_bytes_each": 16777216,
+  "burst_estimate_ps": 335544320.0,
+  "total_span_ps": 335544320.0,
+  "background_bytes": 25165824,
+  "bursts": [
+    {
+      "src": 0,
+      "dst": 512,
+      "start_ps": 0,
+      "size": 16777216,
+      "burst_index": 0,
+      "node_num": 0
+    }
+  ]
+}

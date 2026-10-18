@@ -78,10 +78,12 @@ assert (Q, ECN, CWND) == (101, (25, 76), 151), (Q, ECN, CWND)
 # Full B ladder -- exp30 is explicitly testing the memo's predicted B knee at 4,
 # so B=16 is kept (exp28/29 dropped it as "nothing resolvable above B=4").
 ARMS = ["reps_b1", "reps_b2", "reps_b4", "reps_b8", "reps_b16", "reps_b32",
-        "reps_b8_dual"]
+        "reps_b8_dual", "reps_b8_dual_cap"]
 # reps_b8_dual = same LB (freezing, reps_buffer_size=8) as reps_b8, but CC is
 # dual_mprdma_reps instead of mprdma (see base_flags below). Added to compare
 # the dual-window REPS+MPRDMA mechanism against plain MPRDMA at a fixed B.
+# reps_b8_dual_cap = same again, CC is dual_mprdma_reps_cap (v2: combined
+# safe+random cwnd capped at _maxwnd). See experiments/MODIFICATIONS.md.
 SEEDS = [42, 43, 44]
 
 # --- Part A design matrix ---------------------------------------------------
@@ -109,12 +111,18 @@ def base_flags(arm: str, *, part: str, size: int, seed: int,
     -skip_asy); b uses the static real kill: `-timed_fail_tor_uplinks FAIL_TOR
     f_uplinks` + `-timed_window 1 1` (permanent onset at t~0us, never
     recovers)."""
-    # "<arm>_dual" reuses <arm>'s LB/buffer flags unchanged and only swaps CC
-    # to dual_mprdma_reps -- every other flag below stays byte-identical to
-    # the plain-mprdma arm, so the comparison is CC-only, apples to apples.
-    is_dual = arm.endswith("_dual")
-    base_arm = arm[:-len("_dual")] if is_dual else arm
-    cc_algo = "dual_mprdma_reps" if is_dual else "mprdma"
+    # "<arm>_dual"/"<arm>_dual_cap" reuse <arm>'s LB/buffer flags unchanged and
+    # only swap CC -- every other flag below stays byte-identical to the
+    # plain-mprdma arm, so the comparison is CC-only, apples to apples.
+    if arm.endswith("_dual_cap"):
+        base_arm = arm[:-len("_dual_cap")]
+        cc_algo = "dual_mprdma_reps_cap"
+    elif arm.endswith("_dual"):
+        base_arm = arm[:-len("_dual")]
+        cc_algo = "dual_mprdma_reps"
+    else:
+        base_arm = arm
+        cc_algo = "mprdma"
     f = [
         "-connections_mapping", "-disable_trim",
         "-sack_threshold", "4000",

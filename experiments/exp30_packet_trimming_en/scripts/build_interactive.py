@@ -42,10 +42,15 @@ DUAL_CAP_COLOR = "#2563eb"
 DUAL_CAP_LABEL = "B=8 dual-window (cwnd-capped)"
 
 # NSCC buffer ladder -- same LB/buffer flags as reps_bN, CC is nscc instead of
-# mprdma (common30.base_flags). Magenta ramp, one colour per B, so NSCC series
-# never share a colour with the viridis MPRDMA ladder.
-NSCC_B_COLOR = {1: "#6b0f5c", 2: "#8e1a7a", 4: "#b02a97", 8: "#c026d3",
-                16: "#d946ef", 32: "#f0abfc"}
+# mprdma (common30.base_flags). Plasma ramp (purple->magenta->red->orange->
+# yellow) at the 6 B_LADDER positions -- a different, equally perceptually-
+# uniform colormap from the MPRDMA ladder's viridis (blue->green->yellow), so
+# no NSCC hex repeats an MPRDMA one, and with a wide hue sweep of its own
+# (unlike the former all-magenta ramp) so the 6 B values stay distinct from
+# each other too. Marker shape (set where B_SYMBOL is built below) also
+# varies per B within the NSCC ladder.
+NSCC_B_COLOR = {1: "#0d0887", 2: "#6a00a8", 4: "#b12a90", 8: "#e16462",
+                16: "#fca636", 32: "#f0f921"}
 
 
 def payload():
@@ -275,7 +280,7 @@ const SHAPES = ['circle-open','diamond-open','triangle-up-open','triangle-down-o
                 'cross-open','x-open','star-open'];
 const B_SYMBOL = Object.fromEntries(B_LADDER.map((b,i)=>[b, SHAPES[i]]));
 B_SYMBOL[DUAL_KEY] = 'star-open';   // unused by the 6-entry B ladder above
-NSCC_KEYS.forEach(k => { B_SYMBOL[k] = 'x-open'; });
+NSCC_KEYS.forEach((k, i) => { B_SYMBOL[k] = SHAPES[i]; });   // same shape as MPRDMA's same B
 const MiB = s => (s/1048576) + ' MiB';
 
 function theme() {
@@ -540,7 +545,7 @@ function cfgLine() {
     + '<code>-use_srv6 -paths 32</code> &middot; <code>-sender_cc_algo mprdma</code> '
     + '(B ladder) plus extra CC arms, same LB/buffer/severity/'
     + 'exit_freeze flags, CC only &mdash; <em>' + DATA.DUAL_LABEL
-    + '</em> in red, <em>' + DATA.DUAL_CAP_LABEL + '</em> in blue, NSCC ladder (B=1..32) in magenta &middot; '
+    + '</em> in red, <em>' + DATA.DUAL_CAP_LABEL + '</em> in blue, NSCC ladder (B=1..32) in plasma, same marker shape per B as MPRDMA &middot; '
     + '<code>-q 101 -ecn 25 76 -cwnd 151</code> &middot; <code>-exit_freeze 200us</code> '
     + '(both parts) &middot; seeds 42/43/44 &middot; '
     + '<code>-disable_tor_ecn</code> omitted (paper-faithful)';

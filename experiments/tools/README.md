@@ -53,7 +53,7 @@ n,time_ns,src_id,event,ev,ev_src,ecn,seqno,fresh,buf_size,frozen_mode,frozen_ev,
 | `src_id` | flow's `_node_num` |
 | `event` | `SEND` \| `RTX` \| `RTS` \| `ACK` \| `NACK` \| `FREEZE` \| `UNFREEZE` |
 | `ev` | EV put on the wire (send kinds) or echoed (ACK/NACK); the RTO-triggering EV for FREEZE; `-1` for UNFREEZE |
-| `ev_src` | draw provenance. A property of the entropy *draw*, so only `SEND`/`RTX`/`RTS` carry one: `explore` \| `random` \| `fresh_pop` \| `frozen_pop` \| `pxr_random` \| `pxr_pop`. Empty on `ACK`/`NACK`/`FREEZE`/`UNFREEZE`, and on LB algorithms that record no provenance. |
+| `ev_src` | draw provenance. A property of the entropy *draw*, so only `SEND`/`RTX`/`RTS` carry one: `explore` \| `random` \| `fresh_pop` \| `frozen_pop` \| `frozen_pop_valid` \| `frozen_pop_stale` \| `pxr_random` \| `pxr_pop`. `frozen_pop_valid`/`frozen_pop_stale` only appear for `DUAL_MPRDMA_REPS`/`DUAL_MPRDMA_REPS_CAP` (`dual-window-reps-mprdma`'s valid-vs-stale frozen-pop split); every other algo keeps emitting plain `frozen_pop`. (Fixed 2026-10: these two values logged as empty string before the `evSourceStr()` switch in `uec.cpp` was updated to include them — traces captured before the fix will show `ev_src=""` on every dual-window frozen-mode draw instead.) Empty on `ACK`/`NACK`/`FREEZE`/`UNFREEZE`, and on LB algorithms that record no provenance. |
 | `ecn` | `1`/`0` on ACK, `-1` otherwise |
 | `seqno` | packet sequence number (PSN) — for SEND/RTX/RTS, the packet's own PSN; for ACK/NACK, the PSN it acknowledges/nacks (`-1` for FREEZE/UNFREEZE) |
 | `fresh` / `buf_size` | `getNumberFreshEntropies()` / `getSize()` (post-event) |
@@ -144,3 +144,48 @@ python reps_event_viewer.py events.csv -o trace.html
 ```bash
 python -m unittest test_reps_event_viewer.py -v
 ```
+
+## `-log_dual_cwnd` — dual-window per-window cwnd trace
+
+Separate from the event trace above (no viewer, just a plain CSV) — logs the two independent
+MPRDMA-AIMD windows (`dual-window-reps-mprdma`'s `_win_safe`/`_win_random`) over time, for
+`-sender_cc_algo dual_mprdma_reps` / `dual_mprdma_reps_cap`. No other logger captures them
+separately: `-log_cwnd` only logs the combined `_cwnd`, and `-log_reps_state`/`-log_reps_events`
+carry no cwnd at all. See `experiments/MODIFICATIONS.md` § `dual-cwnd-log` for the full design
+rationale (hook point, units, filtering).
+
+```bash
+htsim_uec ... \
+  -load_balancing_algo freezing -sender_cc_only -sender_cc_algo dual_mprdma_reps_cap \
+  -log_dual_cwnd dualcwnd.csv -log_dual_cwnd_src 14
+```
+
+- `-log_dual_cwnd_src <id>` is repeatable; `<id>` is `_srcaddr` (the physical host/source
+  address — exp28/29/30's "affected" grouping convention), *not* `_node_num` (though
+  `node_num` is also a column, for cross-referencing against `-log_reps_state_src`/
+  `-log_reps_events_src`, which do use `_node_num`). Omitting the filter logs every
+  dual-window source — fine on a small topology, a firehose on exp30's 1024-host fabric.
+- Logged from `syncDualCwnd()`, the single choke point every cwnd mutation (AI, NACK/MD,
+  RTO-path decrease, idle reset, unfreeze reset, init) already calls through — so the trace
+  captures all of them, not just per-ACK state.
+
+CSV schema:
+
+```
+time_us,srcaddr,node_num,flow_id,safe_cwnd,random_cwnd,maxwnd,safe_in_flight,random_in_flight,frozen
+```
+
+| column | meaning |
+|---|---|
+| `time_us` | simulation time in microseconds |
+| `srcaddr` / `node_num` | physical source address / flow-creation-order index (see above) |
+| `flow_id` | flow id, for disambiguating multiple flows from the same source |
+| `safe_cwnd` / `random_cwnd` | the two windows' congestion windows, in **raw bytes** (not divided into packets — per-ACK AI increments are sub-packet and would truncate to 0 otherwise) |
+| `maxwnd` | the sender's `_maxwnd` ceiling at that instant, for computing `(safe_cwnd+random_cwnd)/maxwnd` |
+| `safe_in_flight` / `random_in_flight` | each window's in-flight bytes |
+| `frozen` | `1` if FREEZING's frozen mode is active at that instant, else `0` |
+
+No combined-cwnd column (trivially `safe_cwnd + random_cwnd`). To correlate a cwnd change with
+*why* (FREEZE/UNFREEZE/RTX/NACK), run `-log_reps_events` for the same source alongside this and
+join on `time_us` (both columns are the same unit, unlike the `time_ns`-labelled-`time_us`
+quirk in the two REPS-buffer loggers above).

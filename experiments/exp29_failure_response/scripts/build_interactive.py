@@ -25,6 +25,12 @@ DUAL_ARM = "reps_b8_dual"
 DUAL_COLOR = "#dc2626"
 DUAL_LABEL = "B=8 dual-window"
 
+# dual-window-cwnd-cap (v2) at B=8 -- same again, CC is dual_mprdma_reps_cap
+# (combined safe+random cwnd capped at _maxwnd, vs v1's independent ceilings).
+DUAL_CAP_ARM = "reps_b8_dual_cap"
+DUAL_CAP_COLOR = "#2563eb"
+DUAL_CAP_LABEL = "B=8 dual-window (cwnd-capped)"
+
 
 def load():
     fct = pd.read_csv(D / "fct.csv")
@@ -46,6 +52,9 @@ def payload():
         "DUAL_ARM": DUAL_ARM,
         "DUAL_COLOR": DUAL_COLOR,
         "DUAL_LABEL": DUAL_LABEL,
+        "DUAL_CAP_ARM": DUAL_CAP_ARM,
+        "DUAL_CAP_COLOR": DUAL_CAP_COLOR,
+        "DUAL_CAP_LABEL": DUAL_CAP_LABEL,
         "fct": fct.to_dict(orient="records"),
         "resp": resp.to_dict(orient="records"),
         "ts": ts.to_dict(orient="records"),
@@ -187,7 +196,7 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
 
 <div class="wrap">
 <header>
-  <p class="eyebrow">REPS EuroSys artifact &middot; exp29 &middot; 162 runs</p>
+  <p class="eyebrow">REPS EuroSys artifact &middot; exp29 &middot; 189 runs</p>
   <h1>REPS failure-response, zoomable</h1>
   <p class="lede">One ToR loses <strong>F</strong> of its 32 spine uplinks for
   t&nbsp;&isin;&nbsp;(100,&nbsp;200)&nbsp;&micro;s, then they recover. Every affected host
@@ -196,9 +205,10 @@ footer { margin-top: 64px; padding-top: 20px; border-top: 1px solid var(--hairli
   click a B in the legend to hide it.</p>
   <p class="cfg"><code>fat_tree_1024_1os_2t_400g</code> &middot; tornado 16&nbsp;MiB
   &middot; <code>-use_srv6 -paths 32</code> &middot; <code>-sender_cc_algo mprdma</code>
-  (B ladder) plus one <code>dual_mprdma_reps</code> point at B=8, same LB/buffer/
-  failure/exit_freeze flags, CC only &mdash; <em>B=8 dual-window</em> in red
-  &middot; <code>-q 101 -ecn 25 76 -cwnd 151</code> &middot;
+  (B ladder) plus two dual-window points at B=8, same LB/buffer/failure/exit_freeze
+  flags, CC only &mdash; <em>B=8 dual-window</em> (v1, independent per-window
+  ceilings) in red, <em>B=8 dual-window (cwnd-capped)</em> (v2, combined
+  safe+random budget) in blue &middot; <code>-q 101 -ecn 25 76 -cwnd 151</code> &middot;
   <code>-exit_freeze 100&nbsp;&micro;s</code> (each freeze holds for the full
   100&nbsp;&micro;s timeout &mdash; not recovery-aware &mdash; then force-thaws)
   &middot; failure window = one min-RTO &middot; seeds 42/43/44 at every point
@@ -285,6 +295,9 @@ const B_LADDER = DATA.B_LADDER, BC = DATA.B_COLOR;
 // lineTrace() need no changes -- only the arm-string lookup differs (below).
 const DUAL_KEY = 'dual';
 BC[DUAL_KEY] = DATA.DUAL_COLOR;
+// dual-window-cwnd-cap (v2): same pseudo-"B" pattern, second key.
+const DUAL_CAP_KEY = 'dualcap';
+BC[DUAL_CAP_KEY] = DATA.DUAL_CAP_COLOR;
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
 function theme() {
@@ -306,10 +319,22 @@ const CFG = { displaylogo: false, responsive: true,
 
 // Plotly.react can measure a mid-layout container and collapse the plot; a
 // resize on the next frame settles it.
+// ===== FIXED (legend state persistence): Plotly.react rebuilds trace objects
+// from scratch on every redraw (metric/size switch etc), so a legend-click
+// hide (B=1 unchecked) was lost whenever the chart redrew. Carry prior
+// visibility forward by legendgroup before handing the new traces to React. =====
 function draw(id, traces, layout) {
+  const el = document.getElementById(id);
+  if (el && el.data) {
+    const visByGroup = {};
+    el.data.forEach(tr => { if (tr.legendgroup) visByGroup[tr.legendgroup] = tr.visible; });
+    traces.forEach(tr => { if (tr.legendgroup && visByGroup[tr.legendgroup] !== undefined)
+      tr.visible = visByGroup[tr.legendgroup]; });
+  }
   Plotly.react(id, traces, layout, CFG);
   requestAnimationFrame(() => Plotly.Plots.resize(document.getElementById(id)));
 }
+// ===== END FIXED =====
 
 const rgba = (hex, a) => {
   const n = parseInt(hex.slice(1), 16);
@@ -370,7 +395,10 @@ const DIAG_METRICS = {
   'random-EV draws/host (flow)':{src:'flow', col:'ev_random_per_host'},
   'random-EV rate draws/pkt (flow)':{src:'flow', col:'ev_random_rate'},
 };
-const armFor = b => b === DUAL_KEY ? DATA.DUAL_ARM : `reps_b${b}`;
+const armFor = b => b === DUAL_KEY ? DATA.DUAL_ARM
+  : b === DUAL_CAP_KEY ? DATA.DUAL_CAP_ARM : `reps_b${b}`;
+const labelFor = b => b === DUAL_KEY ? DATA.DUAL_LABEL
+  : b === DUAL_CAP_KEY ? DATA.DUAL_CAP_LABEL : 'B='+b;
 function sevRows(spec) {
   if (spec.src === 'fct')
     return b => affF.filter(r => r.ef===100 && r.arm===armFor(b)).sort((x,y)=>x.F-y.F);
@@ -382,12 +410,12 @@ function sevRows(spec) {
 }
 function drawVsF(divId, spec, label) {
   const rows = sevRows(spec), traces = [];
-  for (const b of [...B_LADDER, DUAL_KEY]) {
+  for (const b of [...B_LADDER, DUAL_KEY, DUAL_CAP_KEY]) {
     const rs = rows(b); if (!rs.length) continue;
     const xs = rs.map(r=>r.F), ys = rs.map(r=>r[spec.col]);
     const cis = rs.map(r=>r[spec.col+'_ci'] ?? 0);
     traces.push(ciBand(xs, ys, cis, b));
-    traces.push(lineTrace(xs, ys, b, b === DUAL_KEY ? DATA.DUAL_LABEL : 'B='+b));
+    traces.push(lineTrace(xs, ys, b, labelFor(b)));
   }
   const t = theme();
   t.xaxis.title = '# failed ToR0 spine uplinks (F)';
@@ -410,14 +438,14 @@ const TS_METRICS = {
 let tsF = 8, tsMetric = 'RTOs / host / 10µs';
 function drawTS() {
   const col = TS_METRICS[tsMetric], traces = [];
-  for (const b of [...B_LADDER, DUAL_KEY]) {
+  for (const b of [...B_LADDER, DUAL_KEY, DUAL_CAP_KEY]) {
     const rs = TS.filter(r => r.ef===100 && r.F===tsF && r.arm===armFor(b))
       .sort((x,y)=>x.t_us-y.t_us);
     if (!rs.length) continue;
     traces.push({ x: rs.map(r=>r.t_us), y: rs.map(r=>r[col]),
-      name: b === DUAL_KEY ? DATA.DUAL_LABEL : 'B='+b,
+      name: labelFor(b), legendgroup: 'B' + b,
       mode:'lines', type:'scatter',
-      line:{color:BC[b], width:2, dash: b === DUAL_KEY ? 'dash' : 'solid'} });
+      line:{color:BC[b], width:2, dash: (b === DUAL_KEY || b === DUAL_CAP_KEY) ? 'dash' : 'solid'} });
   }
   const t = theme();
   t.xaxis.title = 't (µs)'; t.yaxis.title = tsMetric;
@@ -461,14 +489,16 @@ function tiles() {
     return r ? Math.round(r.ev_random_per_host) : '?';
   };
   const dualP99_31 = p99(31, DATA.DUAL_ARM);
+  const dualCapP99_31 = p99(31, DATA.DUAL_CAP_ARM);
   const T = [
     ['B resolvable on FCT', 'none', 'good', 'p50 / p99 / max, every F 1–31'],
     ['affected p99 FCT, F=31', `${p99(31,'reps_b8')} µs`, 'bad', 'healthy baseline 356 µs'],
     ['random-EV draws / host', `${evr(8,'reps_b1')} vs ${evr(8,'reps_b8')}`, '',
      'B=1 vs B=8 at F=8 — the one place B splits'],
     ['fastLossRecovery', 'never', 'good', 'fast_loss = 0 at every F'],
-    ['dual-window vs mprdma, F=31', `${dualP99_31} vs ${p99(31,'reps_b8')} µs`, '',
-     'p99 FCT, B=8 both arms — same CI/failure setup, CC only'],
+    ['dual-window v1/v2 vs mprdma, F=31',
+     `${dualP99_31} / ${dualCapP99_31} vs ${p99(31,'reps_b8')} µs`, '',
+     'p99 FCT, B=8 all three — same CI/failure setup, CC only'],
   ];
   document.getElementById('tiles').innerHTML = T.map(([k,v,c,s]) =>
     `<div class="tile"><p class="k">${k}</p><div class="v ${c}">${v}</div>

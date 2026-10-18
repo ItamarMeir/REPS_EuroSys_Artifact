@@ -116,6 +116,25 @@ Architecture + results: [`experiments/exp13_papers_reps_repro/RESULTS_DIAGNOSTIC
 | `htsim/sim/uec.cpp` | Static defs + parsers + `applyHostLBOverride` (~L125); `_dispatchLB` helper (~L185); constructor calls `_dispatchLB(_load_balancing_algo)` (~L635) | always compiled |
 | `htsim/sim/datacenter/main_uec.cpp` | CLI flag `-host_lb_overrides` parser (~L290); `applyHostLBOverride()` call after `setSrc()` (~L1233) | `-host_lb_overrides` |
 
+### `[ADDED: per-host-cwnd]` — gated by `-host_cwnd_overrides "host:cwnd_bytes,host:cwnd_bytes,..."`
+
+Per-host cwnd override, mirroring `per-host-lb`'s map pattern. Each `UecSrc` whose `_srcaddr` is in
+the map gets `setCwnd()`/`setMaxWnd()` called with the overridden byte value right after
+`applyHostLBOverride()`; every other host keeps the global `-cwnd`. Added to isolate a CONSTANT-CC
+cwnd sweep (which never updates cwnd after init, so the window is frozen at whatever this sets) to
+one subset of hosts without under/over-provisioning the rest of the run's flows. Used in meeting
+2026-10-06 C1's SoL degraded-cell cwnd smoke test: the 32 ToR0 hosts swept 32-1024 packets while the
+other 992 hosts stayed at a fixed non-bottlenecking cwnd. Verified to produce numbers identical to an
+earlier global-cwnd sweep at every matching value (no cross-interference on this topology), confirming
+the isolation is correct and changes nothing when it doesn't need to.
+Results: [`experiments/meeting_06_10_26/C1/RESULTS.md`](meeting_06_10_26/C1/RESULTS.md) (SoL section).
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `_per_host_cwnd_override` static map; `_parseHostCwndString()`; `applyHostCwndOverride()` | `-host_cwnd_overrides` |
+| `htsim/sim/uec.cpp` | Static def + parser + `applyHostCwndOverride()` (calls `setCwnd`/`setMaxWnd`) | always compiled |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI flag `-host_cwnd_overrides` parser; `applyHostCwndOverride()` call after `applyHostLBOverride()` in the connection-setup loop | `-host_cwnd_overrides` |
+
 ### `[FIX: target-qdelay-respect-cli]` — applied 2026-05-30
 
 `UecSrc::initNsccParams()` at `htsim/sim/uec.cpp:195` unconditionally
@@ -344,6 +363,17 @@ a step-through event log (like the hand-driven teaching simulator it mirrors).
 
 Feature-off cost is one null-pointer test at each of 7 call sites — no allocation, no formatting.
 
+**Fix (2026-10, found while investigating dual-window trim-enabled behavior):** the
+`EvSource`→string table (`evSourceStr()`, `uec.cpp` next to `logRepsEvent()`) never gained
+cases for `EVSRC_FROZEN_POP_VALID`/`EVSRC_FROZEN_POP_STALE` when `dual-window-reps-mprdma`
+added them — every dual-window frozen-mode draw logged `ev_src=""` instead of
+`frozen_pop_valid`/`frozen_pop_stale`. Cosmetic only (the string is never read back into
+control flow — `evSourceToWindowTag()` switches on the enum directly, not this string), but it
+silently broke any analysis joining on `ev_src` for `DUAL_MPRDMA_REPS`/`DUAL_MPRDMA_REPS_CAP`
+traces. Fixed by adding the two missing `case`s. Traces captured before this fix show the old
+blank-string behavior; no data pipeline (dashboards, aggregators) ever read this column, so
+nothing downstream needed re-running.
+
 Tool + docs: [`experiments/tools/README.md`](tools/README.md)
 
 | File | Lines / what | Gate |
@@ -375,6 +405,26 @@ observed depth on the exp21/exp22 tornado workload peaks at 89, so no elision oc
 (a mutation of the popped EV, of the tail behind it, and of an ACK's appended value are each
 caught): a `fresh_pop` draw must take the current front and leave the tail untouched, and an
 ACK that grows the FIFO must append exactly the acked EV at the back.
+
+### `[ADDED: c3-burst-host-id]` — `srcaddr` finish-line field + trace column
+
+`_node_num` (`_global_node_count++`, assigned once per `UecSrc` *object*) identifies a flow,
+not a physical host — under a multi-flow-per-host workload (several `.cm` lines for the same
+host with `-connections_mapping`, e.g. meeting_06_10_26/C3's bursty sender) each flow gets a
+different `_node_num`, so neither the flow-finish printf nor `-log_reps_events_src`'s allow-list
+(both keyed on `_node_num`) can identify "this host" once it has more than one flow. `_srcaddr`
+(set via `setSrc()`) is the physical host id and is stable across a host's flows. Prints it on
+the finish line and appends it as a trailing column (after `fifo`) on the event trace, so
+post-hoc analysis can regroup a host's several flows without relying on `.cm` generation order.
+Purely additive on both: existing C1/C2 traces/finish lines are unaffected and don't need
+re-running; `reps_event_viewer.py` accepts the old (17-col), `fifo`-only (18-col), and new
+(19-col, `fifo`+`srcaddr`) trace widths.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.cpp` | `" srcaddr " << _srcaddr` appended to the flow-finish `cout` line; `srcaddr` column appended to `logRepsEvent()`'s `fprintf` | always compiled (finish line); `-log_reps_events` (trace column) |
+| `htsim/sim/datacenter/main_uec.cpp` | `srcaddr` appended to the event-trace CSV header line | `-log_reps_events` |
+| `experiments/tools/reps_event_viewer.py` | `EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR`; `parse_row`/`load_events` accept all 3 widths; `srcaddr` added to the parsed event dict (`None` for older traces) | n/a |
 
 | File | Lines / what | Gate |
 |------|-------------|------|
@@ -903,3 +953,82 @@ ordering bias favoring the safe window when one ACK covers both windows.
 | `htsim/sim/uec.h` | `Sender_CC`: `DUAL_MPRDMA_REPS_CAP` appended (after `DUAL_MPRDMA_REPS`); new method decls `updateCwndOnAck_DualMPRDMA_Cap`/`maybeIdleReset_Cap`; new fields `_dual_cap_max_sum_ratio_x1000`/`_dual_cap_last_over_cap_at` | `-sender_cc_algo dual_mprdma_reps_cap` |
 | `htsim/sim/uec.cpp` | New functions `updateCwndOnAck_DualMPRDMA_Cap`/`maybeIdleReset_Cap` (rules #4-#6); new `initNscc` branch (rule #1); `dualWindowBlocked()` dispatches to the capped idle-reset internally when this algo is active; every `_sender_cc_algo == DUAL_MPRDMA_REPS` plumbing check widened to also recognize this algo (admission gate, EV/window tagging, invariant assert, `syncDualCwnd`, NACK dispatch, the RTS-retransmit-bug guard in `sendRtxPacket`, the CC dispatch switch's no-op case) — audited exhaustively, one site (`processEv_freezing`'s unfreeze reset) deliberately *not* widened per rule #3; finish-line print extended with the two new diagnostic fields | `-sender_cc_algo dual_mprdma_reps_cap` |
 | `htsim/sim/datacenter/main_uec.cpp` | `dual_mprdma_reps_cap` branch in `-sender_cc_algo` parsing; compatibility guard condition widened to include this algo | own branch, shared guard |
+
+## `dual-cwnd-log` — per-window cwnd time series for `dual-window-reps-mprdma`/`-cwnd-cap`
+
+New CSV logger, banner `// ===== ADDED (dual-cwnd-log) =====`. No existing logger captured
+`_win_safe.cwnd`/`_win_random.cwnd` separately over time — `-log_cwnd` only logs the combined
+`_cwnd`, `-log_reps_state`/`-log_reps_events` don't carry cwnd at all, and the one place both
+windows print separately was a `cout` debug line gated on `_debug_flowid`, which no CLI flag
+ever wired up. Hooked into `syncDualCwnd()` (the single choke point every dual-window cwnd
+mutation already calls through — init, AI, NACK/MD, RTO-path decrease, idle reset, unfreeze
+reset — verified exhaustively against every `_win_safe.cwnd =`/`w.cwnd =` assignment site)
+rather than the ACK/NACK call sites, so RTO and idle-reset dynamics are captured, not just
+per-ACK state. Values are raw bytes, not divided into packets — per-ACK AI increments are
+sub-packet and would truncate to 0 under `-log_cwnd`'s `cwnd / get_avg_pktsize()` convention.
+Filtered on `_srcaddr` (physical src id — what every experiment's "affected" grouping uses),
+not `_node_num` — the same distinction `reps-metrics-per-host-key` above already had to fix
+once for a different counter table. Shared by both `DUAL_MPRDMA_REPS` and
+`DUAL_MPRDMA_REPS_CAP` (`syncDualCwnd()` already early-returns for every other algo, so the new
+log call inherits that gate with no extra condition). Feature-off cost: one pointer null-check
+per `syncDualCwnd()` call, no allocation, no formatting — same overhead class as `-log_cwnd`.
+
+CSV columns: `time_us,srcaddr,node_num,flow_id,safe_cwnd,random_cwnd,maxwnd,safe_in_flight,
+random_in_flight,frozen`. No combined-cwnd column (trivially `safe_cwnd + random_cwnd`).
+`frozen` reads `circular_buffer_reps->isFrozenMode()` at the same instant, so a trace can be
+read standalone to see cwnd behavior across a freeze/unfreeze cycle; join on `time_us` against
+a `-log_reps_events` run of the same source for FREEZE/UNFREEZE/RTX/NACK event context.
+
+Schema documented in [`experiments/tools/README.md`](tools/README.md) alongside
+`-log_reps_state`/`-log_reps_events`.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `static FILE* _dual_cwnd_log;` / `static std::set<uint32_t> _dual_cwnd_log_srcs;` (next to the existing `-log_cwnd` statics) | `-log_dual_cwnd` |
+| `htsim/sim/uec.cpp` | Static defs; one `fprintf` block inside `syncDualCwnd()`, after the existing `_sender_cc_algo` early-return and the `_cwnd = ...` sync line | `-log_dual_cwnd` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `-log_dual_cwnd <file>` (opens file, writes header), `-log_dual_cwnd_src <id>` (repeatable, empty = log all dual-window sources) | own flags |
+
+### `[ADDED: reps-soft-replay]` — gated by `-reps_soft_replay`
+
+Continuous randomize<->safety knob on `nextEntropy_freezing()`'s **non-frozen fallback branch
+only** (the `isEmpty() || getNumberFreshEntropies() == 0` case, which today is always a pure
+random draw). With probability `_exp_avg_ecn` (the flow's own existing per-ACK ECN EWMA, α=0.125
+-- original NSCC code, not another addition's state), the fallback instead replays a
+recently-seen EV from the ring instead of drawing fully random. With probability `1 -
+_exp_avg_ecn`, draws random as today -- a continuous blend, not a threshold, so there's no
+flip-flop point.
+
+Replay candidate selection cycles `_soft_replay_cursor` over EV-id space `[0, _no_of_paths)`
+(bounded, cheap under SRv6 where EV<->path is 1:1), checking each candidate against
+`containsEntropy()` -- an **original** `CircularBufferREPS` method that matches a slot's stored
+value whether or not that slot is still marked valid, so it finds EVs the buffer has forgotten
+were ever "fresh" as well as ones still formally in the fresh pool. Skips any candidate this
+feature's own new per-EV scoreboard (`_soft_replay_ev_ecn`) last saw ECN-marked, so a replayed EV
+that comes back ECN-marked drops out of the eligible set on its own -- the mechanism can't get
+stuck repeatedly replaying a path it already knows is congested. If every candidate is skipped,
+or the buffer is completely empty (`getSize() == 0`), falls through to the original unconditional
+random draw unchanged.
+
+**Depends only on original code** (`CircularBufferREPS::containsEntropy`/`getSize`,
+`UecSrc::_exp_avg_ecn`/`average_ecn_bytes()`) -- does not read, require, or depend on any other
+addition's gated state (e.g. `ev-health-counter`'s `_ev_last_ecn_state` or `freezing-pxr`'s
+`_pxr_excluded_evs`). This feature's own scoreboard (`_soft_replay_ev_ecn`) is a new,
+self-contained field with the same shape as `ev-health-counter`'s for reference only, not a
+dependency on it -- works standalone with no other addition's flag set.
+
+**Scope (v1)**: non-frozen mode only. `processEv_freezing`, `add()`, `resetBuffer()`, and
+`explore_counter` are all untouched -- frozen-mode behavior, the unfreeze reset, and the
+forced-random explore burst after unfreeze are all byte-identical to vanilla FREEZING regardless
+of this flag. No original line was deleted or edited in place; every change is a new branch
+reached only through the new `if (_reps_soft_replay ...)` guard.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `static bool _reps_soft_replay;` (next to `_nscc_wtd_enabled`); per-source `uint16_t _soft_replay_cursor` + `vector<bool> _soft_replay_ev_ecn` (next to `_crt_path`) | `-reps_soft_replay` |
+| `htsim/sim/uec.cpp` | Static def; scoreboard update in `processAck()` right after the existing `average_ecn_bytes()` call; replay branch inside `nextEntropy_freezing()`'s non-frozen fallback, ahead of the original random-draw line | `-reps_soft_replay` |
+| `htsim/sim/datacenter/main_uec.cpp` | CLI: `-reps_soft_replay` (bool flag, no argument); `-reps_soft_replay_fixed_p <val>` (validation ablation -- fixes `P` instead of using `_exp_avg_ecn`, e.g. `1.0` for an always-attempt-replay arm); `-reps_soft_replay_no_filter` (validation ablation -- disables the ECN-skip filter) | own flags |
+
+**Validation ablation knobs**: `-reps_soft_replay_fixed_p`/`-reps_soft_replay_no_filter` exist
+solely to let the brainstorm plan's 4-arm comparison (baseline / fixed-P=1 / EWMA-gated /
+EWMA-gated-no-filter) reuse one code path instead of four separate implementations. Both are
+no-ops unless `-reps_soft_replay` is also passed.

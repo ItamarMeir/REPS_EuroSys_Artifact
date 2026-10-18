@@ -33,10 +33,26 @@ EXP30 = Path("/workspace/experiments/exp30_packet_trimming_en/scripts")
 RUNS = Path("/workspace/experiments/exp30_packet_trimming_en/runs/a1/16777216")
 TRACE_DIR = Path("/tmp/c1_traces")
 DC_DIR = Path("/workspace/htsim/sim/datacenter")
-OUT = Path("/workspace/experiments/meeting_06_10_26/C1/data/c1_occupancy.csv")
+C1 = Path("/workspace/experiments/meeting_06_10_26/C1")
 BS = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 TOR0 = 32
 SIZE = 16777216
+
+# Set from --cc at the bottom; cell_flags/cross_check/OUT all key off this.
+CC = "mprdma"
+
+
+def arm_name(b):
+    return f"reps_b{b}" + ("_nscc" if CC == "nscc" else "")
+
+
+def cc_label():
+    return "MPRDMA" if CC == "mprdma" else "NSCC"
+
+
+def out_path():
+    return C1 / cc_label() / "data" / "c1_occupancy.csv"
+
 
 sys.path.insert(0, str(EXP30))
 import common30 as C  # noqa: E402
@@ -44,11 +60,11 @@ import common30 as C  # noqa: E402
 
 def cell_flags(x, b):
     kw = dict(n=x, r=(0.5 if x else None))
-    return C.base_flags(f"reps_b{b}", part="a1", size=SIZE, seed=42, **kw)
+    return C.base_flags(arm_name(b), part="a1", size=SIZE, seed=42, **kw)
 
 
 def trace_path(x, b):
-    return TRACE_DIR / f"x{x}_b{b}.csv"
+    return TRACE_DIR / f"{CC}_x{x}_b{b}.csv"
 
 
 def finish_lines(text):
@@ -64,11 +80,11 @@ def run_trace(x, b):
     cmd = ([str(DC_DIR / "htsim_uec")] + cell_flags(x, b)
            + ["-log_reps_events", str(tp), "-log_reps_events_max", "200000000"] + srcs)
     proc = subprocess.run(cmd, cwd=str(DC_DIR), capture_output=True, text=True, timeout=7200)
-    out_path = TRACE_DIR / f"x{x}_b{b}.stdout.txt"
-    out_path.write_text(proc.stdout + proc.stderr)
+    stdout_path = TRACE_DIR / f"{CC}_x{x}_b{b}.stdout.txt"
+    stdout_path.write_text(proc.stdout + proc.stderr)
     if proc.returncode != 0:
         raise RuntimeError(f"htsim_uec rc={proc.returncode} for x{x} B{b}")
-    return tp, out_path
+    return tp, stdout_path
 
 
 def summarise(tp):
@@ -121,18 +137,38 @@ def summarise(tp):
 
 def cross_check(x, b, stdout_path):
     """Trace-run finish lines must equal the committed C1 stdout for the same cell."""
-    committed = RUNS / f"x{x}_ef200" / "seed42" / f"reps_b{b}" / "stdout.txt"
+    committed = RUNS / f"x{x}_ef200" / "seed42" / arm_name(b) / "stdout.txt"
     got = finish_lines(stdout_path.read_text(errors="replace"))
     want = finish_lines(committed.read_text(errors="replace"))
     return got == want, len(got), len(want)
 
 
 def cell(x, b):
-    tp, out_path = run_trace(x, b)
-    same, ng, nw = cross_check(x, b, out_path)
-    s = summarise(tp)
-    size_b = os.path.getsize(tp)
-    os.remove(tp)  # explicit path; trace-only scratch file
+    """Reuse the gz trace + paired stdout.txt from view_traces.py if both already
+    exist under <CC>/traces/ (one sim per cell total, instead of a second sim
+    here on top of view_traces.py's). Falls back to running fresh otherwise."""
+    traces_dir = C1 / cc_label() / "traces"
+    gz = traces_dir / f"16MiB_x{x}_B{b}.csv.gz"
+    stdout_sidecar = traces_dir / f"16MiB_x{x}_B{b}.stdout.txt"
+    scratch = TRACE_DIR / f"{CC}_x{x}_b{b}_reuse.csv"
+    TRACE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if gz.exists() and stdout_sidecar.exists():
+        import gzip as _gzip
+        import shutil as _shutil
+        with _gzip.open(gz, "rb") as src, open(scratch, "wb") as dst:
+            _shutil.copyfileobj(src, dst)
+        same, ng, nw = cross_check(x, b, stdout_sidecar)
+        s = summarise(scratch)
+        size_b = os.path.getsize(scratch)
+        os.remove(scratch)
+    else:
+        tp, stdout_path = run_trace(x, b)
+        same, ng, nw = cross_check(x, b, stdout_path)
+        s = summarise(tp)
+        size_b = os.path.getsize(tp)
+        os.remove(tp)  # explicit path; trace-only scratch file
+
     row = dict(scenario="healthy" if x == 0 else "32 ToR0 uplinks at 50%", x=x, B=b,
                crosscheck_match=same, finish_lines_trace=ng, finish_lines_committed=nw,
                trace_mb=round(size_b / 1e6, 1), **s)
@@ -140,9 +176,10 @@ def cell(x, b):
 
 
 def write_rows(rows):
-    OUT.parent.mkdir(parents=True, exist_ok=True)
+    out = out_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
     keys = list(rows[0].keys())
-    with open(OUT, "w", newline="") as f:
+    with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
         w.writerows(rows)
@@ -150,9 +187,11 @@ def write_rows(rows):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--cc", choices=["mprdma", "nscc"], default="mprdma")
     ap.add_argument("--cell", nargs=2, type=int, metavar=("X", "B"))
     ap.add_argument("--all", action="store_true", help="all 18 cells, 4 at a time")
     args = ap.parse_args()
+    CC = args.cc
     if args.cell:
         r = cell(*args.cell)
         print(r)

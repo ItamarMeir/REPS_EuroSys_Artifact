@@ -106,6 +106,71 @@ class TestFilters(unittest.TestCase):
         self.assertFalse(truncated2)
 
 
+class TestLoadEventsFiltered(unittest.TestCase):
+    """load_events with filters must match the old load-then-filter pattern."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmpdir, "events.csv")
+        rows = GOOD_ROWS + [
+            "13,50.0,1,SEND,0,random,-1,0,0,0,0,-1,0,0,10,1,0:0:0|0:0:0|0:0:0|0:0:0"
+        ]
+        write_csv(self.path, rows)
+        self.unfiltered = load_events(self.path)
+
+    def test_src_filter_matches_old_two_step_pattern(self):
+        got = load_events(self.path, srcs=[1])
+        want = filter_events(self.unfiltered, srcs=[1])
+        self.assertEqual(got, want)
+        self.assertEqual(len(got), 1)
+
+    def test_time_window_matches_old_two_step_pattern(self):
+        got = load_events(self.path, t0=20.0, t1=45.0)
+        want = filter_events(self.unfiltered, t0=20.0, t1=45.0)
+        self.assertEqual(got, want)
+        self.assertEqual(len(got), 5)
+
+    def test_combined_filter_matches_old_two_step_pattern(self):
+        got = load_events(self.path, t0=0.0, t1=100.0, srcs=[0])
+        want = filter_events(self.unfiltered, t0=0.0, t1=100.0, srcs=[0])
+        self.assertEqual(got, want)
+
+    def test_no_filters_is_byte_identical_to_old_signature(self):
+        # load_events(path) with no args must still behave exactly as before.
+        self.assertEqual(load_events(self.path), self.unfiltered)
+
+    def test_truncated_row_on_excluded_src_still_raises(self):
+        """A row that's malformed in the columns the cheap peek itself reads
+        (time_ns/src_id) -- here, simply too short to have those columns at
+        all -- must still raise, even though its src would be excluded. Only
+        a row that passes the peek and fails later (test above) gets skipped."""
+        bad_rows = GOOD_ROWS + ["13,50.0,1"]  # far too short, no src_id even reachable sanely
+        path = os.path.join(self.tmpdir, "truncated_other_src.csv")
+        write_csv(path, bad_rows)
+        with self.assertRaises(EventParseError) as ctx:
+            load_events(path, srcs=[0])
+        self.assertIn("line 14", str(ctx.exception))
+
+    def test_malformed_row_on_excluded_src_is_skipped_not_raised(self):
+        """A row malformed in slots (not time_ns/src_id) on a src the caller
+        doesn't want must not break loading a *different* src's view -- that
+        row is irrelevant to the requested filter. This is the one
+        intentional behavior change vs. load-then-filter (which parsed every
+        row, including this one, before discarding it)."""
+        bad_rows = GOOD_ROWS + [
+            # src=1, otherwise well-formed except an empty slots field
+            "13,50.0,1,SEND,0,random,-1,0,0,0,0,-1,0,0,10,1,"
+        ]
+        path = os.path.join(self.tmpdir, "bad_other_src.csv")
+        write_csv(path, bad_rows)
+        # Filtered to src=0: the bad src=1 row is never fully parsed, no raise.
+        events = load_events(path, srcs=[0])
+        self.assertEqual(len(events), 12)
+        # Unfiltered: the same bad row is still reached and still raises.
+        with self.assertRaises(EventParseError):
+            load_events(path)
+
+
 class TestMalformedRows(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -215,6 +280,62 @@ class TestVerify(unittest.TestCase):
         events = load_events(_fixture_path(rows))
         self.assertFalse(buffer_is_live(events))
         self.assertEqual(verify_events(events), [])
+
+    def test_fresh_pop_wrong_order_fails(self):
+        """remove_earliest_fresh() (buffer_reps.cpp) always pops a FIXED slot:
+        (head - fresh_before_pop) % max_size. Two valid slots (0 and 1);
+        earliest-fresh is slot 0, but this row pops slot 1 instead."""
+        rows = [
+            "1,0.0,0,ACK,5,,0,0,1,1,0,-1,1,0,10,0,5:1:1|0:0:0|0:0:0|0:0:0",
+            "2,10.0,0,ACK,7,,0,1,2,2,0,-1,2,0,10,0,5:1:1|7:1:1|0:0:0|0:0:0",
+            "3,20.0,0,SEND,7,fresh_pop,-1,2,1,2,0,-1,2,0,10,1,5:1:1|7:0:1|0:0:0|0:0:0",
+        ]
+        events = load_events(_fixture_path(rows))
+        violations = verify_events(events)
+        self.assertTrue(any("earliest-fresh order" in v for v in violations))
+
+    def test_fresh_pop_correct_order_passes(self):
+        """Same setup as above, but popping slot 0 (the actually-earliest
+        fresh entry) -- must NOT trigger the pop-order check."""
+        rows = [
+            "1,0.0,0,ACK,5,,0,0,1,1,0,-1,1,0,10,0,5:1:1|0:0:0|0:0:0|0:0:0",
+            "2,10.0,0,ACK,7,,0,1,2,2,0,-1,2,0,10,0,5:1:1|7:1:1|0:0:0|0:0:0",
+            "3,20.0,0,SEND,5,fresh_pop,-1,2,1,2,0,-1,2,0,10,1,5:0:1|7:1:1|0:0:0|0:0:0",
+        ]
+        events = load_events(_fixture_path(rows))
+        self.assertEqual(verify_events(events), [])
+
+    def test_ecn_marked_ack_must_not_write(self):
+        """ecn_echo() ? PATH_ECN : PATH_GOOD (uec.cpp:2086) -- an ECN-marked ACK
+        is PATH_ECN, so processEv_freezing's add() never runs. This fixture's
+        second row claims ecn=1 but adds a new valid slot anyway."""
+        rows = [
+            "1,0.0,0,ACK,5,,0,0,1,1,0,-1,1,0,10,0,5:1:1|0:0:0|0:0:0|0:0:0",
+            "2,10.0,0,ACK,9,,1,1,2,2,0,-1,2,0,10,0,5:1:1|9:1:1|0:0:0|0:0:0",
+        ]
+        events = load_events(_fixture_path(rows))
+        violations = verify_events(events)
+        self.assertTrue(any("ACK ecn=1 but slots snapshot changed" in v for v in violations))
+
+    def test_ecn_marked_ack_unchanged_passes(self):
+        rows = [
+            "1,0.0,0,ACK,5,,0,0,1,1,0,-1,1,0,10,0,5:1:1|0:0:0|0:0:0|0:0:0",
+            "2,10.0,0,ACK,9,,1,0,1,1,0,-1,1,0,10,0,5:1:1|0:0:0|0:0:0|0:0:0",
+        ]
+        events = load_events(_fixture_path(rows))
+        self.assertEqual(verify_events(events), [])
+
+    def test_rts_pop_violation_is_caught(self):
+        """RTS draws an EV same as SEND/RTX; the pop-location check must cover
+        it too (it didn't before this fix -- RTS was silently unchecked)."""
+        rows = [
+            "1,0.0,0,ACK,3,,0,0,1,1,0,-1,1,0,10,0,3:1:1|0:0:0|0:0:0|0:0:0",
+            "2,10.0,0,RTS,9,fresh_pop,-1,0,1,1,0,-1,1,0,10,1,3:1:1|0:0:0|0:0:0|0:0:0",
+        ]
+        events = load_events(_fixture_path(rows))
+        violations = verify_events(events)
+        self.assertTrue(any("RTS ev_src=fresh_pop" in v and "not found invalidated" in v
+                             for v in violations))
 
     def test_unfreeze_with_valid_slots_fails(self):
         rows = list(GOOD_ROWS)

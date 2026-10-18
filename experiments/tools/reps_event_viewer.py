@@ -41,6 +41,17 @@ FIFO_COLUMN = "fifo"
 EXPECTED_COLUMNS_WITH_FIFO = EXPECTED_COLUMNS + [FIFO_COLUMN]
 # ===== END ADDED (reps-fifo-trace) =====
 
+# ===== ADDED (c3-burst-host-id) =====
+# `srcaddr` appended after `fifo` (physical host id, stable across a host's
+# multiple flows -- `src_id`/_node_num is per-flow and doesn't identify the
+# host once it has more than one flow, e.g. C3's bursty sender). A trace
+# written before this column existed has neither `fifo` nor `srcaddr`, one
+# written after reps-fifo-trace but before this has `fifo` only, and a current
+# trace has both -- all three widths are accepted.
+SRCADDR_COLUMN = "srcaddr"
+EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR = EXPECTED_COLUMNS_WITH_FIFO + [SRCADDR_COLUMN]
+# ===== END ADDED (c3-burst-host-id) =====
+
 EVENT_KINDS = ["SEND", "RTX", "RTS", "ACK", "NACK", "FREEZE", "UNFREEZE"]
 
 POP_SOURCES = {"fresh_pop", "frozen_pop", "pxr_pop"}
@@ -110,14 +121,21 @@ def parse_fifo(raw, line_no):
     return out
 
 
+_ACCEPTED_WIDTHS = (len(EXPECTED_COLUMNS), len(EXPECTED_COLUMNS_WITH_FIFO),
+                    len(EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR))  # ===== ADDED (c3-burst-host-id) =====
+
+
 def parse_row(row, line_no):
-    if len(row) not in (len(EXPECTED_COLUMNS), len(EXPECTED_COLUMNS_WITH_FIFO)):
+    if len(row) not in _ACCEPTED_WIDTHS:
         raise EventParseError(
-            f"line {line_no}: expected {len(EXPECTED_COLUMNS)} or "
-            f"{len(EXPECTED_COLUMNS_WITH_FIFO)} fields, got {len(row)}"
+            f"line {line_no}: expected one of {_ACCEPTED_WIDTHS} fields, got {len(row)}"
         )
-    columns = (EXPECTED_COLUMNS_WITH_FIFO
-               if len(row) == len(EXPECTED_COLUMNS_WITH_FIFO) else EXPECTED_COLUMNS)
+    if len(row) == len(EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR):
+        columns = EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR
+    elif len(row) == len(EXPECTED_COLUMNS_WITH_FIFO):
+        columns = EXPECTED_COLUMNS_WITH_FIFO
+    else:
+        columns = EXPECTED_COLUMNS
     d = dict(zip(columns, row))
     event = {
         "n": _parse_int(d["n"], line_no, "n"),
@@ -139,6 +157,8 @@ def parse_row(row, line_no):
         "slots": parse_slots(d["slots"], line_no),
         # None when the column is absent (pre-fifo trace) or "-" (algo has no FIFO).
         "fifo": parse_fifo(d[FIFO_COLUMN], line_no) if FIFO_COLUMN in d else None,
+        # None for a trace written before this column existed. ===== ADDED (c3-burst-host-id) =====
+        "srcaddr": _parse_int(d[SRCADDR_COLUMN], line_no, SRCADDR_COLUMN) if SRCADDR_COLUMN in d else None,
     }
     if event["event"] not in EVENT_KINDS:
         raise EventParseError(
@@ -147,8 +167,12 @@ def parse_row(row, line_no):
     return event
 
 
-def load_events(path):
-    """Parse the full trace CSV into a list of event dicts (file order preserved)."""
+def load_events(path, t0=None, t1=None, srcs=None):
+    """Parse the trace CSV into event dicts. No filters: identical to the old
+    full parse. With t0/t1/srcs: filters during the parse, before building a
+    row's slots/fifo, so an excluded row's only cost is a time_ns/src_id peek
+    (a malformed row is still raised on, unless the malformed field itself
+    would have been skipped by the filter)."""
     events = []
     with open(path, "r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -156,14 +180,34 @@ def load_events(path):
             header = next(reader)
         except StopIteration:
             return events
-        if header not in (EXPECTED_COLUMNS, EXPECTED_COLUMNS_WITH_FIFO):
+        if header not in (EXPECTED_COLUMNS, EXPECTED_COLUMNS_WITH_FIFO,
+                          EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR):  # ===== ADDED (c3-burst-host-id) =====
             raise EventParseError(
-                f"line 1: unexpected header {header!r}, expected "
-                f"{EXPECTED_COLUMNS!r} or {EXPECTED_COLUMNS_WITH_FIFO!r}"
+                f"line 1: unexpected header {header!r}, expected one of "
+                f"{EXPECTED_COLUMNS!r}, {EXPECTED_COLUMNS_WITH_FIFO!r}, or "
+                f"{EXPECTED_COLUMNS_WITH_FIFO_AND_SRCADDR!r}"
             )
+        filtering = t0 is not None or t1 is not None or bool(srcs)
+        srcs_set = set(srcs) if srcs else None
         for line_no, row in enumerate(reader, start=2):
             if not row:
                 continue
+            if len(row) not in _ACCEPTED_WIDTHS:
+                raise EventParseError(
+                    f"line {line_no}: expected one of {_ACCEPTED_WIDTHS} fields, got {len(row)}"
+                )
+            if filtering:
+                # cheap peek: only time_ns (col 1) / src_id (col 2) -- same
+                # columns and same helpers parse_row uses, so a bad value here
+                # still raises with the correct line number either way.
+                time_ns = _parse_float(row[1], line_no, "time_ns")
+                src_id = _parse_int(row[2], line_no, "src_id")
+                if srcs_set is not None and src_id not in srcs_set:
+                    continue
+                if t0 is not None and time_ns < t0:
+                    continue
+                if t1 is not None and time_ns > t1:
+                    continue
             events.append(parse_row(row, line_no))
     return events
 
@@ -255,6 +299,7 @@ def verify_events(events):
     last_n_by_src = {}
     prev_slots_by_src = {}
     prev_event_by_src = {}
+    prev_fresh_by_src = {}
 
     for e in events:
         src = e["src_id"]
@@ -275,6 +320,7 @@ def verify_events(events):
             )
 
         prev_slots = prev_slots_by_src.get(src)
+        prev_fresh = prev_fresh_by_src.get(src)
         kind, ev_src = e["event"], e["ev_src"]
 
         # ===== ADDED (reps-fifo-trace) =====
@@ -319,9 +365,10 @@ def verify_events(events):
         if not check_buffer:
             prev_slots_by_src[src] = e["slots"]
             prev_event_by_src[src] = e
+            prev_fresh_by_src[src] = e["fresh"]
             continue
 
-        if kind in ("SEND", "RTX") and ev_src == "frozen_pop":
+        if kind in ("SEND", "RTX", "RTS") and ev_src == "frozen_pop":
             # remove_frozen() (buffer_reps.cpp) always sets isValid=false at the
             # slot it reads and unconditionally advances head_forzen_mode, even
             # when that slot was already invalid (the frozen read pointer walks
@@ -340,7 +387,7 @@ def verify_events(events):
                     f"row n={n}: {kind} ev_src=frozen_pop but EV {e['ev']} not found "
                     f"invalid at slot (frozen_head-1)%buf_size"
                 )
-        elif kind in ("SEND", "RTX") and ev_src in POP_SOURCES:
+        elif kind in ("SEND", "RTX", "RTS") and ev_src in POP_SOURCES:
             popped_slot = None
             if prev_slots is not None:
                 for i, (p, c) in enumerate(zip(prev_slots, e["slots"])):
@@ -352,14 +399,35 @@ def verify_events(events):
                     f"row n={n}: {kind} ev_src={ev_src} but popped EV {e['ev']} "
                     f"not found invalidated in slots"
                 )
+            # remove_earliest_fresh() (buffer_reps.cpp) pops a FIXED slot:
+            # (head - number_fresh_entropies) % max_size, using the fresh
+            # count from BEFORE this pop (prev_fresh, since SEND/RTX/RTS never
+            # move head) -- not "any invalidated slot with a matching value".
+            # This is the pop-ORDER invariant (earliest-valid-first), stronger
+            # than the "found somewhere" check above.
+            if ev_src == "fresh_pop" and prev_fresh is not None:
+                max_size = len(e["slots"])
+                if max_size:
+                    expected = (e["head"] - prev_fresh) % max_size
+                    if popped_slot is not None and popped_slot != expected:
+                        violations.append(
+                            f"row n={n}: {kind} ev_src=fresh_pop popped slot "
+                            f"{popped_slot} but earliest-fresh order requires slot "
+                            f"{expected} = (head {e['head']} - prev_fresh {prev_fresh}) "
+                            f"%% {max_size}"
+                        )
 
-        if kind in ("SEND", "RTX") and ev_src in DRAW_SOURCES:
+        if kind in ("SEND", "RTX", "RTS") and ev_src in DRAW_SOURCES:
             if prev_slots is not None and prev_slots != e["slots"]:
                 violations.append(
                     f"row n={n}: {kind} ev_src={ev_src} but slots snapshot changed"
                 )
 
-        if kind == "ACK" and e["ecn"] == 0 and e["frozen_mode"] == 0:
+        if kind == "ACK" and e["ecn"] == 0:
+            # add() (buffer_reps.cpp) runs identically whether or not the
+            # buffer is frozen -- processEv_freezing calls it for PATH_GOOD
+            # feedback in both branches (uec.cpp ~4418-4421) -- so this check
+            # is not restricted to frozen_mode==0.
             max_size = len(e["slots"])
             if max_size:
                 slot_idx = (e["head"] - 1) % max_size
@@ -369,6 +437,17 @@ def verify_events(events):
                         f"row n={n}: ACK ecn=0 EV {e['ev']} not found valid at "
                         f"slot (head-1)%max_size={slot_idx}"
                     )
+        elif kind == "ACK" and e["ecn"] == 1:
+            # ecn_echo() ? PATH_ECN : PATH_GOOD (uec.cpp:2086) -- an ECN-marked
+            # ACK is PATH_ECN, so processEv_freezing's two PATH_GOOD-gated
+            # add() branches never run and the slots must be unchanged. This
+            # is what protects C1's headline finding (3-5 valid EVs during
+            # healthy backlog): if a marked ACK also wrote, that count could
+            # be an artifact of this check never having been run.
+            if prev_slots is not None and prev_slots != e["slots"]:
+                violations.append(
+                    f"row n={n}: ACK ecn=1 but slots snapshot changed"
+                )
 
         if kind == "NACK":
             if prev_slots is not None and prev_slots != e["slots"]:
@@ -389,6 +468,7 @@ def verify_events(events):
 
         prev_slots_by_src[src] = e["slots"]
         prev_event_by_src[src] = e
+        prev_fresh_by_src[src] = e["fresh"]
 
     return violations
 
@@ -489,9 +569,15 @@ h1 { font-size: 16px; margin: 0 0 4px 0; }
 .cell.stale { background: var(--sunken); border-color: var(--border); color: var(--muted); }
 .cell.invalid { color: var(--cell-empty); border-style: dashed; background: transparent; }
 .cell.head::before { content: "\2191"; position: absolute; top: -18px; left: 50%; transform: translateX(-50%); color: var(--blue); font-weight: 900; }
-.cell.frozenhead::after { content: "fz \2193"; position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
-  color: var(--orange); font-size: 10px; font-weight: 700; }
+.cell.frozenhead::after { content: "next fz read \2193"; position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
+  color: var(--orange); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .cell.flash { box-shadow: 0 0 0 3px var(--accent, var(--blue)); }
+/* ===== ADDED (reps-freezing-display) ===== */
+/* The slot a draw just read, marked even when nothing else about it changed
+   (a stale frozen read leaves value and validity untouched, so .flash alone
+   would show nothing). Dashed to stay visually distinct from .flash. */
+.cell.readsrc { outline: 3px dashed var(--red); outline-offset: 1px; }
+/* ===== END ADDED (reps-freezing-display) ===== */
 .controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 button { border: 1px solid var(--border); background: var(--card); color: var(--ink); border-radius: 6px;
   padding: 6px 12px; cursor: pointer; font-size: 13px; }
@@ -627,6 +713,66 @@ function rttForRow(rowIdx) {
 }
 // ===== END ADDED (reps-event-trace) =====
 
+// ===== ADDED (reps-freezing-display): previous-row-by-src index =====
+// eventDelta/renderState used to assume EVENTS[i-1] is this row's own src
+// (true for every single-src page this tool has produced so far, but not
+// guaranteed on a multi-src page) and fell back to "initial" otherwise,
+// silently losing k/slot info. Precompute the real "previous row of the
+// same src_id" once, so every lookup is correct regardless of src mix.
+const prevSameSrc = new Array(EVENTS.length).fill(null);
+{
+  const lastBySrc = {};
+  EVENTS.forEach((e, i) => {
+    if (e.src_id in lastBySrc) prevSameSrc[i] = lastBySrc[e.src_id];
+    lastBySrc[e.src_id] = i;
+  });
+}
+const DRAW_EVENT_KINDS = ["SEND", "RTX", "RTS"];
+// Where this draw actually read from, and what it found there -- the exact
+// index remove_frozen()/remove_earliest_fresh() read BEFORE advancing its
+// pointer, not a recomputed-after-the-fact guess. Returns null for a
+// non-draw row or a random/explore draw (no slot read).
+function drawSourceInfo(i) {
+  const e = EVENTS[i];
+  if (!DRAW_EVENT_KINDS.includes(e.event)) return null;
+  const pi = prevSameSrc[i];
+  const prevE = pi !== null ? EVENTS[pi] : null;
+  if (e.ev_src === "random" || e.ev_src === "explore") {
+    return {slot: null, kind: e.ev_src, label: e.ev_src + " draw (no slot read)"};
+  }
+  if (e.ev_src === "fresh_pop") {
+    // head doesn't move on a draw; k = fresh BEFORE this pop = prev row's fresh.
+    const k = prevE ? prevE.fresh : null;
+    const maxSize = e.slots.length;
+    if (k === null || !maxSize) return {slot: null, kind: "fresh_pop", label: "earliest-fresh read (k unknown, no prior row)"};
+    const slot = ((e.head - k) % maxSize + maxSize) % maxSize;
+    return {slot, k, kind: "fresh_pop",
+      label: "earliest-fresh read slot " + slot + " (EV " + e.ev + ", was k=" + k + ")"};
+  }
+  if (e.ev_src === "frozen_pop" || e.ev_src === "frozen_pop_valid" || e.ev_src === "frozen_pop_stale") {
+    // remove_frozen() reads buffer[head_forzen_mode] THEN advances it, so the
+    // slot just read is the PREVIOUS row's frozen_head, not this row's
+    // (post-advance) frozen_head - 1. The getSize() modulus can change
+    // between pops, so "frozen_head - 1" silently gives the wrong slot
+    // exactly when that modulus just wrapped. Only fall back to the formula
+    // when there is no previous row for this src at all.
+    let slot;
+    if (prevE) {
+      slot = prevE.frozen_head;
+    } else {
+      const modulus = e.buf_size > 0 ? e.buf_size : e.slots.length;
+      slot = modulus ? (((e.frozen_head - 1) % modulus) + modulus) % modulus : 0;
+    }
+    const srcSlot = (prevE ? prevE.slots : e.slots)[slot];
+    const valid = srcSlot ? srcSlot.valid : null;
+    return {slot, kind: "frozen_pop", valid,
+      label: "frozen read slot " + slot + " (EV " + e.ev + ")" +
+        (valid === null ? "" : valid ? " · valid" : " · stale")};
+  }
+  return null; // e.g. "pxr_pop", "pxr_random" (freezing_pxr) -- not yet mapped
+}
+// ===== END ADDED (reps-freezing-display) =====
+
 // ===== ADDED (reps-event-crossref): FREEZE/UNFREEZE/RTX cause links =====
 // EV index: "<src_id>:<ev>" -> sorted row indices of SEND/RTX draws of that EV.
 // Used to find which outstanding packet's RTO triggered a given FREEZE
@@ -719,7 +865,18 @@ const fifoLive = EVENTS.some(e => e.fifo !== null);
 document.getElementById("bufferLegend").innerHTML = bufferLive
   ? 'Circular buffer: <span style="color:var(--green);font-weight:700;">green</span> = valid EV (usable) &middot; ' +
     '<span style="color:var(--muted);font-weight:700;">grey</span> = stale (consumed, value kept until overwritten) &middot; ' +
-    'dashed = slot never written'
+    'dashed = slot never written. Red dashed outline = the slot the current ' +
+    'row\'s draw actually read, even on a stale frozen read that changes nothing else. ' +
+    // ===== ADDED (reps-freezing-display) =====
+    '<br>Frozen reads use their own pointer, independent of <code>head</code>: it always ' +
+    'restarts at slot 0 when a freeze episode begins (not wherever <code>head</code> is), ' +
+    'walks indices 0..count-1 (count = slots written since the last reset, not necessarily ' +
+    'the full buffer -- so "next fz read" can point at a cell marked "never written" early ' +
+    'in an episode), never skips an invalid slot to find a valid one, and UNFREEZE wipes ' +
+    'the whole buffer (all slots, both pointers, the valid count). This is htsim\'s actual ' +
+    'rule, present since the paper authors\' original commit -- not a simplification and ' +
+    'not a viewer bug.'
+    // ===== END ADDED (reps-freezing-display) =====
   : (fifoLive
       ? 'Circular buffer: unused by this algorithm - it recycles EVs through the FIFO below.'
       : 'Circular buffer: this trace snapshots the bounded circular buffer, which only FREEZING drives. ' +
@@ -756,8 +913,17 @@ const seekLabel = document.getElementById("seekLabel");
 
 function eventDelta(i) {
   const e = EVENTS[i];
-  const prev = i > 0 && EVENTS[i-1].src_id === e.src_id ? EVENTS[i-1].slots : null;
-  if (!["SEND","RTX","ACK","NACK"].includes(e.event)) return "";
+  if (DRAW_EVENT_KINDS.includes(e.event)) {
+    // Precise, mechanism-correct text (which slot was actually read, and
+    // whether it was valid/stale) instead of a generic before/after diff --
+    // a stale frozen pop changes nothing in the snapshot, so diffSlots alone
+    // would just say "unchanged" and hide the read that just happened.
+    const info = drawSourceInfo(i);
+    return info ? info.label : "";
+  }
+  if (!["ACK","NACK"].includes(e.event)) return "";
+  const pi = prevSameSrc[i];
+  const prev = pi !== null ? EVENTS[pi].slots : null;
   if (prev === null) return "initial";
   return diffSlots(prev, e.slots);
 }
@@ -779,7 +945,7 @@ function diffSlots(prevSlots, curSlots) {
   return "slots changed";
 }
 
-function renderState(e, prevE) {
+function renderState(e, prevE, rowIdx) {
   document.getElementById("clock").textContent =
     "T+" + e.time_ns.toFixed(1) + " ns (" + (e.time_ns / 1000).toFixed(3) + " µs)";
   const badge = document.getElementById("modeBadge");
@@ -791,6 +957,13 @@ function renderState(e, prevE) {
     ["bufSize", e.buf_size], ["cwndPkts", e.cwnd_pkts], ["inFlight", e.inflight_pkts],
     ["frozenEv", e.frozen_ev],
   ];
+  // ===== ADDED (reps-freezing-display) =====
+  // "fresh" on a draw row is already post-pop; show the value the draw
+  // actually saw (k, read from the previous row) right next to it, since
+  // that -- not the post-pop fresh -- is what decided which slot got read.
+  const drawInfo = drawSourceInfo(rowIdx);
+  if (drawInfo && "k" in drawInfo) fields.push(["kBeforeDraw", drawInfo.k]);
+  // ===== END ADDED (reps-freezing-display) =====
   // ===== ADDED (reps-fifo-trace): FIFO depth, only for algorithms that use it =====
   if (e.fifo !== null) {
     const elided = e.fifo.reduce((a, x) => a + (x.elided || 0), 0);
@@ -829,7 +1002,14 @@ function renderState(e, prevE) {
     c.className = "cell" + (s.valid ? " valid" : (everWritten ? " stale" : " invalid"));
     if (i === e.head) c.className += " head";
     if (e.frozen_mode && i === e.frozen_head) c.className += " frozenhead";
-    if (["SEND","RTX","ACK","NACK"].includes(e.event) && prevE) {
+    // ===== ADDED (reps-freezing-display) =====
+    // A stale frozen read changes nothing .flash below would detect (the
+    // slot was already invalid and stays invalid, same value) -- mark the
+    // exact slot drawSourceInfo says was read, independent of whether the
+    // snapshot actually changed, so a stale read is still visible.
+    if (drawInfo && drawInfo.slot === i) c.className += " readsrc";
+    // ===== END ADDED (reps-freezing-display) =====
+    if (["SEND","RTX","RTS","ACK","NACK"].includes(e.event) && prevE) {
       const pslot = prevE.slots[i];
       if (pslot && (pslot.valid !== s.valid || pslot.value !== s.value)) {
         c.className += " flash";
@@ -906,8 +1086,8 @@ function html_escape(s) {
 function render() {
   if (!EVENTS.length) return;
   const e = EVENTS[idx];
-  const prevE = idx > 0 ? EVENTS[idx - 1] : null;
-  renderState(e, prevE && prevE.src_id === e.src_id ? prevE : null);
+  const pi = prevSameSrc[idx];
+  renderState(e, pi !== null ? EVENTS[pi] : null, idx);
   seek.value = idx;
   seekLabel.textContent = (idx + 1) + " / " + EVENTS.length;
   document.querySelectorAll(".log-row.current").forEach(el => el.classList.remove("current"));
@@ -1100,7 +1280,7 @@ def main(argv=None):
               file=sys.stderr)
 
     try:
-        events = load_events(args.csv_path)
+        events = load_events(args.csv_path, t0=args.t0, t1=args.t1, srcs=args.src)
     except EventParseError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1108,8 +1288,6 @@ def main(argv=None):
         # Unreadable/missing trace is a normal user error, not a crash.
         print(f"error: cannot read {args.csv_path}: {exc.strerror or exc}", file=sys.stderr)
         return 1
-
-    events = filter_events(events, t0=args.t0, t1=args.t1, srcs=args.src)
 
     if args.verify:
         violations = verify_events(events)

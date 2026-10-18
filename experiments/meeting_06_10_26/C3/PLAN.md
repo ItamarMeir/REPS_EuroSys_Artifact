@@ -1,18 +1,18 @@
-# C3: scaling with B up to 256
+# C3: does claim 1 hold without constant backlog? (bursty sender)
 
-**Source**: task l.41 (run large buffers up to 256 to check scaling); Gabriel 63:14-63:31 ("to understand the scaling laws; the effect may only show at large sizes").
+(Renamed from C4 -- the original C3, "B up to 256; scaling," is already answered by C2:
+C2's own B ladder already runs 1..256 with the same measurement set (split, failed-EV
+drain, FCT), so a separate experiment added nothing. C3's slot was freed up and this
+bursty-sender question took it.)
 
-**Scenario**: same as C2 (exp30 a2, 4 MiB, trim off), B in {64,128,256}, on the same Y axis as the C2 ladder.
+**Source**: pending l.35 (test whether bursty traffic changes the effect of buffer size); open question l.30 (does the 1-2 valid EVs claim hold when send rate is not always above ACK rate); Chen 57:44 ("maybe we need a bursty process, not always backlogged"), 64:22; Chen 61:09 (randomly pause between packets).
 
-**Constraints found in code**:
-- `-reps_buffer_size` accepts any integer (`main_uec.cpp:926`); `CircularBufferREPS` has no hard cap.
-- `-use_srv6 -paths 32`: only 32 distinct EVs. Entries beyond 32 duplicate EVs, so the buffer above 32 is not independent. Caveat on every B>32 point.
-- Trace `slots` field grows linearly with B (`uec.cpp` ~453-460). Comment near `uec.cpp:408` says exp23 went up to 64; verify 256 writes correctly and that the viewer grid (`reps_event_viewer.py` `.buffer-grid`) stays usable.
+**Why**: C1 and C2 are all backlogged. Chen's point: a non-backlogged sender may let good EVs accumulate, changing what B does.
 
-**Measurements**: as C2 (split, drain metric, FCT). Valid-count distribution as C1 at these B.
+**Scenario**: on/off source (random bursts and gaps) on healthy fabric, B in {2,8}. Start with 2 and 8; widen only if an effect appears.
 
-**Work**:
-1. One short 256-slot trace: confirm slot count and `fresh` are sane.
-2. Check the viewer renders 256 cells, or add a summary view instead of a grid.
+**Implementation**: no bursty generator found yet in the repo. Check `experiments/workloads/` first (work item). If absent, prefer a generator producing on/off `.cm` (connection-matrix) start times or sizes, which needs no C++ change. If a C++ change is needed, it gets an ADDED banner and a `MODIFICATIONS.md` row.
 
-**Pass / fail**: a clear B-dependent trend in drain or FCT above the seed CI at B>=64 supports Gabriel's scaling idea. No trend = report flat.
+**Measurements**: valid-count distribution (C1 method) during bursts and gaps separately; FCT.
+
+**Pass / fail**: if valid count rises above 2 during gaps and B>2 then changes FCT, claim 1 is limited to backlog. Otherwise claim 1 extends to bursty traffic.

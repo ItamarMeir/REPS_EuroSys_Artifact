@@ -163,6 +163,19 @@ REPS_EuroSys_Artifact/
 
 ---
 
+## Companion repo: thesis results
+
+Separate GitHub repo [`ItamarMeir/Thesis_Itamar_BGU_Networking`](https://github.com/ItamarMeir/Thesis_Itamar_BGU_Networking) (private), local clone `C:\git_repos\Thesis_Itamar_BGU_Networking`. **Output-only**: holds the thesis-facing interactive plots (self-contained `.html`) from exp28 onward and the 2026-10-06 meeting items, in its `REPS Buffer/` folder. No simulator code, no raw data.
+
+- **This repo stays source of truth.** Flow is one-way: regenerate plots here, commit here, then `.\sync_from_sim.ps1` in the thesis repo copies them, packs each page's `DATA` blob (gzip+base64 inside the same `.html`, ~15x smaller), and rewrites its `SOURCES.md` with this repo's commit hash.
+- **Only touch the thesis repo when the user asks** (e.g. "publish to the thesis repo", "sync the plots"). Never edit its `REPS Buffer/` files or `SOURCES.md` by hand.
+- Sync from a clean tree (script refuses a dirty tree without `-Force`). Commit here first so the hash in `SOURCES.md` reproduces the plots.
+- New experiment page: add a row to the `$map` in the thesis repo's `sync_from_sim.ps1`.
+- Work in one repo per session (cwd = that repo); add the other via `/add-dir` only for the sync.
+- Our `.gitignore` ignores `experiments/**/*.html`, so interactive pages never reach this repo's remote; the thesis repo is where they are published.
+
+---
+
 ## Building
 
 ```bash
@@ -307,6 +320,7 @@ The full recipe is in `experiments/RUNNING_EXPERIMENTS.md`. Short version:
 | Single seed, claiming a trend | Differences vanish on rerun | Sweep ≥ 3–5 seeds, plot 95% CI |
 | Committed raw `runs/` dir | Repo bloat (200+ files, 45 MB) | Compress to `runs.tar.gz` first |
 | Modifying `artifact_scripts/` or `artifact_results/` | Corrupts the paper's original artifact | Leave those directories alone |
+| Looking for published interactive plots in this repo | `experiments/**/*.html` is gitignored, so pages are not on this remote | They live in the thesis repo (see "Companion repo: thesis results"); sync only on user request |
 
 ---
 
@@ -375,3 +389,6 @@ banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCH
 | `fail-src-paths` | `-fail_src_paths <src> <count>` | For one source host only, physical SRv6 path indices `[0,count)` are dead: a packet drawn onto them is `free()`d at emit (== first-hop failed Pipe), sender still arms the RTO. Scoped to one src by construction (no shared fabric pipe is per-path AND per-source). Static, whole-sim. No behavior change when flag absent. exp30 Part B. |
 | `dual-window-reps-mprdma` | `-sender_cc_algo dual_mprdma_reps` (requires `-load_balancing_algo freezing`) | Two independent MPRDMA-AIMD windows per flow: `_win_safe` gates/updates from REPS-buffer EVs verified valid at pop time, `_win_random` from unverified EVs (random draws, explore bursts, stale frozen pops). EV selection unchanged (still `nextEntropy_freezing`); only cwnd admission/update is split and re-attributed by trust tier. Each window gets its own independent `_maxwnd` ceiling (combined in-flight can run up to ~2x a single-window MPRDMA ceiling — see the `-cap` v2 row below). See `experiments/MODIFICATIONS.md` for full design notes. |
 | `dual-window-cwnd-cap` | `-sender_cc_algo dual_mprdma_reps_cap` (requires `-load_balancing_algo freezing`) | v2 of `dual-window-reps-mprdma`: same window/EV plumbing (reused via widened dispatch conditions, not duplicated), but enforces `_win_safe.cwnd + _win_random.cwnd <= _maxwnd` (a combined budget) instead of each window getting its own full ceiling — fixes that mechanism's confirmed cause of running far higher ECN/RTO than plain MPRDMA at the same B. Implemented as new, parallel functions by explicit user request; every original `dual-window-reps-mprdma` function is untouched (verified byte-identical output). See `experiments/MODIFICATIONS.md` for full design notes. |
+| `dual-cwnd-log` | `-log_dual_cwnd <file> [-log_dual_cwnd_src <id>]` | Per-window cwnd time series for `dual-window-reps-mprdma`/`-cwnd-cap` — no prior logger captured `_win_safe`/`_win_random` separately (`-log_cwnd` only logs the combined `_cwnd`). Hooked into `syncDualCwnd()`, the single choke point every cwnd mutation (AI, NACK/MD, RTO decrease, idle reset, unfreeze reset, init) already calls through, so it captures all of them, not just per-ACK state. Raw bytes (not packets, to avoid truncating sub-packet AI increments), filtered on `_srcaddr` (physical src id, not `_node_num`). Schema in `experiments/tools/README.md`. |
+| `reps-soft-replay` | `-reps_soft_replay` | Continuous randomize<->safety knob for `nextEntropy_freezing()`'s non-frozen fallback (buffer empty / no fresh entropies). With probability `_exp_avg_ecn` (original per-flow ECN EWMA), replays a recently-seen EV from the ring (`containsEntropy()`, matches stale slots too) instead of a pure random draw, skipping candidates this feature's own new per-EV ECN scoreboard (`_soft_replay_ev_ecn`) last saw marked. Depends only on original `UecSrc`/`CircularBufferREPS` members — no other addition's flag required. Frozen mode untouched (v1 scope). No behavior change when flag absent. |
+| `per-host-cwnd` | `-host_cwnd_overrides` | Per-host cwnd override (mirrors `per-host-lb`'s map pattern), for isolating a CONSTANT-CC cwnd sweep to a host subset without perturbing the rest of the run. meeting 2026-10-06 C1 SoL. |

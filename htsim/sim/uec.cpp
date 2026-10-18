@@ -336,6 +336,35 @@ void UecSrc::applyHostLBOverride() {
 }
 // ===== END ADDED (per-host-lb) =========================================
 
+// ===== ADDED (per-host-cwnd) ============================================
+std::map<uint32_t, mem_b> UecSrc::_per_host_cwnd_override;
+
+bool UecSrc::_parseHostCwndString(const std::string& spec) {
+    // Format: "0:38400,1:38400,...,31:38400" (cwnd in bytes)
+    _per_host_cwnd_override.clear();
+    std::string s = spec;
+    while (!s.empty()) {
+        size_t comma = s.find(',');
+        std::string pair = (comma == std::string::npos) ? s : s.substr(0, comma);
+        size_t colon = pair.find(':');
+        if (colon == std::string::npos) return false;
+        uint32_t host_id = std::stoul(pair.substr(0, colon));
+        mem_b cwnd_b = (mem_b)std::stoull(pair.substr(colon + 1));
+        _per_host_cwnd_override[host_id] = cwnd_b;
+        if (comma == std::string::npos) break;
+        s = s.substr(comma + 1);
+    }
+    return true;
+}
+
+void UecSrc::applyHostCwndOverride() {
+    auto it = _per_host_cwnd_override.find(_srcaddr);
+    if (it == _per_host_cwnd_override.end()) return;
+    setCwnd(it->second);
+    setMaxWnd(it->second);
+}
+// ===== END ADDED (per-host-cwnd) ========================================
+
 // REPS-buffer instrumentation file + set of source ids to log. Off by default.
 FILE* UecSrc::_reps_state_log = nullptr;
 std::set<uint32_t> UecSrc::_reps_state_log_srcs;
@@ -468,7 +497,7 @@ void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvS
     // is deliberately the same expression the pre-existing -log_reps_state log
     // uses (where it is mislabelled "time_us"), so the two files line up exactly.
     fprintf(_reps_events_log,
-            "%lu,%.3f,%u,%s,%d,%s,%d,%ld,%d,%d,%d,%d,%d,%d,%u,%u,%s,%s\n",
+            "%lu,%.3f,%u,%s,%d,%s,%d,%ld,%d,%d,%d,%d,%d,%d,%u,%u,%s,%s,%u\n", // ===== ADDED (c3-burst-host-id): trailing %u =====
             (unsigned long)++_reps_events_rows,
             (double)now / 1000.0,
             _node_num,
@@ -486,7 +515,8 @@ void UecSrc::logRepsEvent(const char* kind, int ev, int ecn, uint64_t seqno, EvS
             (unsigned)(_cwnd / get_avg_pktsize()),
             (unsigned)(_in_flight / get_avg_pktsize()),
             slots_str.c_str(),
-            fifo_str.c_str()); // ===== ADDED (reps-fifo-trace) =====
+            fifo_str.c_str(), // ===== ADDED (reps-fifo-trace) =====
+            _srcaddr); // ===== ADDED (c3-burst-host-id) =====
 }
 // ===== END ADDED (reps-event-trace) =====
 
@@ -1611,6 +1641,17 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              " ev_valid " << RM(_srcaddr).ev_valid <<    // ===== ADDED (c1-ev-source-split) =====
              " ev_stale " << RM(_srcaddr).ev_stale <<    // ===== ADDED (c1-ev-source-split) =====
              " fast_loss " << RM(_srcaddr).fast_loss_entries <<  // ===== ADDED (timed-failure) =====
+             // ===== ADDED (c3-burst-host-id) =====
+             // _node_num (embedded in _nodename above, "uecSrc <N>") is assigned once
+             // per UecSrc OBJECT, i.e. per flow -- under a multi-flow-per-host workload
+             // (e.g. C3's bursty sender, several .cm lines for the same host with
+             // -connections_mapping) every burst gets a different _node_num, so it does
+             // NOT identify the physical host. _srcaddr does (stable across a host's
+             // flows, set via setSrc()). Printing it here lets post-hoc analysis regroup
+             // a host's several finish lines back together without relying on .cm
+             // generation order.
+             " srcaddr " << _srcaddr <<
+             // ===== END ADDED (c3-burst-host-id) =====
              endl;
         // ===== ADDED (dual-window-reps-mprdma) =====
         // Runtime proof of the predictor/actual-draw invariant: must print 0
