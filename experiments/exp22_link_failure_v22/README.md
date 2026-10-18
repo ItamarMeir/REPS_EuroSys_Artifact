@@ -64,7 +64,7 @@ All 60 runs are in `data/exp22_flows.csv` (60,852 flow rows; 1024 flows per cell
 - **`reps` (unbounded deque) is the best non-oracle algorithm** under failures: about 12% lower mean and 20% lower p99 than FREEZING B=8 under NSCC. The mechanism was not isolated here.
 - **`path_static` only finishes 926 of 1024 flows**: flows pinned (before failures are known) to a path crossing a failed link never complete. Its mean and p99 cover finished flows only and are not comparable to the others.
 - **`oblivious64`** has the worst p99 under NSCC (390 us).
-- Per-ACK buffer logs (host 0, NSCC, `data/buf_*.csv`) carry `frozen_mode`, `frozen_ev` and `trigger_ev` columns, and `events_*.csv` / `trace_*.html` show the freeze events for seed 42. These were not summarised here; read them to see which EV triggered each freeze.
+- Per-ACK buffer logs (host 0, NSCC, `data/buf_*.csv`) carry a `frozen_mode` column, and the seed-42 event traces (`data/events_*.csv`, with `frozen_mode` and `frozen_ev`) and `trace_*.html` viewers show the freeze events. These were not summarised here.
 
 ## How to Run
 

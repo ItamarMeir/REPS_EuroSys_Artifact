@@ -5,11 +5,11 @@ Not a measurement study: a set of smoke and correctness tests for the SRv6 subst
 | Test | What it checks |
 |---|---|
 | T0, T4 | SRv6 smoke; 4-path baseline FCT |
-| T1, T7, T8 | PATH_RR / PATH_RANDOM / PATH_STATIC give the same FCT with and without SRv6 (e.g. 33.72 us for PATH_RR) |
+| T1, T7, T8 | PATH_RR / PATH_RANDOM / PATH_STATIC give the same result with and without SRv6 (single flow 33.72 us for T1 and T7; T8 is a 16-flow tornado, first finish 185.7 us in both) |
 | T2, T3a-c | Pinning EV to path 0 and failing exactly that link stalls the flow; failing a different link does not (33.72 us, baseline) |
 | T4a, T4b, T4d | Failing one of four paths slows the flow to 170-241 us |
 | T5, T6 | ECMP comparison. T5 (ECMP, path 0 failed) also stalls, so it is weaker evidence than the script's "PASS". T6 shows ECMP+SRv6 tornado finishing at 339.7 us vs 184.5 us for plain ECMP; the script does not flag this |
 | T9 | Retransmissions obey SRv6: a 2-path failure still completes (533.8 us) |
 | T10-T12 | K=16: all 64 paths reachable; failing path 0 stalls the pinned flow; failing an off-pod link does not |
 
-The "wrong-fail" tests rely on choosing links off both the forward path and the ECMP return path of flow 0 to 8; the comment block at the top of `run_tests.sh` records which links were verified safe. Used to validate SRv6 before exp21 onward.
+The "wrong-fail" tests rely on choosing links off both the forward path and the ECMP return path of flow 0 to 8; the comment block at the top of `run_tests.sh` records which links were verified safe. The same suite and its K=16 additions (T10-T12) are described, with the exp21/exp22 audit, in [`../SRV6_VALIDATION_REPORT.md`](../SRV6_VALIDATION_REPORT.md) (dated 2026-06-17, 21/21 PASS). That report treats T5 as a pass; reading the raw output, the ECMP flow in T5 also stalls, so it does not separate SRv6 from ECMP on its own.

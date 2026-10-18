@@ -154,7 +154,7 @@ Interactive dashboard:
 
 ## Results
 
-_768 runs, 0 fail: Part A (252 A1 + 216 A2, both flow sizes), Part B (300:
+_768 runs for the B ladder (a later `reps_b8_dual` arm adds 126 runs, so `runs.tar.gz` holds 894), 0 fail: Part A (252 A1 + 216 A2, both flow sizes), Part B (300:
 4 MiB full `F` grid 144 + 16 MiB full `F` grid 144 + a 12-run n=5 seed check
 on the `F=8` 16 MiB cell, §4). `data/resolvable.csv` is the numeric verdict._
 

@@ -114,7 +114,7 @@ experiments/
 |-- workloads/  tools/  test_srv6/        shared inputs, viewer, SRv6 tests
 ```
 
-A typical finished experiment contains `README.md`, `scripts/` (driver, aggregator, plotter), `data/` (tidy CSVs), `plots/`, and `runs.tar.gz`. Of those, only the README and scripts are committed.
+A typical finished experiment contains `README.md`, `scripts/` (driver, aggregator, plotter), `data/` (tidy CSVs), `plots/`, and `runs.tar.gz`. By policy only the README and scripts are committed (a few older data files and pages are tracked from before the policy).
 
 ## Future directions (not implemented)
 

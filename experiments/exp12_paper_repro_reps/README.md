@@ -1,5 +1,7 @@
 # exp12 — Reproduction of "Congestion Control for Spraying with Congested Paths"
 
+> **Superseded by [exp13](../exp13_papers_reps_repro/README.md).** exp13 found that `uec.cpp` reset `_target_Qdelay` to 6 us after CLI parsing, so every `-target_q_delay` in this experiment was silently ignored; the Paper 2 numbers below are therefore not valid. Kept for the record.
+
 This experiment reproduces the **REPS column** of every figure in:
 
 > **Barak Gerstein, Mark Silberstein, Isaac Keslassy.**

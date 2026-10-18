@@ -31,7 +31,7 @@ would spread traffic evenly across core switches at every time step and reduce F
 For tornado (`src_i → (src+8)%16`): `src_mod` gives offsets {0,1,2,3} for the 4 flows per
 source pod → perfectly balanced packet timing across all 4 core switches at every time slot.
 
-4 modes × 3 sizes (4/8/16 MiB) × 3 simulator seeds = **36 runs**
+4 modes × 3 sizes (4/8/16 MiB) × 3 simulator seeds = **36 runs** in the original design. The results below (and the data on disk, 72 runs) also cover larger sizes up to 1 GiB, so the full study is 4 modes x 6 sizes x 3 seeds = 72 runs.
 
 ---
 
