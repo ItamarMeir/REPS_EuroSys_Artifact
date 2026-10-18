@@ -236,11 +236,15 @@ policy is a two-step threshold, not a continuous function of severity — its
 value has to come from *when* it switches (transient/recovery latency after a
 degradation event), not from picking among B≥4. That question needs a
 dynamic (time-varying) failure experiment, which static K/severity sweeps
-can't answer — see exp29 (planned).
+can't answer — see [exp29](../exp29_failure_response/) (done: transient failure; B is unresolvable on FCT there, and the freeze timeout is the knob that matters).
+
+## Side study: soft-replay validation (not part of the Part 1/2 matrix)
+
+`scripts/run_soft_replay_validation.py` and `aggregate_soft_replay_validation.py` (data in `data/soft_replay_validation/metrics.csv`) validate the `reps-soft-replay` mechanism (see `../MODIFICATIONS.md`). They run on **NSCC**, not MPRDMA, at fixed B=8 over healthy, asym1, asym8, asym16, asym32 and asym4_r95, with four arms: baseline, `-reps_soft_replay` with fixed P=1.0, with P = ECN EWMA, and EWMA without the filter. The results are not comparable to, and are not mixed with, the Part 1/2 CSVs.
 
 ## Lineage
 
-Row 28 in [`../README.md`](../README.md). Builds on exp26/exp27
+Listed in [`../README.md`](../README.md). Builds on exp26/exp27
 (`fat_tree_1024_1os_2t_400g`, tornado, `-use_srv6 -paths 32`, MPRDMA, seed 42);
 adds one htsim diagnostic-counter patch (`metrics-counters`) and no new failure
 flags — the degradation is driven entirely by the pre-existing `-failed` /

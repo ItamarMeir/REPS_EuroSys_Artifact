@@ -1,7 +1,7 @@
 # exp14 — PATH_RR vs REPS on Tornado Workload
 
 **Added:** 2026-06-04
-**Status:** scripts ready; run `scripts/01_run_exp14.sh` to populate `data/`
+**Status:** complete (36 runs in `data/`, `fcts.csv`, 1 plot); re-run with `scripts/01_run_exp14.sh`
 
 ---
 

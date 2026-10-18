@@ -1,6 +1,6 @@
 # exp05 — Paper Workloads: Buffer Size & EV Domain Sweep
 
-**Status**: In progress.
+**Status**: Part A, Part B and Part C complete (findings below). The failure-injection arm (sev=1) is void: `-fail_link_target 0 0` does not hit a real link on the 2-tier topology, so sev=1 equals sev=0 (see Findings). No `scripts/` dir or `runs.tar.gz`; the three `fig_*.py` plot scripts sit at the top level.
 
 ---
 

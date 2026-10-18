@@ -37,7 +37,7 @@ Architecture: `CLAUDE.md § [ADDED: freezing-pxr]`.
 
 | Axis | Values |
 |---|---|
-| Algorithm | `freezing_pxr_b8` (exp23, 6 new runs) + `freezing_b8` (exp22 B=8 baseline) |
+| Algorithm | `freezing_pxr` at B = 1, 2, 4, 8, 16, 32, 64 (42 runs: 7 B x 2 CC x 3 seeds; the first batch was B=8 only, 6 runs) + `freezing_b8` (exp22 B=8 baseline, reused) |
 | CC modes | NSCC, Constant (linerate) |
 | Seeds | 42, 43, 44 |
 | Topology | K=16 fat tree, 1024 hosts, 400G, 3 tiers |
@@ -61,6 +61,10 @@ Architecture: `CLAUDE.md § [ADDED: freezing-pxr]`.
 
 FREEZING_PXR reduces **P50 by ~24%** and **P99 by ~31%** relative to FREEZING B=8, in both
 CC modes. The improvement is statistically clear across all 3 seeds.
+
+### Buffer size under path exclusion (all 42 runs, mean of 3 seeds, microseconds)
+
+PXR is flat across B: p99 is 245.8-249.2 us under NSCC (B=1 worst at 249.2, B=8 best at 245.8) and 231.8-233.7 us under CONSTANT; p50 is 223-224 us (NSCC) and 214 us (CONSTANT) at every B. Once failed EVs are excluded, buffer size no longer matters, so the B=8 comparison above is representative.
 
 ### Excluded-set size (host 0, seed 42, NSCC)
 
@@ -118,13 +122,13 @@ has few paths.
 exp23_freezing_pxr_v23/
 ├── README.md
 ├── scripts/
-│   ├── run_exp23.sh        — 6 new freezing_pxr_b8 runs
+│   ├── run_exp23.sh        — freezing_pxr runs (B sweep)
 │   ├── aggregate.py        — merges exp23 runs + exp22 B=8 baseline
 │   ├── plot_fct.py         — FCT bars + CDF
 │   └── plot_excluded.py    — excluded-set size over time
 ├── data/
-│   ├── exp23_flows.csv     — 12288 rows (12 combos × 1024 flows)
-│   └── buf_freezing_pxr_b8_nscc_s42.csv
+│   ├── exp23_flows.csv     — 43,008 rows (42 cells x 1024 flows)
+│   └── buf_freezing_pxr_b*_nscc_s42.csv  — host-0 buffer logs, one per B
 ├── plots/
 │   ├── fct_bars.png
 │   ├── fct_cdf.png
@@ -140,7 +144,7 @@ exp23_freezing_pxr_v23/
 # 1. Build (if needed)
 cd htsim/sim && make -j8 && cd datacenter && make -j8 && cd ../../..
 
-# 2. Run 6 new simulations
+# 2. Run the simulations
 bash experiments/exp23_freezing_pxr_v23/scripts/run_exp23.sh
 
 # 3. Aggregate (reads exp22 B=8 baseline from exp22/runs.tar.gz)
@@ -163,8 +167,7 @@ rm -rf experiments/exp23_freezing_pxr_v23/runs/
 - **Timer sweep**: the excluded set never clears in this experiment. A sweep over shorter
   windows `{5, 20, 50, 100} ms` would test whether the sliding timer is ever useful vs
   keeping exclusions permanently until flow end.
-- **B sweep**: exp22 swept B=1–64. Running FREEZING_PXR at B=1,4,16,64 would show whether
-  buffer size matters under path exclusion (hypothesis: it doesn't, since healthy-path coverage
-  is ensured by the exclusion mechanism rather than buffer diversity).
+- **B sweep (done)**: PXR at B=1..64 is flat on FCT (see Results), confirming that healthy-path
+  coverage comes from the exclusion mechanism, not buffer diversity.
 - **Saturation test**: a topology with very few paths (e.g. K=4, 4 paths) and many failures
   could trigger the |excluded| ≥ _no_of_paths saturation guard — untested so far.

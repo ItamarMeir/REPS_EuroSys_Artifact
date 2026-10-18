@@ -39,7 +39,7 @@ real kill, F in {0,1,2,4,8,16,24,31}); same 2 sizes (4 MiB, 16 MiB), same 8 arms
 (`reps_b1..b32`, `reps_b8_dual`, `reps_b8_dual_cap`), plus the NSCC buffer sweep
 (`reps_b{1,2,4,8,16,32}_nscc`, see below), same 3 seeds (42/43/44), same
 `fat_tree_1024_1os_2t_400g` / tornado / `-q 101 -ecn 25 76 -cwnd 151` / `-exit_freeze 200us`.
-~1,020 runs total for the MPRDMA/dual matrix; the NSCC sweep adds 756 runs (see below). The only flag difference anywhere in `common30.py::base_flags()` is the
+1,008 runs for the MPRDMA/dual matrix (8 arms x 126); the NSCC sweep adds 756 runs (see below). The only flag difference anywhere in `common30.py::base_flags()` is the
 absence of `-disable_trim`.
 
 ## NSCC buffer sweep
@@ -71,10 +71,7 @@ Outputs and legends:
   MPRDMA as hollow circles, dual-window as hollow triangles. Colour follows B.
 - `interactive.html`: NSCC ladder drawn in magenta, one series per B.
 
-Results: pending the sweep (see the status line below).
-
-**Status:** sweep in progress; results section to be filled once `aggregate30.py` has run on
-the complete set.
+Results: the sweep has run (126 runs per NSCC arm, 756 in total; the extra `reps_b64/128/256` cells in `data/fct.csv` come from the meeting C2/C3 follow-ups). The data is in `data/fct.csv`, `diagnostics.csv` and `resolvable.csv` with `cc = nscc`; a written summary of the NSCC ladder has not been added to this README yet.
 
 ## Regenerate
 
@@ -98,7 +95,7 @@ safe to resume after an interruption.
 
 ## Results
 
-**Complete: 1,020 runs, 0 failures** (Part A1 336, Part A2 288, Part B 384).
+**Complete: 1,008 MPRDMA/dual runs, 0 failures** (Part A1 336, Part A2 288, Part B 384), plus the 756-run NSCC ladder described above. (An earlier version of this line said 1,020; the three parts sum to 1,008.) `runs_pre_c1_backup/` and `runs_pre_warmup_backup/` hold earlier versions of the raw runs.
 
 **The freeze-gate hypothesis was only half right -- and the real answer is more interesting
 than "the bug is fixed".**

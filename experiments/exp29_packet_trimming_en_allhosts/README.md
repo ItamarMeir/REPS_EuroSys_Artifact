@@ -1,4 +1,9 @@
-# exp29_packet_trimming_en -- exp29 rerun with packet trimming enabled
+# exp29_packet_trimming_en_allhosts -- dashboard variant of exp29_packet_trimming_en
+
+**This directory runs no simulations.** It reuses the raw runs of [`../exp29_packet_trimming_en/`](../exp29_packet_trimming_en/) (its `aggregate29.py` reads `../exp29_packet_trimming_en/runs/micro`) and differs in two scripts only: `aggregate29.py` adds an `all` FCT group (p50/p90/p95/p99/max over every host, not just ToR0's affected senders) to `data/fct.csv`, and `build_interactive.py` draws its FCT panel from that `all` group. All other CSVs and the static PNGs are identical to the sibling's. The text below is a verbatim copy of the sibling's README and describes the experiment itself.
+
+---
+
 
 ## Purpose
 

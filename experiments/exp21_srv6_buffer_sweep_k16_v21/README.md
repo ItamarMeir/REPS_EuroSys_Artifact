@@ -24,6 +24,7 @@ fixed-linerate (CONSTANT) congestion control?
 | Label | LB algorithm | Buffer | SRv6 |
 |---|---|---|---|
 | `path_static` | PATH_STATIC (greedy oracle) | — | no |
+| `freezing_b1`, `freezing_b2`, `freezing_b4` | FREEZING | 1 / 2 / 4 | yes |
 | `freezing_b8` | FREEZING | 8 | yes |
 | `freezing_b16` | FREEZING | 16 | yes |
 | `freezing_b32` | FREEZING | 32 | yes |
@@ -33,7 +34,7 @@ fixed-linerate (CONSTANT) congestion control?
 
 CC modes: **NSCC** (`-sender_cc_algo nscc -cwnd 100`) and **CONSTANT** (`-sender_cc_algo constant -cwnd 1000`).
 
-**3 seeds** × 6 algorithms × 2 CC modes = **36 runs**.
+**3 seeds** × 10 algorithms (B=1/2/4/8/16/32/64, `reps`, `path_static`, `oblivious64`) × 2 CC modes = **60 runs** (the first 36 were the six algorithms above without B=1/2/4 and `oblivious64`; those were added later). One cell, `freezing_b1` / CONSTANT, has only 2 seeds in `data/exp21_flows.csv`, so the CSV holds 59 of the 60 8 MB cells.
 
 **`oblivious64`** (added 2026-08-25): `-load_balancing_algo oblivious` (pool size = 64,
 already set by the shared `-paths 64` flag) — per-packet uniform-random EV draw out of
@@ -49,7 +50,7 @@ Key flags: `-paths 64 -sender_cc_only -disable_tor_ecn -linkspeed 400000 -hop_la
 
 ## Results
 
-All 36 runs completed with 1024/1024 flows finished. 95% CIs computed via t-distribution over 3 seeds.
+All 59 CSV cells completed with 1024/1024 flows finished. 95% CIs computed via t-distribution over 3 seeds.
 
 ### NSCC mode
 
@@ -143,8 +144,9 @@ The experiment confirms that on a symmetric permutation workload at K=16:
    *skewed* or *incast* workload where specific paths are congested and the buffer's path
    diversity determines whether the algorithm escapes.
 
-3. **REPS should not be used when FREEZING is available** — it is consistently slower due to
-   stale deque history, confirming the exp01→exp02 motivation for the switch to FREEZING.
+3. **REPS is slightly slower than FREEZING here, but not because of stale deque history** —
+   that explanation was refuted (see Finding 2 and exp24/exp25). The cause is REPS's deterministic
+   first-window round-robin, and the FCT penalty shows up as a delayed queue drain at the tail.
 
 4. **Future work**: repeat with an unbalanced workload (e.g., random permutation, incast,
    or skewed CDF) to find the buffer size at which B=8 diverges from B=64. The tornado result
@@ -156,12 +158,13 @@ The experiment confirms that on a symmetric permutation workload at K=16:
 
 ```
 exp21_srv6_buffer_sweep_k16_v21/
-├── scripts/run_exp21.sh      driver (36 runs, idempotent)
+├── scripts/run_exp21.sh      driver (60 runs, idempotent)
 ├── scripts/aggregate.py      parser → data/exp21_flows.csv
 ├── scripts/plot.py           plotter → plots/*.png
-├── data/exp21_flows.csv      36 × 1024 = 36864 rows
+├── data/exp21_flows.csv      59 cells x 1024 flows (8 MB) + 3,072 rows from a 128 MiB probe (6 cells) = 63,488 rows
 ├── plots/mean_fct.png
 ├── plots/p99_fct.png
 ├── plots/slowdown.png
+├── plots/{128mib_probe,ecn_exposure,ev_diversity,ev_heatmap}.png   later diagnostics
 └── runs.tar.gz               raw simulator outputs (compressed)
 ```
