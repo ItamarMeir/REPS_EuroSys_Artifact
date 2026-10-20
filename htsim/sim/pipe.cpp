@@ -9,6 +9,12 @@ bool Pipe::_log_link_utilization = false;
 
 uint32_t Pipe::id = 0;
 
+// ===== ADDED (routing-convergence) =====
+bool (*Pipe::_rc_drop_hook)(Pipe*, simtime_picosec) = NULL;
+uint64_t Pipe::_rc_drops_before_known = 0;
+uint64_t Pipe::_rc_drops_after_known = 0;
+// ===== END ADDED (routing-convergence) =====
+
 
 Pipe::Pipe(simtime_picosec delay, EventList& eventlist)
 : EventSource(eventlist,"pipe"), _delay(delay)
@@ -65,6 +71,12 @@ Pipe::receivePacket(Packet& pkt)
     // Dynamic link failure (State-Aware NSCC+REPS): if this pipe is marked
     // failed by the LinkFailureEvent, drop every arriving packet.
     if (_failed) {
+        // ===== ADDED (routing-convergence) =====
+        if (_rc_drop_hook) {
+            if (_rc_drop_hook(this, eventlist().now())) _rc_drops_after_known++;
+            else _rc_drops_before_known++;
+        }
+        // ===== END ADDED (routing-convergence) =====
         pkt.free();
         return;
     }

@@ -85,6 +85,32 @@ Max data-queue occupancy per layer in 4150 B packets (E->A / A->C / C->A / A->E 
 
 The local-skip works as designed: zero packets go to the failed port of the owning Agg switch and the two live ports balance within 1. But Ofan v1 cannot see the dead Core0->Agg0 downlink, so other pods' Agg switches keep sending to Core0 for pod-0 destinations (1161 packets lost, 1276 RTOs, 3.3x CCT). REPS recovers fastest here. Lost-packet counts are inferred from queue statistics.
 
+**S7 used the legacy failure model** (instant skip of a locally failed first hop, no other knowledge; no `-routing_convergence_us`). It is kept as the "local skip only" reference. For failure experiments use the convergence model and the P1 results below.
+
+### P1 results - routing-convergence model (`-routing_convergence_us G`)
+
+Model: [`../OFAN_ARCHITECTURE.md`](../OFAN_ARCHITECTURE.md) section "Failure convergence model". Setup: 54-host k=6 3-tier 400G, derangement 4 MiB x54 (seed 42), nscc, `-q 193 -ecn 19 19`, Agg0<->Core0 failed in both directions and never recovered; single-flow minRTT (4096 B inter-pod) 12.506 us. Full tables: `data/p1/summary.md` (drivers `scripts/run_p1.sh`, `scripts/summarize_p1.py`). Healthy CCT (us): ofan 98.5, ecmp_ar 103.7, reps 105.0, ecmp_rr 137.5, ecmp_host 340.8.
+
+- **G3 (no cheating / timing): pass.** `decisions_to_known_dead = 0` in every run (all strategies, G in {0, 20, 50, never}). Packets are dropped by the dead pipe before `t_known` and almost never after: G=50 us, failure at 20 us, drops before/after t_known = ofan 1466/22, ecmp_ar 1223/11, ecmp_host 452/0, ecmp_rr 1676/77, reps 1504/37. The post-known drops are packets already queued or in flight at `t_known`, 3-20% of the 386-packet queue-drain bound. G=0 static: 0/0 (nothing is ever sent into the dead link).
+- **G4 (balance over valid ports): pass.** Static failure (G=0, failure at 0.01 us): 244 (switch, key) pointers with an up decision, valid-set mismatches 0, 0 packets to the dead port, max spread over the valid ports 1, no key with spread > 1.
+- **G5 (CCT in us over G; failure at 20 us except the first column)**:
+
+| strategy | 0 (static, f=0.01) | 0 (mid-run, f=20) | 1xRTT | 2xRTT | 5xRTT | 10xRTT | never |
+|---|---|---|---|---|---|---|---|
+| ofan | 165.8 | 126.5 | 125.6 | 131.9 | 169.4 | 231.9 | 399.9 |
+| ecmp_ar | 144.1 | 126.4 | 124.8 | 185.5 | 184.2 | 256.2 | 381.0 (51/54 finished) |
+| ecmp_host | 331.4 | 344.9 | 332.1 | 339.6 | 340.4 | 361.8 | 340.3 (52/54 finished) |
+| reps | 142.1 | 124.3 | 122.9 | 131.7 | 169.2 | 181.0 | 181.0 |
+
+  Ofan tracks REPS up to 5xRTT and is clearly worse for 10xRTT and never (399.9 vs 181.0 us): REPS also reacts on the host (RTO + freezing), while Ofan under this model only has the switch view.
+
+Honest findings and caveats (single seed, no confidence intervals):
+
+1. **Static G=0 Ofan is not healthy.** With the failed link known from t=0, Ofan takes 165.8 us versus 98.5 us healthy, with 654 trims, and the live links of the affected layers are overloaded by 33% (A->C) and 40% (C->A) over the layer mean (`data/p1/summary.md`, G4 block). ecmp_ar (37%/37%) and reps (27%/34%) show the same kind of overload. Hypothesis (not verified): with Agg0<->Core0 down, Agg0 keeps only 2 of its 3 uplinks, but each ToR still hands it 1/3 of its inter-pod traffic (valid-port pruning at the ToR is unweighted: it only removes ports that cannot reach the destination), so Agg0's 2 live uplinks carry 1.5x the per-uplink load of the other aggs. The predecessor paper (arXiv 2507.21372) handles this with W-ECMP weights (each port weighted by the number of valid distinct paths through it, with an interleaved weighted round robin), which our unweighted skip does not implement. This is the next possible extension; it is deliberately not implemented.
+2. **Static G=0 (failure at 0.01 us) is slower than mid-run G=1xRTT (failure at 20 us)** for ofan (165.8 vs 125.6 us). This is the different failure time (the failure is present for the whole run, versus appearing after the first window is in flight and being known 12.5 us later), not a bug. The like-for-like cheating reference is the "0 (mid-run, f=20)" column (126.5 us).
+3. **ecmp_ar is non-monotonic in G** (124.8 us at 1xRTT, 185.5 at 2xRTT, 184.2 at 5xRTT; RTOs 333 -> 1193 -> 1964). This looks RTO-driven; the cause was not investigated.
+4. S7's 324.4 us / 1276 RTOs for Ofan came from the legacy local-skip model; do not compare it with the table above (same failure, different knowledge model).
+
 ## Mutation test of the port-order fix
 
 Removing the two `if (_strategy != OFAN)` guards (so `permute_paths` shuffles the up-route vectors again) makes the S3 per-port balance check FAIL (8 of 58 keys imbalanced, e.g. `[32, 249]` packets over two ports) and, on 432 hosts, 1 MB derangement, raises worst-link overload from A->C 1.7% / C->A 1.95% to 18% / 24%, with 1946 + 295 trims. So the fix is load-bearing and the per-physical-port counter catches its absence. The guards were restored and the regression hashes re-verified; `baseline.sh` now also checks that `-strat ofan` is deterministic (two identical runs).
@@ -92,7 +118,7 @@ Removing the two `if (_strategy != OFAN)` guards (so `permute_paths` shuffles th
 ## Limitations
 
 - Single seed; S4 has only 16 links per layer. No confidence intervals.
-- Ofan v1 failure handling is local-first-hop only (see S7). A reachability check using `FatTreeTopology` (skip a core whose downlink to the destination pod is dead, and the symmetric ToR-level check) would be needed for parity with the paper's routing-converged assumption.
+- Without `-routing_convergence_us`, Ofan failure handling is the legacy local-first-hop skip only (S7). The reachability + convergence-time model exists behind that flag (P1); it prunes ports unweighted (no W-ECMP weights, see P1 finding 1).
 - POfan/4Ofan (pipe-local pointers) are not implemented: `getNextHop` receives `ingress_port == NULL`, so identifying the ingress pipe needs extra plumbing.
 - The paper's own 800 Gbps / 4096 B settings were approximated with the repo's 400G topologies.
 

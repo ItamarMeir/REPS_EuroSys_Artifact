@@ -45,6 +45,12 @@ class Pipe : public EventSource, public PacketSink, public Drawable {
     bool _failed = false;
     void setFailed(bool f) { _failed = f; }
     bool isFailed() const { return _failed; }
+    // ===== ADDED (routing-convergence) =====
+    // Drop accounting for -routing_convergence_us: hook returns true if `now` >= the pipe's first
+    // time of being known down. NULL (default) = no accounting, behaviour unchanged.
+    static bool (*_rc_drop_hook)(Pipe*, simtime_picosec);
+    static uint64_t _rc_drops_before_known, _rc_drops_after_known;
+    // ===== END ADDED (routing-convergence) =====
 protected:
     string _nodename;
     //typedef pair<simtime_picosec,Packet*> pktrecord_t;

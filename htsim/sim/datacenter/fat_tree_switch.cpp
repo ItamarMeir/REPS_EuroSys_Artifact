@@ -5,6 +5,9 @@
 #include "callback_pipe.h"
 #include "queue_lossless.h"
 #include "queue_lossless_output.h"
+// ===== ADDED (routing-convergence) =====
+#include <algorithm>
+// ===== END ADDED (routing-convergence) =====
 
 unordered_map<BaseQueue*,uint32_t> FatTreeSwitch::_port_flow_counts;
 bool FatTreeSwitch::_log_link_utilization = false;
@@ -377,7 +380,7 @@ void FatTreeSwitch::ofan_dump_counts(const string& file) {
 // (caller then uses the ECMP hash) for any set Ofan does not own: only
 // northbound sets (TOR->AGG, AGG->CORE) have a per-destination pointer; DOWN
 // sets (incl. bundles) and CORE switches are single-path per destination.
-uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled) {
+uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid) {
     handled = false;
     if ((*hops)[0]->getDirection() != UP || (_type != TOR && _type != AGG))
         return 0;
@@ -412,11 +415,24 @@ uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& 
     // slot actually used (ofan::pick) so each live port still gets one packet
     // per round. Only evaluated if some port is down (no per-packet alloc).
     bool any_failed = false;
+    // ===== ADDED (routing-convergence) =====
+    // Under -routing_convergence_us the legacy instant local isFailed() skip is disabled:
+    // knowledge comes only from the failure view (rc_valid; NULL = every port valid).
+    if (!RoutingConvergence::enabled)
+    // ===== END ADDED (routing-convergence) =====
     for (int i = 0; i < w && !any_failed; i++) {
         Pipe* p = dynamic_cast<Pipe*>((*hops)[i]->getEgressPort()->at(1));
         any_failed = (p && p->isFailed());
     }
     int choice;
+    // ===== ADDED (routing-convergence) =====
+    if (RoutingConvergence::enabled) {
+        if (rc_valid)
+            choice = ofan::pick(it->second, id, w, *rc_valid, ofan::DEFAULT_SEED, _ofan_identity_order);
+        else
+            choice = ofan::step(it->second, id, w, ofan::DEFAULT_SEED, _ofan_identity_order);
+    } else
+    // ===== END ADDED (routing-convergence) =====
     if (any_failed) {
         vector<bool> valid(w, true);
         for (int i = 0; i < w; i++) {
@@ -445,6 +461,18 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
     vector<FibEntry*> * available_hops = _fib->getRoutes(pkt.dst());
 
     if (available_hops){
+        // ===== ADDED (routing-convergence) =====
+        // Known-failure filtering. rc==NULL => every entry valid => original vector used untouched.
+        // OFAN keeps the full vector (mask handed to ofan::pick); all other strategies run on the
+        // cached filtered copy. Dead end (no valid entry) => unfiltered (Ofan paper fn.5).
+        vector<FibEntry*>* rc_orig = available_hops;
+        RcEntry* rc = NULL;
+        if (RoutingConvergence::enabled && available_hops->size() > 1) {
+            rc = rc_lookup(available_hops, _ft->HOST_POD_SWITCH(pkt.dst()));
+            if (rc && !rc->dead_end && _strategy != OFAN)
+                available_hops = &rc->filtered;
+        }
+        // ===== END ADDED (routing-convergence) =====
         //implement a form of ECMP hashing; might need to revisit based on measured performance.
         uint32_t ecmp_choice = 0;
         if (available_hops->size()>1)
@@ -467,7 +495,10 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                 if (_ar_sticky==FatTreeSwitch::PER_PACKET){
                     ecmp_choice = adaptive_route(available_hops,fn); 
                 } else if (_ar_sticky==FatTreeSwitch::PER_FLOWLET){     
-                    if (_flowlet_maps.find(pkt.flow_id())!=_flowlet_maps.end()){
+                    // ===== ADDED (routing-convergence) ===== stale index guard (maps are cleared per epoch)
+                    if (_flowlet_maps.find(pkt.flow_id())!=_flowlet_maps.end() &&
+                        !(RoutingConvergence::enabled && _flowlet_maps[pkt.flow_id()]->_egress >= available_hops->size())){
+                    // ===== END ADDED (routing-convergence) =====
                         FlowletInfo* f = _flowlet_maps[pkt.flow_id()];
                         
                         // only reroute an existing flow if its inter packet time is larger than _sticky_delta and
@@ -529,7 +560,11 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             // ===== ADDED (ofan) =====
             case OFAN: {
                 bool handled;
-                ecmp_choice = ofan_choose(pkt, available_hops, handled);
+                ecmp_choice = ofan_choose(pkt, available_hops, handled, rc ? &rc->valid : NULL);
+                // ===== ADDED (routing-convergence) ===== non-owned sets hash over the filtered vector
+                if (!handled && rc && !rc->dead_end)
+                    available_hops = &rc->filtered;
+                // ===== END ADDED (routing-convergence) =====
                 if (!handled)
                     ecmp_choice = freeBSDHash(pkt.flow_id_src_dest(),pkt.pathid(),_hash_salt) % available_hops->size();
                 break;
@@ -538,6 +573,18 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             }
 
         FibEntry* e = (*available_hops)[ecmp_choice];
+        // ===== ADDED (routing-convergence) =====
+        // Counter: a decision for a port known dead (by mask or by its own first-hop pipe) while
+        // a valid alternative existed must never happen.
+        if (RoutingConvergence::enabled && rc_orig->size() > 1) {
+            bool bad = false;
+            // by entry identity, not index: RR/RR_ECMP permute the shared original vector in place
+            if (rc) bad = find(rc->invalid.begin(), rc->invalid.end(), e) != rc->invalid.end();
+            Pipe* fp = dynamic_cast<Pipe*>(e->getEgressPort()->at(1));
+            if (fp && RoutingConvergence::known_down(fp)) bad = true;
+            if (bad && !(rc && rc->dead_end)) RoutingConvergence::decisions_to_known_dead++;
+        }
+        // ===== END ADDED (routing-convergence) =====
         pkt.set_direction(e->getDirection());
 
         //printf("I am at %s - Time %lu\n", nodename().c_str(), eventlist().now()/1000);
@@ -699,3 +746,456 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
     //FIB has been filled in; return choice. 
     return getNextHop(pkt, ingress_port);
 };
+
+// ===== ADDED (routing-convergence) =====
+// Failure-knowledge model + reachability masks + brute-force reference check.
+// Design: experiments/OFAN_ARCHITECTURE.md, section "Failure convergence model".
+#include <unordered_set>
+#include <algorithm>
+#include <set>
+#include <queue>
+#include <random>
+#include <cmath>
+
+namespace RoutingConvergence {
+
+bool enabled = false;
+bool check = false;
+uint32_t rand_trials = 0; uint64_t rand_seed = 1; double rand_p = 0.1;
+uint64_t decisions_to_known_dead = 0;
+
+static const simtime_picosec NEVER = 10000000000000000000ULL;  // "no recovery" (1e19 ps < 2^64)
+static simtime_picosec g_G = 0;
+
+struct Interval { simtime_picosec tf, tr; };
+static unordered_map<Pipe*, vector<Interval> > g_pipes;
+static vector<simtime_picosec> g_trans;    // sorted unique knowledge-transition times
+static bool g_trans_dirty = true;
+static size_t g_idx = 0;
+static uint64_t g_epoch = 0;
+static bool g_known_stale = true;
+static unordered_set<Pipe*> g_known;
+
+static uint64_t g_mismatches = 0, g_runs = 0, g_real_checks = 0, g_synth_checks = 0;
+
+simtime_picosec G() { return g_G; }
+
+void enable(double G_us) {
+    if (!std::isfinite(G_us) || G_us < 0) {
+        fprintf(stderr, "-routing_convergence_us: G must be a finite, non-negative number of microseconds (got %g)\n", G_us);
+        exit(1);
+    }
+    double ps = G_us * 1000000.0;
+    if (ps > 4e18) ps = 4e18;
+    g_G = (simtime_picosec)ps;
+    enabled = true;
+    Pipe::_rc_drop_hook = &dropped_after_known;
+}
+
+void register_failure(Pipe* p, simtime_picosec t_fail, simtime_picosec t_recover) {
+    if (!enabled || !p) return;
+    Interval iv; iv.tf = t_fail; iv.tr = (t_recover > t_fail) ? t_recover : NEVER;
+    g_pipes[p].push_back(iv);
+    g_trans_dirty = true;
+}
+
+static void finalize_transitions() {
+    if (!g_trans_dirty) return;
+    g_trans.clear();
+    for (unordered_map<Pipe*, vector<Interval> >::iterator it = g_pipes.begin(); it != g_pipes.end(); ++it)
+        for (size_t i = 0; i < it->second.size(); i++) {
+            g_trans.push_back(it->second[i].tf + g_G);
+            if (it->second[i].tr < NEVER) g_trans.push_back(it->second[i].tr + g_G);
+        }
+    sort(g_trans.begin(), g_trans.end());
+    g_trans.erase(unique(g_trans.begin(), g_trans.end()), g_trans.end());
+    g_idx = 0; g_epoch = 0; g_known_stale = true; g_trans_dirty = false;
+}
+
+void refresh(simtime_picosec now) {
+    finalize_transitions();
+    bool changed = false;
+    while (g_idx < g_trans.size() && g_trans[g_idx] <= now) { g_idx++; g_epoch++; changed = true; }
+    if (changed || g_known_stale) {
+        g_known.clear();
+        for (unordered_map<Pipe*, vector<Interval> >::iterator it = g_pipes.begin(); it != g_pipes.end(); ++it)
+            for (size_t i = 0; i < it->second.size(); i++) {
+                const Interval& iv = it->second[i];
+                if (iv.tf + g_G <= now && (iv.tr >= NEVER || now < iv.tr + g_G)) { g_known.insert(it->first); break; }
+            }
+        g_known_stale = false;
+    }
+}
+
+uint64_t epoch() { return g_epoch; }
+bool known_down(Pipe* p) { return p && g_known.count(p) > 0; }
+bool nothing_known() { return g_known.empty(); }
+
+bool dropped_after_known(Pipe* p, simtime_picosec now) {
+    unordered_map<Pipe*, vector<Interval> >::iterator it = g_pipes.find(p);
+    if (it == g_pipes.end()) return false;
+    // The drop belongs to the failure interval in force at `now`: the one with the latest t_fail <= now.
+    // (Fallback, should not happen: earliest interval.)
+    simtime_picosec best_tf = 0; bool have = false, any = false; simtime_picosec first_tf = NEVER;
+    for (size_t i = 0; i < it->second.size(); i++) {
+        simtime_picosec tf = it->second[i].tf;
+        first_tf = min(first_tf, tf); any = true;
+        if (tf <= now && (!have || tf > best_tf)) { best_tf = tf; have = true; }
+    }
+    if (!any) return false;
+    return now >= (have ? best_tf : first_tf) + g_G;
+}
+
+uint64_t check_mismatches() { return g_mismatches; }
+uint64_t check_runs() { return g_runs; }
+
+// ---------------- independent brute-force reference ----------------
+// Graph built ONLY from the queues_* arrays (switch -> remote endpoint) plus the paired pipe.
+// A FIB entry is valid iff its first-hop pipe is live and (for an upward first hop) a live
+// valley-free MINIMAL path (up* then down*, hop count = intact-graph minimum) leads from the
+// next switch to the destination ToR. Downward first hops: first-hop liveness only (as designed).
+struct REdge { Switch* from; Switch* to; BaseQueue* q; Pipe* p; bool up; };
+static vector<REdge> g_edges;
+static unordered_map<Switch*, vector<int> > g_adj;
+static unordered_map<BaseQueue*, int> g_edge_of_q;
+static FatTreeTopology* g_ref_ft = NULL;
+static map<pair<Switch*, Switch*>, int> g_minlen;
+
+static void ref_add(vector<vector<vector<BaseQueue*> > >& Q, vector<vector<vector<Pipe*> > >& P) {
+    for (size_t i = 0; i < Q.size(); i++)
+        for (size_t j = 0; j < Q[i].size(); j++)
+            for (size_t b = 0; b < Q[i][j].size(); b++) {
+                BaseQueue* q = Q[i][j][b];
+                if (!q) continue;
+                if (i >= P.size() || j >= P[i].size() || b >= P[i][j].size() || !P[i][j][b]) continue;
+                REdge e;
+                e.q = q; e.p = P[i][j][b];
+                e.from = q->getSwitch();
+                e.to = dynamic_cast<Switch*>(q->getRemoteEndpoint());
+                if (!e.from || !e.to) continue;
+                e.up = e.from->getType() < e.to->getType();
+                g_edge_of_q[q] = (int)g_edges.size();
+                g_adj[e.from].push_back((int)g_edges.size());
+                g_edges.push_back(e);
+            }
+}
+
+static void ref_build(FatTreeTopology* ft) {
+    if (g_ref_ft == ft) return;
+    g_ref_ft = ft;
+    g_edges.clear(); g_adj.clear(); g_edge_of_q.clear(); g_minlen.clear();
+    ref_add(ft->queues_nlp_nup, ft->pipes_nlp_nup);
+    ref_add(ft->queues_nup_nlp, ft->pipes_nup_nlp);
+    ref_add(ft->queues_nup_nc, ft->pipes_nup_nc);
+    ref_add(ft->queues_nc_nup, ft->pipes_nc_nup);
+}
+
+// minimal up*-down* hop count S->T on the intact graph (BFS over (switch, phase))
+static int ref_minlen(Switch* S, Switch* T) {
+    pair<Switch*, Switch*> key(S, T);
+    map<pair<Switch*, Switch*>, int>::iterator f = g_minlen.find(key);
+    if (f != g_minlen.end()) return f->second;
+    map<pair<Switch*, int>, int> dist;
+    std::queue<pair<Switch*, int> > qu;
+    dist[make_pair(S, 0)] = 0; qu.push(make_pair(S, 0));
+    int best = -1;
+    while (!qu.empty() && best < 0) {
+        pair<Switch*, int> cur = qu.front(); qu.pop();
+        int d = dist[cur];
+        if (cur.first == T) { best = d; break; }
+        vector<int>& adj = g_adj[cur.first];
+        for (size_t k = 0; k < adj.size(); k++) {
+            const REdge& e = g_edges[adj[k]];
+            if (cur.second == 1 && e.up) continue;
+            pair<Switch*, int> nx(e.to, e.up ? 0 : 1);
+            if (dist.find(nx) == dist.end()) { dist[nx] = d + 1; qu.push(nx); }
+        }
+    }
+    g_minlen[key] = best;
+    return best;
+}
+
+static bool ref_reach(Switch* cur, int phase, int remaining, Switch* T) {
+    if (cur == T) return remaining == 0;
+    if (remaining == 0) return false;
+    vector<int>& adj = g_adj[cur];
+    for (size_t k = 0; k < adj.size(); k++) {
+        const REdge& e = g_edges[adj[k]];
+        if (known_down(e.p)) continue;
+        if (phase == 1 && e.up) continue;
+        if (ref_reach(e.to, e.up ? 0 : 1, remaining - 1, T)) return true;
+    }
+    return false;
+}
+
+static void ref_mask(FatTreeTopology* ft, vector<FibEntry*>* hops, uint32_t T, vector<bool>& out, const char* who) {
+    Switch* Tsw = ft->switches_lp[T];
+    out.assign(hops->size(), true);
+    for (size_t i = 0; i < hops->size(); i++) {
+        Route* r = (*hops)[i]->getEgressPort();
+        BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+        unordered_map<BaseQueue*, int>::iterator it = g_edge_of_q.find(q);
+        if (it == g_edge_of_q.end()) {
+            g_mismatches++;
+            printf("ROUTING_CHECK MISMATCH %s: FIB queue not in topology arrays\n", who);
+            continue;
+        }
+        const REdge& e = g_edges[it->second];
+        if (dynamic_cast<Pipe*>(r->at(1)) != e.p) {
+            g_mismatches++;
+            printf("ROUTING_CHECK MISMATCH %s: FIB pipe differs from paired pipe\n", who);
+        }
+        if (known_down(e.p)) out[i] = false;
+        else if (!e.up) out[i] = true;
+        else {
+            int L = ref_minlen(e.from, Tsw);
+            out[i] = (L >= 2) && ref_reach(e.to, 0, L - 1, Tsw);
+        }
+    }
+}
+
+static void compare_masks(FatTreeSwitch* S, uint32_t T, const vector<bool>& prod, const vector<bool>& ref,
+                          const char* tag, const char* when) {
+    for (size_t i = 0; i < prod.size(); i++)
+        if (prod[i] != ref[i]) {
+            g_mismatches++;
+            if (g_mismatches <= 40)
+                printf("ROUTING_CHECK MISMATCH (%s,%s) switch=%s dstTor=%u entry=%zu prod=%d ref=%d\n", tag, when,
+                       S->nodename().c_str(), T, i, (int)prod[i], (int)ref[i]);
+        }
+}
+
+void check_real(FatTreeTopology* ft, FatTreeSwitch* S, vector<FibEntry*>* hops, uint32_t T, const vector<bool>& mask) {
+    ref_build(ft);
+    vector<bool> r;
+    ref_mask(ft, hops, T, r, "real");
+    compare_masks(S, T, mask, r, "real-FIB", "runtime");
+    g_real_checks++;
+}
+
+static FibEntry* synth_entry(const REdge& e) {
+    Route* r = new Route();
+    r->push_back(e.q); r->push_back(e.p); r->push_back(e.q->getRemoteEndpoint());
+    return new FibEntry(r, 1, e.up ? UP : DOWN);
+}
+
+static void synth_pass(FatTreeTopology* ft, const char* when, bool item6);
+
+void run_check(FatTreeTopology* ft, const char* when) {
+    EventList& el = EventList::getTheEventList();
+    refresh(el.now());
+    ref_build(ft);
+    g_runs++;
+    synth_pass(ft, when, true);
+}
+
+void run_check_random(FatTreeTopology* ft) {
+    if (rand_trials == 0) return;
+    EventList& el = EventList::getTheEventList();
+    refresh(el.now());
+    ref_build(ft);
+    unordered_set<Pipe*> saved = g_known;
+    vector<Pipe*> all;
+    for (size_t i = 0; i < g_edges.size(); i++) all.push_back(g_edges[i].p);
+    std::mt19937_64 rng(rand_seed);
+    std::uniform_real_distribution<double> U(0.0, 1.0);
+    uint64_t before = g_mismatches, down_total = 0;
+    for (uint32_t t = 0; t < rand_trials; t++) {
+        g_known.clear();
+        for (size_t i = 0; i < all.size(); i++) if (U(rng) < rand_p) g_known.insert(all[i]);
+        down_total += g_known.size();
+        synth_pass(ft, "random", false);   // item6 (same-pod agg-mask equality) assumes only Agg<->Core failures
+    }
+    g_known = saved;
+    g_known_stale = true;
+    printf("ROUTING_CHECK_RANDOM trials=%u seed=%llu p=%g pipes=%zu avg_down=%.1f mismatches=%llu\n", rand_trials,
+           (unsigned long long)rand_seed, rand_p, all.size(), (double)down_total / rand_trials,
+           (unsigned long long)(g_mismatches - before));
+}
+
+static void synth_pass(FatTreeTopology* ft, const char* when, bool item6) {
+    uint32_t ntors = (uint32_t)ft->switches_lp.size();
+    bool three = FatTreeTopology::get_tiers() == 3;
+    uint32_t A = ft->agg_switches_per_pod();
+    uint32_t TPP = ft->tor_switches_per_pod();
+    // item 6: (agg, dst pod) -> first non-dead-end mask
+    map<pair<uint32_t, uint32_t>, vector<bool> > agg_up_masks;
+    vector<Switch*> all;
+    all.insert(all.end(), ft->switches_lp.begin(), ft->switches_lp.end());
+    all.insert(all.end(), ft->switches_up.begin(), ft->switches_up.end());
+    all.insert(all.end(), ft->switches_c.begin(), ft->switches_c.end());
+    for (size_t si = 0; si < all.size(); si++) {
+        FatTreeSwitch* S = dynamic_cast<FatTreeSwitch*>(all[si]);
+        if (!S) continue;
+        vector<int>& adj = g_adj[S];
+        uint32_t type = S->getType();
+        for (uint32_t T = 0; T < ntors; T++) {
+            if (type == FatTreeSwitch::TOR && S->getID() == T) continue;
+            uint32_t podT = three ? T / TPP : 0;
+            uint32_t podS = (three && type == FatTreeSwitch::AGG) ? S->getID() / A : 0;
+            bool agg_up = false;
+            vector<FibEntry*> hops;
+            for (size_t k = 0; k < adj.size(); k++) {
+                const REdge& e = g_edges[adj[k]];
+                bool take = false;
+                if (type == FatTreeSwitch::TOR) take = e.up;
+                else if (type == FatTreeSwitch::AGG) {
+                    if (three && podT != podS) { take = e.up; agg_up = true; }
+                    else take = (!e.up && e.to == ft->switches_lp[T]);
+                } else {  // CORE: down toward the agg of dst pod
+                    FatTreeSwitch* nb = dynamic_cast<FatTreeSwitch*>(e.to);
+                    take = !e.up && nb && (nb->getID() / A == podT);
+                }
+                if (take) hops.push_back(synth_entry(e));
+            }
+            if (!hops.empty()) {
+                vector<bool> prod, ref;
+                S->rc_compute_mask(&hops, T, prod);
+                ref_mask(ft, &hops, T, ref, "synthetic");
+                compare_masks(S, T, prod, ref, "synthetic", when);
+                g_synth_checks++;
+                if (agg_up && item6) {
+                    bool any = false;
+                    for (size_t i = 0; i < prod.size(); i++) any = any || prod[i];
+                    if (any) {
+                        pair<uint32_t, uint32_t> key(S->getID(), podT);
+                        map<pair<uint32_t, uint32_t>, vector<bool> >::iterator f = agg_up_masks.find(key);
+                        if (f == agg_up_masks.end()) agg_up_masks[key] = prod;
+                        else if (f->second != prod) {
+                            g_mismatches++;
+                            if (g_mismatches <= 40)
+                                printf("ROUTING_CHECK MISMATCH (item6,%s) agg=%u dstPod=%u: masks of two dst ToRs differ outside dead-end\n",
+                                       when, S->getID(), podT);
+                        }
+                    }
+                }
+            }
+            for (size_t i = 0; i < hops.size(); i++) { delete hops[i]->getEgressPort(); delete hops[i]; }
+        }
+    }
+}
+
+class RcCheckEvent : public EventSource {
+public:
+    RcCheckEvent(EventList& el, FatTreeTopology* ft)
+        : EventSource(el, "rc_check"), _ft(ft), _i(0) {
+        finalize_transitions();
+        _times.push_back(0);
+        for (size_t i = 0; i < g_trans.size(); i++) if (g_trans[i] > 0) _times.push_back(g_trans[i]);
+        eventlist().sourceIsPending(*this, _times[0]);
+    }
+    void doNextEvent() override {
+        run_check(_ft, "epoch");
+        _i++;
+        if (_i < _times.size()) eventlist().sourceIsPending(*this, _times[_i]);
+    }
+private:
+    FatTreeTopology* _ft;
+    vector<simtime_picosec> _times;
+    size_t _i;
+};
+
+void schedule_checks(EventList& el, FatTreeTopology* ft) {
+    new RcCheckEvent(el, ft);
+}
+
+void print_summary() {
+    printf("ROUTING_CONV decisions_to_known_dead=%llu drops_before_known=%llu drops_after_known=%llu\n",
+           (unsigned long long)decisions_to_known_dead,
+           (unsigned long long)Pipe::_rc_drops_before_known,
+           (unsigned long long)Pipe::_rc_drops_after_known);
+    if (check)
+        printf("ROUTING_CHECK_INFO runs=%llu synthetic_pairs=%llu real_fib_vectors=%llu\n",
+               (unsigned long long)g_runs, (unsigned long long)g_synth_checks, (unsigned long long)g_real_checks);
+}
+
+}  // namespace RoutingConvergence
+
+// ---------------- FatTreeSwitch members ----------------
+static bool rc_any_live(const vector<Pipe*>& v) {
+    for (size_t i = 0; i < v.size(); i++)
+        if (v[i] && !RoutingConvergence::known_down(v[i])) return true;
+    return false;
+}
+
+// Does AGG switch `k` reach dst ToR T over live pipes? (any live bundle per leg)
+bool FatTreeSwitch::rc_agg_reaches(uint32_t k, uint32_t T) {
+    if (FatTreeTopology::get_tiers() == 2)
+        return rc_any_live(_ft->pipes_nup_nlp[k][T]);
+    uint32_t A = _ft->agg_switches_per_pod();
+    uint32_t podT = T / _ft->tor_switches_per_pod();
+    if (k / A == podT)
+        return rc_any_live(_ft->pipes_nup_nlp[k][T]);
+    uint32_t podpos = k % A;
+    uint32_t uplink_bundles = _ft->radix_up(AGG_TIER) / _ft->bundlesize(CORE_TIER);
+    for (uint32_t l = 0; l < uplink_bundles; l++) {
+        uint32_t c = l * A + podpos;
+        if (!rc_any_live(_ft->pipes_nup_nc[k][c])) continue;
+        uint32_t dagg = podT * A + c % A;
+        if (rc_any_live(_ft->pipes_nc_nup[c][dagg]) && rc_any_live(_ft->pipes_nup_nlp[dagg][T])) return true;
+    }
+    return false;
+}
+
+void FatTreeSwitch::rc_compute_mask(vector<FibEntry*>* hops, uint32_t T, vector<bool>& valid) {
+    RoutingConvergence::refresh(eventlist().now());
+    valid.assign(hops->size(), true);
+    for (size_t i = 0; i < hops->size(); i++) {
+        FibEntry* fe = (*hops)[i];
+        Route* r = fe->getEgressPort();
+        Pipe* p = dynamic_cast<Pipe*>(r->at(1));
+        bool ok = !RoutingConvergence::known_down(p);
+        if (ok && fe->getDirection() == UP) {
+            FatTreeSwitch* n = dynamic_cast<FatTreeSwitch*>(r->at(2));
+            if (!n) {
+                fprintf(stderr, "rc_compute_mask: next hop of an UP FIB entry at %s is not a FatTreeSwitch\n", nodename().c_str());
+                exit(1);
+            }
+            {
+                if (_type == TOR) ok = rc_agg_reaches(n->getID(), T);
+                else if (_type == AGG) {  // up to core c, 3-tier
+                    uint32_t c = n->getID();
+                    uint32_t A = _ft->agg_switches_per_pod();
+                    uint32_t podT = T / _ft->tor_switches_per_pod();
+                    uint32_t dagg = podT * A + c % A;
+                    ok = rc_any_live(_ft->pipes_nc_nup[c][dagg]) && rc_any_live(_ft->pipes_nup_nlp[dagg][T]);
+                }
+            }
+        }
+        valid[i] = ok;
+    }
+}
+
+FatTreeSwitch::RcEntry* FatTreeSwitch::rc_lookup(vector<FibEntry*>* hops, uint32_t T) {
+    RoutingConvergence::refresh(eventlist().now());
+    uint64_t ep = RoutingConvergence::epoch();
+    if (ep != _rc_last_epoch) {
+        // flowlet egress indices refer to the vector used in the previous epoch
+        for (unordered_map<uint32_t,FlowletInfo*>::iterator it = _flowlet_maps.begin(); it != _flowlet_maps.end(); ++it)
+            delete it->second;
+        _flowlet_maps.clear();
+        _rc_last_epoch = ep;
+    }
+    if (RoutingConvergence::nothing_known()) return NULL;
+    RcKey key; key.v = hops; key.dst_tor = T;
+    unordered_map<RcKey, RcEntry, RcKeyHash>::iterator it = _rc_cache.find(key);
+    if (it != _rc_cache.end() && it->second.epoch == ep)
+        return it->second.all_valid ? NULL : &it->second;
+    RcEntry& e = _rc_cache[key];
+    e.epoch = ep;
+    rc_compute_mask(hops, T, e.valid);
+    size_t nvalid = 0;
+    for (size_t i = 0; i < e.valid.size(); i++) nvalid += e.valid[i] ? 1 : 0;
+    e.all_valid = (nvalid == e.valid.size());
+    e.dead_end = (nvalid == 0);
+    e.filtered.clear();
+    e.invalid.clear();
+    for (size_t i = 0; i < hops->size(); i++) {
+        if (e.valid[i]) { if (!e.all_valid && !e.dead_end) e.filtered.push_back((*hops)[i]); }
+        else e.invalid.push_back((*hops)[i]);
+    }
+    if (RoutingConvergence::check)
+        RoutingConvergence::check_real(_ft, this, hops, T, e.valid);
+    return e.all_valid ? NULL : &e;
+}
+// ===== END ADDED (routing-convergence) =====

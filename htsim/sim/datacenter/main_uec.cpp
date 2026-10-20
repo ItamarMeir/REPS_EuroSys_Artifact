@@ -52,6 +52,10 @@ public:
         : EventSource(el, "link_failure"),
           _up(up), _down(down),
           _t_fail(t_fail), _t_recover(t_recover), _state(0) {
+        // ===== ADDED (routing-convergence) =====
+        RoutingConvergence::register_failure(up, t_fail, t_recover);
+        RoutingConvergence::register_failure(down, t_fail, t_recover);
+        // ===== END ADDED (routing-convergence) =====
         eventlist().sourceIsPending(*this, _t_fail);
     }
     void doNextEvent() override {
@@ -1370,6 +1374,20 @@ int main(int argc, char **argv) {
             ofan_counts_file = string(argv[i+1]);
             i++;
         // ===== END ADDED (ofan) =====
+        // ===== ADDED (routing-convergence) =====
+        } else if (!strcmp(argv[i], "-routing_convergence_us")) {
+            RoutingConvergence::enable(atof(argv[i+1]));
+            cout << "Routing convergence model: G = " << atof(argv[i+1]) << " us" << endl;
+            i++;
+        } else if (!strcmp(argv[i], "-routing_check")) {
+            RoutingConvergence::check = true;
+        } else if (!strcmp(argv[i], "-routing_check_random")) {
+            // hidden: <trials> <seed> <p> knowledge-only randomized mask test (see OFAN_ARCHITECTURE.md)
+            RoutingConvergence::rand_trials = (uint32_t)atoi(argv[i+1]);
+            RoutingConvergence::rand_seed = (uint64_t)atoll(argv[i+2]);
+            RoutingConvergence::rand_p = atof(argv[i+3]);
+            i += 3;
+        // ===== END ADDED (routing-convergence) =====
         // ===== ADDED (path-random queue logging) =====
         } else if (!strcmp(argv[i], "-log_core_queues")) {
             log_core_queues_file = string(argv[i+1]);
@@ -1508,6 +1526,27 @@ int main(int argc, char **argv) {
         FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
     }
 
+    // ===== ADDED (routing-convergence) =====
+    if (RoutingConvergence::check && !RoutingConvergence::enabled) {
+        cerr << "-routing_check requires -routing_convergence_us" << endl;
+        exit(1);
+    }
+    if (RoutingConvergence::rand_trials > 0 && !RoutingConvergence::check) {
+        cerr << "-routing_check_random requires -routing_check (and -routing_convergence_us)" << endl;
+        exit(1);
+    }
+    if (RoutingConvergence::enabled && (UecSrc::_use_srv6 || !UecSrc::_fail_src_paths.empty() ||
+            UecSrc::_load_balancing_algo == UecSrc::PATH_RR ||
+            UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ||
+            UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC || sol_avoid_timed_failure)) {
+        cerr << "-routing_convergence_us cannot be combined with source-routed algorithms (-use_srv6, -load_balancing_algo path_rr|path_random|path_static), -fail_src_paths or -sol_avoid_timed_failure: they bypass the switch FIB, so the model would silently do nothing" << endl;
+        exit(1);
+    }
+    if (RoutingConvergence::enabled && input_fail_on) {
+        cerr << "-routing_convergence_us cannot be combined with -failures_input (FAILURE_GENERATOR failures are invisible to the failure-view model)" << endl;
+        exit(1);
+    }
+    // ===== END ADDED (routing-convergence) =====
     // ===== ADDED (ofan) =====
     if (FatTreeSwitch::_strategy == FatTreeSwitch::OFAN) {
         // Source-routed packets bypass the switch FIB, so Ofan would silently do nothing.
@@ -2407,6 +2446,13 @@ int main(int argc, char **argv) {
     }
     // ===== END ADDED (timed-failure) =====
 
+    // ===== ADDED (routing-convergence) =====
+    if (RoutingConvergence::check && !topo.empty() && topo[0] != nullptr)
+    {
+        RoutingConvergence::run_check_random(topo[0]);
+        RoutingConvergence::schedule_checks(eventlist, topo[0]);
+    }
+    // ===== END ADDED (routing-convergence) =====
     // ===== ADDED (path-random queue logging) =====
     if (!log_core_queues_file.empty() && !topo.empty() && topo[0] != nullptr) {
         new CoreQueueSampler(eventlist, topo[0], log_core_queues_file, 1.0 /* µs */);
@@ -2445,6 +2491,15 @@ int main(int argc, char **argv) {
         bounce_pkts += uec_srcs[ix]->_bounces_received;
         ack_pkts += uec_srcs[ix]->_acks_received;
     }
+    // ===== ADDED (routing-convergence) =====
+    if (RoutingConvergence::enabled) {
+        if (RoutingConvergence::check && !topo.empty() && topo[0] != nullptr)
+            RoutingConvergence::run_check(topo[0], "end");
+        RoutingConvergence::print_summary();
+        if (RoutingConvergence::check)
+            cout << "ROUTING_CHECK mismatches=" << RoutingConvergence::check_mismatches() << endl;
+    }
+    // ===== END ADDED (routing-convergence) =====
     cout << "New: " << new_pkts << " Rtx: " << rtx_pkts << " RTS: " << rts_pkts << " Bounced: " << bounce_pkts << " ACKs: " << ack_pkts << endl;
     if (input_fail_on) {
         FAILURE_GENERATOR->createLoggingData();
@@ -2469,5 +2524,11 @@ int main(int argc, char **argv) {
             }
         }
     }  
+    // ===== ADDED (routing-convergence) =====
+    if (RoutingConvergence::check && RoutingConvergence::check_mismatches() > 0) {
+        cerr << "ROUTING_CHECK FAILED: " << RoutingConvergence::check_mismatches() << " mismatches" << endl;
+        exit(1);
+    }
+    // ===== END ADDED (routing-convergence) =====
 }
 

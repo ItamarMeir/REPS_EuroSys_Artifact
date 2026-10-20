@@ -8,6 +8,42 @@
 
 class FatTreeTopology;
 
+// ===== ADDED (routing-convergence) =====
+// Failure-knowledge model (see experiments/OFAN_ARCHITECTURE.md, "Failure convergence model").
+// A pipe failed at t_fail and recovered at t_recover is KNOWN DOWN by every switch iff
+// t_fail+G <= now < t_recover+G. The epoch is the number of knowledge transitions <= now
+// (derived from time, so it is independent of event ordering at equal timestamps).
+// Everything is inert unless -routing_convergence_us is given.
+class Pipe;
+class FatTreeSwitch;
+class FibEntry;
+namespace RoutingConvergence {
+    extern bool enabled;                  // -routing_convergence_us given
+    extern bool check;                    // -routing_check
+    extern uint64_t decisions_to_known_dead;
+    void enable(double G_us);
+    simtime_picosec G();
+    void register_failure(Pipe* p, simtime_picosec t_fail, simtime_picosec t_recover);
+    void refresh(simtime_picosec now);    // advance epoch to `now`
+    uint64_t epoch();
+    bool known_down(Pipe* p);             // valid after refresh(now)
+    bool nothing_known();                 // no pipe known down in the current epoch
+    bool dropped_after_known(Pipe* p, simtime_picosec now);  // Pipe drop-hook: now >= min t_known(p)
+    // Debug check (-routing_check): production masks vs independent brute force; returns #mismatches so far.
+    void run_check(FatTreeTopology* ft, const char* when);
+    // Hidden knowledge-only test (-routing_check_random <trials> <seed> <p>): random subset (prob p) of ALL
+    // pipes of the reference edge list as the known-down set (Pipe::_failed untouched); runs the synthetic
+    // production-vs-reference mask comparison for every (switch, dst ToR); restores the real set.
+    extern uint32_t rand_trials; extern uint64_t rand_seed; extern double rand_p;
+    void run_check_random(FatTreeTopology* ft);
+    void check_real(FatTreeTopology* ft, FatTreeSwitch* S, vector<FibEntry*>* hops, uint32_t dst_tor, const vector<bool>& mask);
+    void schedule_checks(EventList& el, FatTreeTopology* ft);
+    uint64_t check_mismatches();
+    uint64_t check_runs();
+    void print_summary();                 // ROUTING_CONV line (+ ROUTING_CHECK line if check)
+}
+// ===== END ADDED (routing-convergence) =====
+
 /*
  * Copyright (C) 2013-2014 Universita` di Pisa. All rights reserved.
  *
@@ -148,7 +184,11 @@ public:
     static void ofan_dump_counts(const string& file);
     // ===== END ADDED (ofan) =====
 
-
+    // ===== ADDED (routing-convergence) =====
+    // valid[i] = FIB entry i of `hops` (a set of this switch toward dst ToR `dst_tor`) leads to dst_tor
+    // using only pipes not known down. Public for the -routing_check debug pass.
+    void rc_compute_mask(vector<FibEntry*>* hops, uint32_t dst_tor, vector<bool>& valid);
+    // ===== END ADDED (routing-convergence) =====
 
 private:
     switch_type _type;
@@ -172,8 +212,32 @@ private:
     // One RR pointer per key id = d + Nd*t (d: dest edge switch at TOR / dest
     // pod at AGG, t: 0 data, 1 small packets). Created lazily.
     unordered_map<uint32_t,int> _ofan_ptrs;
-    uint32_t ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled);
+    // ===== ADDED (routing-convergence) ===== extra arg: validity mask (NULL = none)
+    uint32_t ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid = NULL);
+    // ===== END ADDED (routing-convergence) =====
     // ===== END ADDED (ofan) =====
+
+    // ===== ADDED (routing-convergence) =====
+    struct RcKey {
+        vector<FibEntry*>* v; uint32_t dst_tor;
+        bool operator==(const RcKey& o) const { return v == o.v && dst_tor == o.dst_tor; }
+    };
+    struct RcKeyHash {
+        size_t operator()(const RcKey& k) const { return std::hash<void*>()((void*)k.v) * 31u + k.dst_tor; }
+    };
+    struct RcEntry {
+        uint64_t epoch;
+        bool all_valid, dead_end;
+        vector<bool> valid;               // indexed like the ORIGINAL vector
+        vector<FibEntry*> filtered;       // valid entries in original order (used if !all_valid && !dead_end)
+        vector<FibEntry*> invalid;        // invalid entries by identity (the original vector may be re-permuted in place by RR)
+    };
+    unordered_map<RcKey, RcEntry, RcKeyHash> _rc_cache;
+    uint64_t _rc_last_epoch = 0;
+    // NULL if every entry is valid (caller keeps using the original vector untouched)
+    RcEntry* rc_lookup(vector<FibEntry*>* hops, uint32_t dst_tor);
+    bool rc_agg_reaches(uint32_t agg, uint32_t dst_tor);
+    // ===== END ADDED (routing-convergence) =====
 };
 
 #endif
