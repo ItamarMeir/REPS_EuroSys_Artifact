@@ -1,0 +1,11 @@
+config	fin	started	CCT_us	mean_fct	p99_fct	trims	drops	extra_pkts	RTS	rtos	fast_loss	ecn_acks	abort
+ofan_nscc	54	54	98.51	98.38	98.51	0	0	0	0	0	0	0	-
+ecmpar_nscc	54	54	111.14	103.24	111.14	115	0	0	0	0	0	38668	-
+reps_nscc	54	54	114.34	106.10	114.34	293	0	0	0	1	0	47146	-
+ofanhash_nscc	54	54	99.37	98.73	99.37	0	0	0	0	0	0	1552	-
+ofanid_nscc	54	54	98.51	98.38	98.51	0	0	0	0	0	0	0	-
+ofan_mswift	54	54	98.51	98.38	98.51	0	0	0	0	0	0	0	-
+ecmpar_mswift	54	54	120.11	109.03	120.11	71	0	0	0	0	0	28392	-
+reps_mswift	54	54	125.06	110.23	125.06	131	0	0	0	0	0	38611	-
+ofanhash_mswift	54	54	99.37	98.73	99.37	0	0	0	0	0	0	1552	-
+ofanid_mswift	54	54	98.51	98.38	98.51	0	0	0	0	0	0	0	-

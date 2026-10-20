@@ -207,6 +207,39 @@ private:
 };
 // ===== END ADDED (path-random queue logging) =====
 
+// ===== ADDED (queue-stats) =====
+// End-of-sim TSV, one row per switch egress queue of topo (-log_queue_stats <file>).
+// Layers: E->A queues_nlp_nup, A->C queues_nup_nc, C->A queues_nc_nup,
+// A->E queues_nup_nlp, E->H queues_nlp_ns. Counters live in CompositeQueue
+// (_stat_*); trims = _num_stripped, drops = _num_drops. Non-composite queues are skipped.
+// Layer is empty/degenerate on 2-tier topologies (A->C etc. have no queues).
+static void dump_queue_stats_layer(FILE* f, const char* layer,
+                                   const vector<vector<vector<BaseQueue*>>>& arr) {
+    for (size_t i = 0; i < arr.size(); i++)
+        for (size_t j = 0; j < arr[i].size(); j++)
+            for (size_t b = 0; b < arr[i][j].size(); b++) {
+                CompositeQueue* q = dynamic_cast<CompositeQueue*>(arr[i][j][b]);
+                if (!q) continue;
+                fprintf(f, "%s\t%s\t%zu\t%zu\t%zu\t%lld\t%lld\t%llu\t%llu\t%llu\t%d\t%d\n",
+                        q->nodename().c_str(), layer, i, j, b,
+                        (long long)q->_stat_max_low, (long long)q->_stat_max_total,
+                        (unsigned long long)q->_stat_bytes_low, (unsigned long long)q->_stat_bytes_high,
+                        (unsigned long long)q->_stat_pkts_low, q->_num_stripped, q->num_drops());
+            }
+}
+static void dump_queue_stats(FatTreeTopology* t, const std::string& path) {
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) { cerr << "cannot open " << path << endl; return; }
+    fprintf(f, "queue\tlayer\ti\tj\tbundle\tmax_q_bytes\tmax_q_total_bytes\tdata_bytes\thdr_bytes\tdata_pkts\ttrims\tdrops\n");
+    dump_queue_stats_layer(f, "E->A", t->queues_nlp_nup);
+    dump_queue_stats_layer(f, "A->C", t->queues_nup_nc);
+    dump_queue_stats_layer(f, "C->A", t->queues_nc_nup);
+    dump_queue_stats_layer(f, "A->E", t->queues_nup_nlp);
+    dump_queue_stats_layer(f, "E->H", t->queues_nlp_ns);
+    fclose(f);
+}
+// ===== END ADDED (queue-stats) =====
+
 // ===== ADDED (tor-queue logging) =====
 // Samples ToR→Agg uplink queue depths every interval_us µs and writes
 // time_us,tor,agg,bytes rows to a CSV. Gated by -log_tor_queues <file>.
@@ -301,6 +334,8 @@ int main(int argc, char **argv) {
     linkspeed_bps linkspeed = speedFromMbps((double)HOST_NIC);
     int packet_size = 4150;
     uint32_t path_entropy_size = 64;
+    string ofan_counts_file;  // ===== ADDED (ofan) =====
+    string log_queue_stats_file;  // ===== ADDED (queue-stats) =====
     uint32_t no_of_conns = 0, cwnd = 0, no_of_nodes = 0;
     uint32_t tiers = 3; // we support 2 and 3 tier fattrees
     uint32_t planes = 1;  // multi-plane topologies
@@ -1309,8 +1344,32 @@ int main(int argc, char **argv) {
                 route_strategy = ECMP_FIB;
                 path_entropy_size = 1;
                 FatTreeSwitch::set_strategy(FatTreeSwitch::RR);
+            // ===== ADDED (ofan) =====
+            } else if (!strcmp(argv[i+1], "ofan")) {
+                // switch-based per-destination round robin (arXiv 2610.07230)
+                route_strategy = ECMP_FIB;
+                path_entropy_size = 1;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::OFAN);
+            // ===== END ADDED (ofan) =====
             }
             i++;
+        // ===== ADDED (queue-stats) =====
+        } else if (!strcmp(argv[i], "-log_queue_stats")) {
+            log_queue_stats_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (queue-stats) =====
+        // ===== ADDED (ofan) =====
+        } else if (!strcmp(argv[i], "-ofan_ack_mode")) {
+            if (!strcmp(argv[i+1], "hash")) FatTreeSwitch::_ofan_hash_small = true;
+            else if (strcmp(argv[i+1], "spray")) { cerr << "-ofan_ack_mode expects spray|hash" << endl; exit(1); }
+            i++;
+        } else if (!strcmp(argv[i], "-ofan_identity_order")) {
+            FatTreeSwitch::_ofan_identity_order = true;
+        } else if (!strcmp(argv[i], "-log_ofan_counts")) {
+            FatTreeSwitch::_ofan_count = true;
+            ofan_counts_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (ofan) =====
         // ===== ADDED (path-random queue logging) =====
         } else if (!strcmp(argv[i], "-log_core_queues")) {
             log_core_queues_file = string(argv[i+1]);
@@ -1448,6 +1507,21 @@ int main(int argc, char **argv) {
         route_strategy = ECMP_FIB;
         FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
     }
+
+    // ===== ADDED (ofan) =====
+    if (FatTreeSwitch::_strategy == FatTreeSwitch::OFAN) {
+        // Source-routed packets bypass the switch FIB, so Ofan would silently do nothing.
+        if (UecSrc::_use_srv6 || UecSrc::_load_balancing_algo == UecSrc::PATH_RR ||
+            UecSrc::_load_balancing_algo == UecSrc::PATH_RANDOM ||
+            UecSrc::_load_balancing_algo == UecSrc::PATH_STATIC ||
+            !UecSrc::_per_host_lb_override.empty()) {
+            cerr << "-strat ofan is incompatible with -use_srv6, path_* load balancing and -host_lb_overrides" << endl;
+            exit(1);
+        }
+        // switches ignore the entropy; a later -paths must not override this
+        path_entropy_size = 1;
+    }
+    // ===== END ADDED (ofan) =====
 
     queuesize = memFromPkt(queuesize);
 
@@ -2377,6 +2451,13 @@ int main(int argc, char **argv) {
         FAILURE_GENERATOR->save_failure_list();
 
     }
+    // ===== ADDED (queue-stats) =====
+    if (!log_queue_stats_file.empty() && !topo.empty() && topo[0] != nullptr)
+        dump_queue_stats(topo[0], log_queue_stats_file);
+    // ===== END ADDED (queue-stats) =====
+    // ===== ADDED (ofan) =====
+    if (FatTreeSwitch::_ofan_count) FatTreeSwitch::ofan_dump_counts(ofan_counts_file);
+    // ===== END ADDED (ofan) =====
     if (FatTreeSwitch::_log_switch_stats) {
         for (int i = 0; i < topo[0]->switches_lp.size(); i++) {
             if (topo[0]->switches_lp[i]->_up_ports_used.size() == 0 || topo[0]->switches_lp[i]->nodename() != "Switch_LowerPod_0") {

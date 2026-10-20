@@ -88,7 +88,10 @@ public:
     };
 
     enum routing_strategy {
-        NIX = 0, ECMP = 1, ADAPTIVE_ROUTING = 2, ECMP_ADAPTIVE = 3, RR = 4, RR_ECMP = 5
+        NIX = 0, ECMP = 1, ADAPTIVE_ROUTING = 2, ECMP_ADAPTIVE = 3, RR = 4, RR_ECMP = 5,
+        // ===== ADDED (ofan) =====
+        OFAN = 6
+        // ===== END ADDED (ofan) =====
     };
 
     enum sticky_choices {
@@ -137,7 +140,15 @@ public:
     static bool _log_switch_stats;
     static bool use_adaptive_roce;
 
-    
+    // ===== ADDED (ofan) =====
+    // Ofan (arXiv 2610.07230): per-destination round-robin on northbound hops.
+    static bool _ofan_hash_small;      // -ofan_ack_mode hash: small pkts use ECMP hash
+    static bool _ofan_identity_order;  // -ofan_identity_order: pi(i)=i ablation
+    static bool _ofan_count;           // -log_ofan_counts: per-physical-port counters
+    static void ofan_dump_counts(const string& file);
+    // ===== END ADDED (ofan) =====
+
+
 
 private:
     switch_type _type;
@@ -156,6 +167,13 @@ private:
     simtime_picosec _last_choice;
 
     unordered_map<Packet*,bool> _packets;
+
+    // ===== ADDED (ofan) =====
+    // One RR pointer per key id = d + Nd*t (d: dest edge switch at TOR / dest
+    // pod at AGG, t: 0 data, 1 small packets). Created lazily.
+    unordered_map<uint32_t,int> _ofan_ptrs;
+    uint32_t ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled);
+    // ===== END ADDED (ofan) =====
 };
 
 #endif

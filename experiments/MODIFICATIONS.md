@@ -1045,3 +1045,23 @@ Ports upstream commits `0639f63`, `20b2297`, `841d9e7` (HEAD `841d9e7`, 2026-03-
 | `htsim/sim/trigger.h` / `trigger.cpp` | `BarrierTrigger::_n_members`, `activate(bool re_arm)` overload; **one original line edited**: `assert(_targets.size() > 0)` in `BarrierTrigger::activate()` commented out (as upstream) |
 
 Skipped: upstream's `sim/tests/main_dumbell_tcp.cpp` hunk (file not present here). Upstream's `952f643` (`CNP` enum) already present.
+
+### `[ADDED: ofan]` — gated by `-strat ofan`
+
+Switch-side Ofan load balancer (arXiv 2610.07230): one round-robin pointer per destination group (dest edge switch at ToR, dest pod at Agg) and packet type on northbound hops, port order from a global permutation. Hosts unchanged. Architecture doc: [`experiments/OFAN_ARCHITECTURE.md`](OFAN_ARCHITECTURE.md); results: [`exp32_ofan/README.md`](exp32_ofan/README.md). With the flag absent, output is byte-identical (regression hashes in `exp32_ofan/baseline/`).
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/datacenter/ofan_order.h` | New header-only math module (`namespace ofan`) | included by `fat_tree_switch.cpp` |
+| `htsim/sim/datacenter/fat_tree_switch.h` | `OFAN = 6` in `routing_strategy`; statics `_ofan_hash_small`, `_ofan_identity_order`, `_ofan_count`, `ofan_dump_counts`; per-switch `_ofan_ptrs`; `ofan_choose()` | `-strat ofan` |
+| `htsim/sim/datacenter/fat_tree_switch.cpp` | `ofan_choose()` and counter map; `case OFAN` in `getNextHop`; both `permute_paths` call sites for up-route vectors skipped when `_strategy == OFAN` (keeps a stable port order per switch) | `_strategy == OFAN` |
+| `htsim/sim/datacenter/main_uec.cpp` | `-strat ofan` (sets `ECMP_FIB`, `path_entropy_size=1`); `-ofan_ack_mode spray\|hash`, `-ofan_identity_order`, `-log_ofan_counts`; post-parse guard (error with `-use_srv6`, `path_*` LB, `-host_lb_overrides`; re-forces `path_entropy_size=1`); counts dump at end of run | `-strat ofan` / the flags |
+
+### `[ADDED: queue-stats]` — gated by `-log_queue_stats <file>`
+
+Per-queue statistics dump used to validate Ofan (max data-queue occupancy, bytes, trims, drops, per fat-tree layer E->A, A->C, C->A, A->E, E->H). The counters in `CompositeQueue` are always updated (one compare/add per enqueue/dequeue, no behaviour change); the dump only runs with the flag. Analysis: `exp32_ofan/scripts/link_overload.py`.
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/compositequeue.h` / `.cpp` | `_stat_max_low`, `_stat_max_total`, `_stat_bytes_low`, `_stat_bytes_high`, `_stat_pkts_low`; trims/drops reuse `_num_stripped` / `num_drops()` | counters always on; output gated |
+| `htsim/sim/datacenter/main_uec.cpp` | `-log_queue_stats` flag and TSV writer | `-log_queue_stats` |

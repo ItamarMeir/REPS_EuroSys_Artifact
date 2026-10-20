@@ -132,6 +132,9 @@ void CompositeQueue::completeService(){
         assert(!_enqueued_low.empty());
         pkt = _enqueued_low.pop();
         _queuesize_low -= pkt->size();
+        // ===== ADDED (queue-stats) =====
+        _stat_bytes_low += pkt->size(); _stat_pkts_low++;
+        // ===== END ADDED (queue-stats) =====
 
         //ECN mark on deque
         bool ecn_marked = decide_ECN();
@@ -155,6 +158,9 @@ void CompositeQueue::completeService(){
         assert(!_enqueued_high.empty());
         pkt = _enqueued_high.pop();
         _queuesize_high -= pkt->size();
+        // ===== ADDED (queue-stats) =====
+        _stat_bytes_high += pkt->size();
+        // ===== END ADDED (queue-stats) =====
         if (_logger) _logger->logQueue(*this, QueueLogger::PKT_SERVICE, *pkt);
         if (pkt->type() == NDPACK)
             _num_acks++;
@@ -362,6 +368,10 @@ void CompositeQueue::receivePacket(Packet& pkt)
             Packet* pkt_p = &pkt;
             _enqueued_low.push(pkt_p);
             _queuesize_low += pkt.size();
+            // ===== ADDED (queue-stats) =====
+            if (_queuesize_low > _stat_max_low) _stat_max_low = _queuesize_low;
+            if (_queuesize_low + _queuesize_high > _stat_max_total) _stat_max_total = _queuesize_low + _queuesize_high;
+            // ===== END ADDED (queue-stats) =====
             if (_logger) _logger->logQueue(*this, QueueLogger::PKT_ENQUEUE, pkt);
             
             if (_serv==QUEUE_INVALID) {
@@ -434,6 +444,9 @@ void CompositeQueue::receivePacket(Packet& pkt)
     Packet* pkt_p = &pkt;
     _enqueued_high.push(pkt_p);
     _queuesize_high += pkt.size();
+    // ===== ADDED (queue-stats) =====
+    if (_queuesize_low + _queuesize_high > _stat_max_total) _stat_max_total = _queuesize_low + _queuesize_high;
+    // ===== END ADDED (queue-stats) =====
     if (_logger) _logger->logQueue(*this, QueueLogger::PKT_ENQUEUE, pkt);
     
     //cout << "BH[ " << _enqueued_low.size() << " " << _enqueued_high.size() << " ]" << endl;

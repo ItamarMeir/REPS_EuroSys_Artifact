@@ -1,0 +1,23 @@
+config	fin	started	CCT_us	mean_fct	p99_fct	trims	drops	extra	RTS	rtos	fast_loss	ecn_acks	abort
+ofan_ok	54	54	98.51	98.38	98.51	0	0	0	0	0	0	0	-
+ofan_fail	54	54	324.38	141.76	324.38	437	0	15	15	1276	0	2482	-
+ecmpar_fail	50	54	358.70	157.11	358.70	0	0	14	14	1894	0	9341	-
+reps_fail	54	54	167.06	124.24	167.06	0	0	18	18	1690	0	21934	-
+ecmp_fail	52	54	328.00	216.01	328.00	2760	0	0	0	0	0	37927	-
+
+failed-link queues (A->C, C->A) in each run [switch idx per queue-stats i,j]; every packet enqueued behind a dead pipe is lost
+ofan_ok A->C [('1026', '16640')] C->A [('1027', '16576')]
+   A->C data_pkts over all links (sorted): [1026, 1026, 1026, 1026, 1026] ... [1029, 1029, 1029]
+ofan_fail A->C [('0', '0')] C->A [('1161', '30144')]
+   A->C data_pkts over all links (sorted): [0, 1040, 1040, 1041, 1041] ... [1079, 1397, 1399]
+ecmpar_fail A->C [('1414', '67008')] C->A [('1330', '192')]
+   A->C data_pkts over all links (sorted): [973, 978, 979, 1003, 1005] ... [1210, 1284, 1414]
+reps_fail A->C [('734', '25088')] C->A [('783', '21824')]
+   A->C data_pkts over all links (sorted): [734, 916, 932, 946, 985] ... [1209, 1271, 1282]
+ecmp_fail A->C [('0', '0')] C->A [('729', '48704')]
+   A->C data_pkts over all links (sorted): [0, 0, 0, 0, 0] ... [3081, 3081, 3081]
+
+ofan_fail at Switch_UpperPod_0 (owner of failed first hop US0->CS0):
+  packets (all classes) steered to the failed port: 0
+  live ports: ['US0->CS3', 'US0->CS6'] | (dest,type) keys: 9 | max spread over live ports: 1 | keys with spread>1: 0
+  per-port totals by class: {('ACK', 'US0->CS3'): 538, ('ACK', 'US0->CS6'): 539, ('DATA', 'US0->CS3'): 1617, ('DATA', 'US0->CS6'): 1616, ('OTHER', 'US0->CS3'): 1}

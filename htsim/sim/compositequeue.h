@@ -70,6 +70,14 @@ class CompositeQueue : public Queue {
     int _num_pulls;
     int _num_stripped; // count of packets we stripped
     int _num_bounced;  // count of packets we bounced
+    // ===== ADDED (queue-stats) =====
+    // Cheap always-on per-queue counters for -log_queue_stats (no behaviour change).
+    mem_b _stat_max_low = 0;        // max data (low-prio) queue occupancy seen at enqueue, bytes
+    mem_b _stat_max_total = 0;      // max low+high occupancy seen at enqueue, bytes
+    uint64_t _stat_bytes_low = 0;   // data bytes dequeued (link-serviced)
+    uint64_t _stat_bytes_high = 0;  // header/ack/nack bytes dequeued
+    uint64_t _stat_pkts_low = 0;
+    // ===== END ADDED (queue-stats) =====
     static bool _collect_data;
     static bool _use_timeouts;
     static bool scenario_micro_failures;

@@ -79,6 +79,7 @@ A first run of exp03 with leaf ECN accidentally enabled was not preserved; the l
 | [exp30_concentrated_path_loss](exp30_concentrated_path_loss/) | Loss concentrated on ToR0: Part A static degradation (n uplinks, ratio), Part B permanent kill of F uplinks; 4 and 16 MiB. | B is almost never resolvable on median FCT. One exception: at F=24 (16 MiB) B=1 is ~15% worse and is the only arm that leaves flows unfinished. | Complete: 894 runs in the tarball |
 | [exp30_packet_trimming_en](exp30_packet_trimming_en/) | exp30 rerun with trimming ON (1,008 MPRDMA/dual runs) plus an NSCC buffer ladder (756 runs). | Trimming turns degradation into ECN instead of RTOs, so freeze never engages in Part A; under a hard kill freeze fires from F=1. B is still unresolvable on FCT. | Complete; NSCC ladder data present, no written summary yet |
 | [exp31](exp31_ring_collective/) | Ring all-reduce completion time (16 ranks, 496 chained flows), 4-path fabric, B in {1,2,4}, 12 failure scenarios x 3 seeds = 108 runs. | The single-seed b1-to-b2 knee does not survive 3 seeds: B is not resolvable on CCT. Failure raises CCT 5-45x with very wide CIs. | Complete; 2 cells excluded (htsim SIGFPE) |
+| [exp32](exp32_ofan/) | Ofan switch-side per-destination round-robin LB (`-strat ofan`) vs switch AR and host REPS: 16-host balance checks, 432-host no-CCA queue sweep (1-64 MB), NSCC/MSwift, one failed link. Single seed. | Ofan edge-uplink queue stays at the proven bound (6 packets, w+1=7) for all m and downlinks are balanced; AR/REPS queues grow with m and overflow at m>=16. Failures not on the local first hop are not handled (v1). | Complete; single seed |
 
 ## 7. Mechanism ablations (why REPS differs from FREEZING)
 
@@ -109,7 +110,7 @@ All changes to `htsim/sim/` are gated behind CLI flags and are additions or wrap
 experiments/
 |-- README.md  ARCHITECTURE.md  RUNNING_EXPERIMENTS.md  MODIFICATIONS.md   (this index and the shared docs)
 |-- PATH_RR_ARCHITECTURE.md  SWIFT_CC_ARCHITECTURE.md  SRV6_VALIDATION_REPORT.md
-|-- exp01 ... exp31                       one directory per study (see tables above)
+|-- exp01 ... exp32                       one directory per study (see tables above)
 |-- meeting_06_10_26/  meetings/          meeting items and plans
 |-- workloads/  tools/  test_srv6/        shared inputs, viewer, SRv6 tests
 ```
