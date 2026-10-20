@@ -1032,3 +1032,16 @@ reached only through the new `if (_reps_soft_replay ...)` guard.
 solely to let the brainstorm plan's 4-arm comparison (baseline / fixed-P=1 / EWMA-gated /
 EWMA-gated-no-filter) reuse one code path instead of four separate implementations. Both are
 no-ops unless `-reps_soft_replay` is also passed.
+
+### `[ADDED: upstream-sync-2026-03]` — inert hooks ported from Broadcom/csg-htsim, no gate
+
+Ports upstream commits `0639f63`, `20b2297`, `841d9e7` (HEAD `841d9e7`, 2026-03-23). Upstream's public tree has no consumer for any of these; they exist for API compatibility and future merges. Behavior is unchanged unless a `.cm` file uses the new `addon` token (which still only sets an unread field).
+
+| File | What |
+|------|------|
+| `htsim/sim/eth_pause_packet.h` | `_pausedClass` member (default 0) + `getPausedClass()`/`setPausedClass()` |
+| `htsim/sim/datacenter/connection_matrix.h` | `connection::addOnTriggerSignal` (default `false`, so the other `new connection` sites are initialized too) |
+| `htsim/sim/datacenter/connection_matrix.cpp` | `.cm` connection token `addon` sets the field |
+| `htsim/sim/trigger.h` / `trigger.cpp` | `BarrierTrigger::_n_members`, `activate(bool re_arm)` overload; **one original line edited**: `assert(_targets.size() > 0)` in `BarrierTrigger::activate()` commented out (as upstream) |
+
+Skipped: upstream's `sim/tests/main_dumbell_tcp.cpp` hunk (file not present here). Upstream's `952f643` (`CNP` enum) already present.

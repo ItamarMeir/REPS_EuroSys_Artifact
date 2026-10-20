@@ -281,3 +281,13 @@ Full design-decision rationale (window ceilings, asymmetric init values, the
 1-MTU MD floor kept deliberately unraised, the FROZEN_POP validity split) and
 the complete touched-file list are in
 [`MODIFICATIONS.md`](MODIFICATIONS.md#dual-window-reps-mprdma--two-independent-mprdma-aimd-windows-for-repsfreezing).
+
+## Upstream sync (`upstream-sync-2026-03`)
+
+Inert hooks ported from `Broadcom/csg-htsim` (commits `0639f63`, `20b2297`, `841d9e7`); no CLI flag, no behavior change. Upstream's public tree has no consumer for them either: they exist so this fork stays API-compatible with upstream.
+
+- `EthPausePacket::{get,set}PausedClass()` / `_pausedClass` (default 0) in `htsim/sim/eth_pause_packet.h`.
+- `.cm` connection token `addon` sets `connection::addOnTriggerSignal` (default `false`) in `htsim/sim/datacenter/connection_matrix.{h,cpp}`. The field is never read.
+- `BarrierTrigger::activate(bool re_arm)` and `_n_members` in `htsim/sim/trigger.{h,cpp}`: after the barrier fires it resets its activation count when `re_arm` is true. `BarrierTrigger::activate()` no longer asserts `_targets.size() > 0`.
+
+Details and the full file list: [`MODIFICATIONS.md`](MODIFICATIONS.md#added-upstream-sync-2026-03--inert-hooks-ported-from-broadcomcsg-htsim-no-gate).

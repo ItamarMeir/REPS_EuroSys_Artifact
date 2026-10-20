@@ -69,8 +69,15 @@ class BarrierTrigger: public Trigger {
 public:
     BarrierTrigger(EventList& eventlist, triggerid_t id, size_t activations_needed);
     virtual void activate();
+    // ===== ADDED (upstream-sync-2026-03) ===== re-arm barrier after it fires
+    virtual void activate(bool re_arm){
+        activate();
+        if (re_arm && _activations_remaining == 0)
+            _activations_remaining = _n_members;
+    }
 private:
     size_t _activations_remaining;
+    size_t _n_members; // ===== ADDED (upstream-sync-2026-03) =====
 };
 
 #endif

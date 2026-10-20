@@ -21,6 +21,8 @@ struct connection{
     triggerid_t trigger;
     simtime_picosec start;
     int priority;
+    // ===== ADDED (upstream-sync-2026-03) ===== "addon" token in .cm; no consumer in this repo
+    bool addOnTriggerSignal = false;
 };
 
 typedef enum {UNSPECIFIED, SINGLE_SHOT, MULTI_SHOT, BARRIER} trigger_type;

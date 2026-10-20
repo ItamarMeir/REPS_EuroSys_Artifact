@@ -53,12 +53,14 @@ BarrierTrigger::BarrierTrigger(EventList& eventlist, triggerid_t id, size_t acti
     : Trigger(eventlist, id)
 {
     _activations_remaining = activations_needed;
+    _n_members = activations_needed; // ===== ADDED (upstream-sync-2026-03) =====
 }
 
 void
 BarrierTrigger::activate() {
     assert(_activations_remaining > 0);
-    assert(_targets.size() > 0);
+    // ===== ADDED (upstream-sync-2026-03) ===== upstream disabled this assert (barrier may have no targets)
+    //assert(_targets.size() > 0);
     _activations_remaining--;
     if (_activations_remaining > 0) {
         cout << "Trigger " << _id << " activated, activations remaining: "

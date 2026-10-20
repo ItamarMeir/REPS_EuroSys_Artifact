@@ -28,6 +28,9 @@ class EthPausePacket : public Packet {
     }
   
     virtual PktPriority priority() const {return Packet::PRIO_NONE;} // This shouldn't encounter a priority queue
+    // ===== ADDED (upstream-sync-2026-03) ===== PFC paused class, from Broadcom/csg-htsim 0639f63
+    virtual uint32_t getPausedClass() {return _pausedClass;}
+    virtual void setPausedClass(uint32_t pc) {_pausedClass = pc;}
     void free() {_packetdb.freePacket(this);}
     virtual ~EthPausePacket(){}
 
@@ -37,6 +40,7 @@ class EthPausePacket : public Packet {
     uint32_t _sleepTime;
     uint32_t _senderID;
     static PacketDB<EthPausePacket> _packetdb;
+    uint32_t _pausedClass{0}; // ===== ADDED (upstream-sync-2026-03) =====
 };
 
 #endif

@@ -763,6 +763,9 @@ bool ConnectionMatrix::load(istream& file){
                         cerr << "Flow ID zero is not allowed\n";
                         exit(1);
                     }
+                // ===== ADDED (upstream-sync-2026-03) =====
+                } else if (tokens[i] == "addon") {
+                    c->addOnTriggerSignal = true;
                 } else if (tokens[i] == "trigger") {
                     i++;
                     c->trigger = stoi(tokens[i]);
