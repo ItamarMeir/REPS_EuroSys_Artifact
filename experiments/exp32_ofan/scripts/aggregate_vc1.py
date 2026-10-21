@@ -2,7 +2,7 @@
 """Aggregate V-C part 1: overload % per layer per strategy (mean +- SEM over seeds) from data/vc/runs/<strat>_s<seed>.tsv.
 Also max queue (packets of 4160 B) per layer. Prints markdown and writes data/vc/vc1_summary.csv"""
 import csv, glob, os, re, statistics as st, collections
-D = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "vc")
+D = os.environ.get("VCDIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "vc")
 L = ["E->A", "A->C", "C->A", "A->E"]
 res = collections.defaultdict(lambda: collections.defaultdict(list)); mq = collections.defaultdict(lambda: collections.defaultdict(list))
 drops = collections.defaultdict(int)
@@ -15,7 +15,7 @@ for p in sorted(glob.glob(D + "/runs/*_s[0-9]*.tsv")):
         res[s][l].append((max(b) / mean - 1) * 100); mq[s][l].append(max(int(r["max_q_bytes"]) for r in by[l]) / 4160)
     drops[s] += sum(int(r["drops"]) for l in by for r in by[l])
 def ms(x): return (st.mean(x), st.stdev(x) / len(x) ** .5 if len(x) > 1 else 0.0)
-order = ["ofan", "drb", "drb_hash", "drb_src", "rr_fixed", "jsq", "ar", "ar_q193", "rsq", "rps", "reps"]
+order = ["ofan", "drb", "drb_hash", "drb_src", "drb_rand", "drb_af", "drb_af_rand", "drb_af_hash", "rr_fixed", "jsq", "ar", "ar_q193", "rsq", "rps", "reps"]
 rows = []
 print("| strategy | n | " + " | ".join(L) + " |\n|---|---|" + "---|" * 4)
 for s in order:

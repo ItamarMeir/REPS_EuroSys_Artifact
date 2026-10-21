@@ -13,7 +13,7 @@ except Exception:
     T = {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45, 7: 2.36}
     tcrit = lambda n: T.get(n - 1, 1.96)
 d = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "e2")
-runs = os.path.join(d, "runs")
+runs = os.path.join(d, "runs"); NPERM = int(sys.argv[2]) if len(sys.argv) > 2 else 432
 fin = re.compile(r"finished at ([0-9.]+) .*? rtos (\d+) freeze_entries (\d+)")
 LAYERS = ["E->A", "A->C", "C->A", "A->E", "E->H"]
 
@@ -46,7 +46,7 @@ for f in sorted(glob.glob(os.path.join(runs, "*.done"))):
     m = re.match(r"(f7a|f7b|f8|trim)__(.+?)__(perm|ata\d+)_(\d+)_(\d+)_s(\d+)$", tag)
     if not m: continue
     fig, st, wl, size, mtu, seed = m.groups(); size, mtu, seed = int(size), int(mtu), int(seed)
-    n = int(re.sub(r"\D", "", wl)) if wl.startswith("ata") else 432
+    n = int(re.sub(r"\D", "", wl)) if wl.startswith("ata") else NPERM
     r.update(fig=fig, strat=st, wl=wl, size=size, mtu=mtu, seed=seed, expected=(n * (n - 1) if wl.startswith("ata") else n), tag=tag)
     rows.append(r)
 def fam(st): return "ofan" if st.startswith("ofan") else ("reps" if st.startswith("reps") else "ar_q20000")

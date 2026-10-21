@@ -5,8 +5,8 @@
 # Env: PART (fig7a|fig7b|fig8|trim|all; default all), PAR (parallel sims, default 2), SEEDS, SIZES_MB, MTUS, ATA_N, ATA_SIZES_KB, STRATS.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); EXP=$(dirname "$HERE"); REPO=$(cd "$EXP/../.." && pwd)
-BIN=$REPO/htsim/sim/datacenter/htsim_uec; GEN=$REPO/experiments/exp32_ofan/scripts/gen_derangement.py
-OUT=$EXP/data/e2; RUNS=$OUT/runs; WL=$OUT/workloads; mkdir -p "$RUNS" "$WL"
+BIN=${BIN:-/tmp/frozen/htsim_uec_frozen}; GEN=$REPO/experiments/exp32_ofan/scripts/gen_derangement.py
+OUT=${OUT:-$EXP/data/e2}; RUNS=$OUT/runs; WL=$OUT/workloads; mkdir -p "$RUNS" "$WL"
 PART=${PART:-all}; PAR=${PAR:-2}
 PERM_N=${PERM_N:-432}; PERM_POD=${PERM_POD:-36}; PERM_TOPO=$EXP/topologies/fat_tree_${PERM_N}_1os_3t_800g.topo
 ATA_N=${ATA_N:-128}; ATA_TOPO=$EXP/topologies/fat_tree_${ATA_N}_1os_3t_800g.topo; ATA_POD=${ATA_POD:-16}

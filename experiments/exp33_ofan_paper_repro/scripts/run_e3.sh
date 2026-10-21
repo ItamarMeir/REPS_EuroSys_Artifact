@@ -7,7 +7,7 @@
 # Idempotent: a run is skipped when <tag>.done exists. Raw runs in data/e3/runs/<tag>.{out,tsv,cmd,time,done}.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); H=$(dirname "$HERE"); E=$(dirname "$H")
-BIN=$(cd "$E/../htsim/sim/datacenter" && pwd)/htsim_uec
+BIN=${BIN:-/tmp/frozen/htsim_uec_frozen}   # frozen copy (the workspace binary may be rebuilt by other agents)
 GD=$E/exp32_ofan/scripts/gen_derangement.py
 OUT=$H/data/e3; RUNS=$OUT/runs; WL=$OUT/workloads; mkdir -p "$RUNS" "$WL"
 PAR=${PAR:-2}; SEEDS=${SEEDS:-"1 2 3 4 5"}
@@ -29,6 +29,8 @@ aflags() { case $1 in
  drb)     echo "-disable_tor_ecn -q 20000 -load_balancing_algo path_rr";;
  drb_src) echo "-disable_tor_ecn -q 20000 -load_balancing_algo path_rr -path_rr_start_mode src_mod";;
  drb_hash) echo "-disable_tor_ecn -q 20000 -load_balancing_algo path_rr -path_rr_start_mode srcdst_hash";;
+ drb_rand) echo "-disable_tor_ecn -q 20000 -load_balancing_algo path_rr -path_rr_start_mode random";;
+ drb_af_rand) echo "-disable_tor_ecn -q 20000 -load_balancing_algo path_rr -path_rr_start_mode random -path_rr_order agg_fast";;
  ofan)    echo "-disable_tor_ecn -q 20000 -load_balancing_algo ecmp -strat ofan";;
  single)  echo "-disable_tor_ecn -q 20000 -load_balancing_algo ecmp";;
 esac; }

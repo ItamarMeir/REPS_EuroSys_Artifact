@@ -446,6 +446,7 @@ int main(int argc, char **argv) {
 
     // ===== ADDED (path-rr-npaths): per-host PATH_RR path-count cap =====
     std::map<uint32_t, uint32_t> path_rr_npaths_override;
+    bool path_rr_order_aggfast = false; // ===== ADDED (drb) =====
     // ===== END ADDED (path-rr-npaths) =====
 
     while (i<argc) {
@@ -642,9 +643,20 @@ int main(int argc, char **argv) {
                 UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_SRCDST_HASH;
             else if (!strcmp(m, "src_mod2")) // ===== ADDED (path-rr-startslot) =====
                 UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_SRC2;
+            else if (!strcmp(m, "random")) // ===== ADDED (drb) =====
+                UecSrc::_path_rr_start_mode = UecSrc::PATH_RR_START_RANDOM;
             else { cerr << "Unknown -path_rr_start_mode: " << m << "\n"; exit(1); }
             cout << "PATH_RR start mode: " << m << "\n";
             i++;
+        // ===== ADDED (drb) =====
+        } else if (!strcmp(argv[i], "-path_rr_order")) {
+            const char* m = argv[i+1];
+            if (!strcmp(m, "native")) path_rr_order_aggfast = false;
+            else if (!strcmp(m, "agg_fast")) path_rr_order_aggfast = true;
+            else { cerr << "Unknown -path_rr_order (native|agg_fast): " << m << "\n"; exit(1); }
+            cout << "PATH_RR order: " << m << "\n";
+            i++;
+        // ===== END ADDED (drb) =====
         } else if (!strcmp(argv[i], "-path_rr_npaths_override")) { // ===== ADDED (path-rr-npaths) =====
             std::string spec(argv[++i]);
             std::istringstream ss(spec);
@@ -2240,6 +2252,23 @@ int main(int argc, char **argv) {
                                 }
                             }
                             // ===== END ADDED (path-rr-npaths) =====
+                            // ===== ADDED (drb): -path_rr_order agg_fast =====
+                            // Native 3-tier inter-pod order is agg-major (idx = a*L + l, core = a + A*l): L
+                            // consecutive packets share one first hop (Agg). agg_fast reorders so idx i uses
+                            // Agg a=i%A, core-slot l=i/A, i.e. core index == i and consecutive packets take
+                            // different first hops (DRB: round-robin over the core switches).
+                            if (path_rr_order_aggfast && UecSrc::_load_balancing_algo == UecSrc::PATH_RR &&
+                                FatTreeTopology::get_tiers() == 3 && topo[p]->HOST_POD(src) != topo[p]->HOST_POD(dest)) {
+                                size_t np_ = full_paths.size();
+                                size_t A = topo[p]->agg_switches_per_pod();
+                                if (A > 0 && np_ % A == 0) {
+                                    size_t L = np_ / A;
+                                    vector<const Route*> perm(np_);
+                                    for (size_t i = 0; i < np_; i++) perm[i] = full_paths[(i % A) * L + (i / A)];
+                                    full_paths = perm;
+                                }
+                            }
+                            // ===== END ADDED (drb) =====
                             uec_src->setPaths(full_paths);
                             // ===== ADDED (path-rr-order) =====
                             {
@@ -2250,6 +2279,7 @@ int main(int argc, char **argv) {
                                     case UecSrc::PATH_RR_START_DST:         start_idx = dest % np; break;
                                     case UecSrc::PATH_RR_START_SRCDST_HASH: start_idx = (src * 7 + dest * 3) % np; break;
                                     case UecSrc::PATH_RR_START_SRC2:        start_idx = (src * 2) % np; break; // ===== ADDED (path-rr-startslot) =====
+                                    case UecSrc::PATH_RR_START_RANDOM:      start_idx = (uint32_t)(rand() % np); break; // ===== ADDED (drb) =====
                                     default: start_idx = 0; break;
                                 }
                                 uec_src->setPathRRStartIdx(start_idx);

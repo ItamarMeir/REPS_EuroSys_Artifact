@@ -251,6 +251,15 @@ Results: [`experiments/exp18_path_rr_startslot_v18/README.md`](exp18_path_rr_sta
 | `htsim/sim/uec.h` | `PATH_RR_START_SRC2` appended to `PathRRStartMode` enum | `-path_rr_start_mode src_mod2` |
 | `htsim/sim/datacenter/main_uec.cpp` | `src_mod2` branch in `-path_rr_start_mode` parser; `PATH_RR_START_SRC2` case in `setPathRRStartIdx` switch: `start_idx = (src * 2) % np` | `-path_rr_start_mode src_mod2` |
 
+### `[ADDED: drb]` — faithful DRB stand-in: `-path_rr_start_mode random` and `-path_rr_order agg_fast`
+
+Two opt-in knobs on `path_rr` to approximate DRB (Cao et al. CoNEXT 2013; Ofan paper S3.4/App. D: independent periodic flows with RANDOM phase, round-robin over the core switches). (1) `-path_rr_start_mode random`: each flow's start slot is `rand() % np` (simulator RNG, seeded by `-seed`; one draw per flow at setup, only when the mode is selected, so all other runs keep their RNG stream byte-identical). (2) `-path_rr_order {native|agg_fast}` (default `native`): `agg_fast` permutes the inter-pod 3-tier path list so index `i` uses Agg `i%A` and core `i` (consecutive packets take different first hops, the sequence is the cores in index order). Native enumeration is agg-major (`idx = a*L + l`), so `L` consecutive packets share one Agg/ToR uplink. ACKs under `path_rr` are NOT source-routed (`UecAckPacket::newpkt(..., NULL, ...)`): they follow the switch FIB/ECMP with the echoed path id, so they are neither pinned nor synchronised and no separate ACK pointer was added. Verified: `baseline.sh` hashes identical, `path_rr` smoke (zero, srcdst_hash) stdout identical before/after. Results: [`exp32_ofan/V_C_theory_figures.md`](exp32_ofan/V_C_theory_figures.md) section "DRB faithfulness".
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/uec.h` | `PATH_RR_START_RANDOM` appended to `PathRRStartMode` enum | `-path_rr_start_mode random` |
+| `htsim/sim/datacenter/main_uec.cpp` | `random` branch in `-path_rr_start_mode` parser; `-path_rr_order` parser + local `path_rr_order_aggfast`; `agg_fast` permutation of `full_paths` before `setPaths` (3-tier inter-pod, PATH_RR only); `PATH_RR_START_RANDOM` case in start-idx switch | `-path_rr_start_mode random`, `-path_rr_order agg_fast` |
+
 ### `[ADDED: path-random]` — gated by `-load_balancing_algo path_random`
 
 Per-packet uniform-random path selection using the same source-routing infrastructure as PATH_RR.

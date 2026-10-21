@@ -551,7 +551,7 @@ public:
     // ===== ADDED (path-rr-order) =====
     // Controls the starting index in the RR cycle per flow.  zero = all start
     // at index 0 (synchronized); src/dst/srcdst_hash = staggered per flow.
-    enum PathRRStartMode { PATH_RR_START_ZERO = 0, PATH_RR_START_SRC, PATH_RR_START_DST, PATH_RR_START_SRCDST_HASH, PATH_RR_START_SRC2 }; // ===== ADDED (path-rr-startslot): (src*2)%np =====
+    enum PathRRStartMode { PATH_RR_START_ZERO = 0, PATH_RR_START_SRC, PATH_RR_START_DST, PATH_RR_START_SRCDST_HASH, PATH_RR_START_SRC2, PATH_RR_START_RANDOM /* ===== ADDED (drb) ===== */ }; // ===== ADDED (path-rr-startslot): (src*2)%np =====
     static PathRRStartMode _path_rr_start_mode;
     // ===== END ADDED (path-rr-order) =====
     // ===== ADDED (per-host-lb): declarations placed after the enum =====

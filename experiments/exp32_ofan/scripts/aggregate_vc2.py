@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """V-C part 2 (paper Fig 17): max queue over ALL switch queues per run; ratio DRB-variant / Ofan per seed, mean +- SEM; ratio of means too."""
 import csv, glob, os, re, statistics as st, collections
-D = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "vc", "runs2")
+D = os.path.join(os.environ.get("VCDIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "vc"), "runs2")
 mx = collections.defaultdict(dict); mx_fab = collections.defaultdict(dict)
 for p in glob.glob(D + "/*_n*_s*.tsv"):
     m = re.match(r"(.+)_n(\d+)_s(\d+)\.tsv", os.path.basename(p)); s, n, seed = m.group(1), int(m.group(2)), int(m.group(3))
