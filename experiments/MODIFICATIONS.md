@@ -1125,3 +1125,12 @@ Ofan with the schedule weighted by the number of live shortest paths through eac
 | `htsim/sim/datacenter/fat_tree_switch.cpp` | weighted branch in `ofan_choose`; weights in `rc_lookup` (an all-valid but unequal entry is returned); `rc_agg_paths`/`rc_compute_weights`; brute-force path-count reference (`ref_count`, `ref_weights`) in `-routing_check`; `ROUTING_CHECK_WEIGHTS` line | as above; check output only with `-routing_check` and the strategy |
 | `htsim/sim/datacenter/main_uec.cpp` | `-strat ofan_weighted` handler; errors if used without `-routing_convergence_us` or with `-log_ofan_trace` | as above |
 | `experiments/exp32_ofan/scripts/` | `run_w1.sh`, `summarize_w1.py`, `predict_link_load.py`, `gate_weighted.sh`, `rc_random_w.sh`, `rc_random_suite_w.sh`, `rc_check_w.py` | manual |
+
+
+### `[ADDED: fail-pipes-file]` — `-fail_pipes_file <file>` (static random-failure sets)
+
+Fails an arbitrary set of cables of a 3-tier fat-tree from 0.01 us for the whole run (both directions, bundle 0), reusing `LinkFailureEvent` so the failures are registered with the routing-convergence model. File lines: `C <agg> <core>` (Agg<->Core, global agg id) or `E <tor> <agg>` (ToR<->Agg, global ToR and agg ids); `#`/blank lines ignored. Errors if combined with `-fail_link_time`, on a non-3-tier topology, or for an unknown link. Used by exp33 E6 (Ofan paper Fig 9) with `scripts/fig9_instance.py`. Flag absent: no change.
+
+| File | What | Gate |
+|------|------|------|
+| `htsim/sim/datacenter/main_uec.cpp` | variable `fail_pipes_file`, argument parsing, one block after the `-fail_link_*` scheduling | `-fail_pipes_file` |

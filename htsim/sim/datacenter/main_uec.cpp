@@ -416,6 +416,9 @@ int main(int argc, char **argv) {
     // Multi-link failure: each entry is one (agg_id, core_id) pair. If empty
     // when -fail_link_time is set, defaults to a single (0,0) link.
     vector<pair<int,int>> fail_link_targets;
+    // ===== ADDED (fail-pipes-file) =====
+    string fail_pipes_file;               // -fail_pipes_file <file>: static failed links ("C agg core" / "E tor agg")
+    // ===== END ADDED (fail-pipes-file) =====
 
     // ===== ADDED (timed-failure) =====
     // exp29: transient failure of the first F spine uplinks (or downlinks) of one
@@ -1210,6 +1213,11 @@ int main(int argc, char **argv) {
                  << ", core=" << core
                  << " (total targets=" << fail_link_targets.size() << ")" << endl;
             i += 2;
+        // ===== ADDED (fail-pipes-file) =====
+        } else if (!strcmp(argv[i],"-fail_pipes_file")){
+            fail_pipes_file = argv[i+1];
+            i++;
+        // ===== END ADDED (fail-pipes-file) =====
         // ===== ADDED (timed-failure) =====
         } else if (!strcmp(argv[i],"-timed_window")){
             timed_fail_start_us   = atof(argv[i+1]);
@@ -2381,6 +2389,48 @@ int main(int argc, char **argv) {
                  << " recover@" << fail_link_recover_us << "us" << endl;
         }
     }
+
+    // ===== ADDED (fail-pipes-file) =====
+    // Static random-failure sets (Ofan paper Fig 9 style). Each line of the file is one cut cable (both
+    // directions fail together, from 0.01 us, never recover; registered with the routing-convergence model):
+    //   C <agg> <core>   Agg<->Core link (global agg id, core id; bundle 0), 3-tier only
+    //   E <tor> <agg>    ToR<->Agg link (global ToR id, global agg id; bundle 0), 3-tier only
+    // '#' lines and blank lines are ignored.
+    if (!fail_pipes_file.empty()) {
+        if (fail_link_fail_us > 0.0) {
+            cerr << "-fail_pipes_file cannot be combined with -fail_link_time" << endl;
+            exit(1);
+        }
+        if (topo.empty() || topo[0] == nullptr || FatTreeTopology::get_tiers() != 3) {
+            cerr << "-fail_pipes_file requires a 3-tier topology" << endl;
+            exit(1);
+        }
+        ifstream fpf(fail_pipes_file.c_str());
+        if (!fpf) { cerr << "cannot open -fail_pipes_file " << fail_pipes_file << endl; exit(1); }
+        FatTreeTopology* t0 = topo[0];
+        string line; int nfail = 0;
+        while (getline(fpf, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            istringstream ls(line);
+            string kind; int a, b;
+            if (!(ls >> kind >> a >> b)) { cerr << "bad -fail_pipes_file line: " << line << endl; exit(1); }
+            Pipe *up = nullptr, *down = nullptr;
+            if (kind == "C" && a >= 0 && (size_t)a < t0->pipes_nup_nc.size() && b >= 0 && (size_t)b < t0->pipes_nup_nc[a].size()
+                && !t0->pipes_nup_nc[a][b].empty() && (size_t)b < t0->pipes_nc_nup.size()
+                && (size_t)a < t0->pipes_nc_nup[b].size() && !t0->pipes_nc_nup[b][a].empty()) {
+                up = t0->pipes_nup_nc[a][b][0]; down = t0->pipes_nc_nup[b][a][0];
+            } else if (kind == "E" && a >= 0 && (size_t)a < t0->pipes_nlp_nup.size() && b >= 0 && (size_t)b < t0->pipes_nlp_nup[a].size()
+                && !t0->pipes_nlp_nup[a][b].empty() && (size_t)b < t0->pipes_nup_nlp.size()
+                && (size_t)a < t0->pipes_nup_nlp[b].size() && !t0->pipes_nup_nlp[b][a].empty()) {
+                up = t0->pipes_nlp_nup[a][b][0]; down = t0->pipes_nup_nlp[b][a][0];
+            }
+            if (!up || !down) { cerr << "-fail_pipes_file: link not found: " << line << endl; exit(1); }
+            new LinkFailureEvent(eventlist, up, down, (simtime_picosec)10000, (simtime_picosec)0);
+            nfail++;
+        }
+        cout << "[fail_pipes_file] " << nfail << " links failed from 0.01 us (static)" << endl;
+    }
+    // ===== END ADDED (fail-pipes-file) =====
 
     // ===== ADDED (timed-failure) =====
     // exp29: transient failure of the first F spine uplinks (and/or downlinks) of

@@ -63,3 +63,7 @@ Orderings and trends (Ofan's flat queues and about 1-3% CCT increase; AR/REPS gr
 ## E5: trimming and RTO checks
 
 See [E5_trim_rto_checks.md](E5_trim_rto_checks.md). Fig 12 results are bit-identical with trimming disabled (no run ever overflows the 193-packet buffer), so trimming does not explain the baseline mismatches. The paper's Fig 7a REPS degradation at 64 MB appears in our simulator only when the RTO is about as short as the peak queueing RTT (+56.7% at 20 us, +8% at 25 us). The cause is a spurious-RTO retransmission loop, not freezing. With the default RTO REPS stays at about +4%. Our AR does not match the paper (+7% to +28% at 64 MB vs about +2%). Ofan matches (+0.44%).
+
+
+## E6: Fig 9 (random link failures), plain vs weighted Ofan
+See `E6_results.md` and `plots/e6_fig9/fig9.png`. Result: the paper's Ofan-vs-REPS/AR gap is reproduced by plain (unweighted) Ofan; the weighted extension (`-strat ofan_weighted`) leads by more than the paper shows. Suggestive, not conclusive (topology and rho_max definition for Fig 9 unknown).
