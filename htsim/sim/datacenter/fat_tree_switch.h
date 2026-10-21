@@ -126,8 +126,11 @@ public:
     enum routing_strategy {
         NIX = 0, ECMP = 1, ADAPTIVE_ROUTING = 2, ECMP_ADAPTIVE = 3, RR = 4, RR_ECMP = 5,
         // ===== ADDED (ofan) =====
-        OFAN = 6
+        OFAN = 6,
         // ===== END ADDED (ofan) =====
+        // ===== ADDED (switch-baselines) =====
+        RR_FIXED = 7, RANDOM = 8, P2C = 9
+        // ===== END ADDED (switch-baselines) =====
     };
 
     enum sticky_choices {
@@ -149,6 +152,9 @@ public:
     static int8_t compare_pause(FibEntry* l, FibEntry* r);
     static int8_t compare_bandwidth(FibEntry* l, FibEntry* r);
     static int8_t compare_queuesize(FibEntry* l, FibEntry* r);
+    // ===== ADDED (switch-baselines) ===== exact (unquantized) queue-size comparator = paper JSQ
+    static int8_t compare_queuesize_exact(FibEntry* l, FibEntry* r);
+    // ===== END ADDED (switch-baselines) =====
     static int8_t compare_pqb(FibEntry* l, FibEntry* r);//compare pause,queue, bw.
     static int8_t compare_pq(FibEntry* l, FibEntry* r);//compare pause, queue
     static int8_t compare_pb(FibEntry* l, FibEntry* r);//compare pause, bandwidth
@@ -183,6 +189,9 @@ public:
     static bool _ofan_count;           // -log_ofan_counts: per-physical-port counters
     static void ofan_dump_counts(const string& file);
     // ===== END ADDED (ofan) =====
+    // ===== ADDED (ofan-trace) =====
+    static string _ofan_trace_file;    // -log_ofan_trace: per-decision TSV trace (empty = off)
+    // ===== END ADDED (ofan-trace) =====
 
     // ===== ADDED (routing-convergence) =====
     // valid[i] = FIB entry i of `hops` (a set of this switch toward dst ToR `dst_tor`) leads to dst_tor

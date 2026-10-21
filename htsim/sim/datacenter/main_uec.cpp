@@ -1306,8 +1306,14 @@ int main(int argc, char **argv) {
                 cout << "Adaptive routing based on queuesize, bandwidth utilization" << endl;
                 FatTreeSwitch::fn = &FatTreeSwitch::compare_qb; 
             }
+            // ===== ADDED (switch-baselines) =====
+            else if (!strcmp(argv[i+1],"exact")){
+                cout << "Adaptive routing based on exact queue size (JSQ)" << endl;
+                FatTreeSwitch::fn = &FatTreeSwitch::compare_queuesize_exact;
+            }
+            // ===== END ADDED (switch-baselines) =====
             else {
-                cout << "Unknown AR method expecting one of pause, queue, bandwidth, pqb, pq, pb, qb" << endl;
+                cout << "Unknown AR method expecting one of pause, queue, bandwidth, pqb, pq, pb, qb, exact" << endl;
                 exit(1);
             }
             i++;
@@ -1348,6 +1354,20 @@ int main(int argc, char **argv) {
                 route_strategy = ECMP_FIB;
                 path_entropy_size = 1;
                 FatTreeSwitch::set_strategy(FatTreeSwitch::RR);
+            // ===== ADDED (switch-baselines) =====
+            } else if (!strcmp(argv[i+1], "ecmp_rr_fixed")) {
+                route_strategy = ECMP_FIB;
+                path_entropy_size = 1;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::RR_FIXED);
+            } else if (!strcmp(argv[i+1], "ecmp_random")) {
+                route_strategy = ECMP_FIB;
+                path_entropy_size = 1;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::RANDOM);
+            } else if (!strcmp(argv[i+1], "ecmp_p2c")) {
+                route_strategy = ECMP_FIB;
+                path_entropy_size = 1;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::P2C);
+            // ===== END ADDED (switch-baselines) =====
             // ===== ADDED (ofan) =====
             } else if (!strcmp(argv[i+1], "ofan")) {
                 // switch-based per-destination round robin (arXiv 2610.07230)
@@ -1374,6 +1394,11 @@ int main(int argc, char **argv) {
             ofan_counts_file = string(argv[i+1]);
             i++;
         // ===== END ADDED (ofan) =====
+        // ===== ADDED (ofan-trace) =====
+        } else if (!strcmp(argv[i], "-log_ofan_trace")) {
+            FatTreeSwitch::_ofan_trace_file = string(argv[i+1]);
+            i++;
+        // ===== END ADDED (ofan-trace) =====
         // ===== ADDED (routing-convergence) =====
         } else if (!strcmp(argv[i], "-routing_convergence_us")) {
             RoutingConvergence::enable(atof(argv[i+1]));
@@ -1547,6 +1572,12 @@ int main(int argc, char **argv) {
         exit(1);
     }
     // ===== END ADDED (routing-convergence) =====
+    // ===== ADDED (ofan-trace) =====
+    if (!FatTreeSwitch::_ofan_trace_file.empty() && FatTreeSwitch::_strategy != FatTreeSwitch::OFAN) {
+        cerr << "-log_ofan_trace requires -strat ofan" << endl;
+        exit(1);
+    }
+    // ===== END ADDED (ofan-trace) =====
     // ===== ADDED (ofan) =====
     if (FatTreeSwitch::_strategy == FatTreeSwitch::OFAN) {
         // Source-routed packets bypass the switch FIB, so Ofan would silently do nothing.

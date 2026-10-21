@@ -268,6 +268,16 @@ int8_t FatTreeSwitch::compare_queuesize(FibEntry* left, FibEntry* right){
         return 0;
 }
 
+// ===== ADDED (switch-baselines) =====
+int8_t FatTreeSwitch::compare_queuesize_exact(FibEntry* left, FibEntry* right){
+    BaseQueue* q1 = dynamic_cast<BaseQueue*>(left->getEgressPort()->at(0));
+    BaseQueue* q2 = dynamic_cast<BaseQueue*>(right->getEgressPort()->at(0));
+    if (q1->queuesize() < q2->queuesize()) return 1;
+    else if (q1->queuesize() > q2->queuesize()) return -1;
+    return 0;
+}
+// ===== END ADDED (switch-baselines) =====
+
 int8_t FatTreeSwitch::compare_bandwidth(FibEntry* left, FibEntry* right){
     Route * r1= left->getEgressPort();
     assert(r1 && r1->size()>1);
@@ -365,6 +375,7 @@ bool FatTreeSwitch::use_adaptive_roce = false;
 bool FatTreeSwitch::_ofan_hash_small = false;
 bool FatTreeSwitch::_ofan_identity_order = false;
 bool FatTreeSwitch::_ofan_count = false;
+string FatTreeSwitch::_ofan_trace_file = "";  // ===== ADDED (ofan-trace) =====
 // "switch<TAB>d<TAB>t<TAB>class<TAB>egress queue" -> packets (TSV: node names contain commas). Keyed by PHYSICAL egress queue
 // (not FIB index) so it also catches port-order inconsistencies across keys.
 static unordered_map<string, uint64_t> g_ofan_counts;
@@ -375,6 +386,14 @@ void FatTreeSwitch::ofan_dump_counts(const string& file) {
     for (unordered_map<string, uint64_t>::const_iterator it = g_ofan_counts.begin(); it != g_ofan_counts.end(); ++it)
         f << it->first << "\t" << it->second << "\n";
 }
+
+// ===== ADDED (ofan-trace) =====
+#include <set>
+static ofstream& ofan_trace_stream(const string& file) {
+    static ofstream tr(file.c_str());
+    return tr;
+}
+// ===== END ADDED (ofan-trace) =====
 
 // Returns the index into hops of the chosen egress port. Sets handled=false
 // (caller then uses the ECMP hash) for any set Ofan does not own: only
@@ -409,7 +428,19 @@ uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& 
         _ofan_ptrs[d] = data_init;
         _ofan_ptrs[d + Nd] = ofan::init_ptr_ack(data_init, w);
         it = _ofan_ptrs.find(id);
+        // ===== ADDED (ofan-trace) =====
+        if (!_ofan_trace_file.empty()) {
+            ofstream& tr = ofan_trace_stream(_ofan_trace_file);
+            const char* ty = (_type == TOR) ? "TOR" : "AGG";
+            for (int tt = 0; tt < 2; tt++)
+                tr << "I\t" << nodename() << "\t" << ty << "\t" << getID() << "\t" << d << "\t" << tt << "\t"
+                   << _ofan_ptrs[d + Nd * tt] << "\n";
+        }
+        // ===== END ADDED (ofan-trace) =====
     }
+    // ===== ADDED (ofan-trace) =====
+    int trace_ptr_before = it->second;
+    // ===== END ADDED (ofan-trace) =====
 
     // Skip locally failed first-hop pipes. The pointer is committed past the
     // slot actually used (ofan::pick) so each live port still gets one packet
@@ -444,6 +475,26 @@ uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& 
         choice = ofan::step(it->second, id, w, ofan::DEFAULT_SEED, _ofan_identity_order);
     }
 
+    // ===== ADDED (ofan-trace) =====
+    if (!_ofan_trace_file.empty()) {
+        ofstream& tr = ofan_trace_stream(_ofan_trace_file);
+        static set<int> perm_done;
+        if (!perm_done.count(w)) {
+            perm_done.insert(w);
+            const vector<int>& P = ofan::shared_perm(w);
+            tr << "P\t" << w << "\t";
+            for (int i = 0; i < w; i++) tr << (i ? "," : "") << P[i];
+            tr << "\n";
+        }
+        const char* pt = (pkt.type() == UECDATA && pkt.header_only()) ? "TRIM" :
+            pkt.type() == UECDATA ? "DATA" : pkt.type() == UECACK ? "ACK" :
+            pkt.type() == UECNACK ? "NACK" : pkt.type() == UECPULL ? "PULL" : "OTHER";
+        tr << "D\t" << eventlist().now() << "\t" << nodename() << "\t" << (_type == TOR ? "TOR" : "AGG") << "\t"
+           << getID() << "\t" << pt << "\t" << pkt.size() << "\t" << pkt.dst() << "\t" << d << "\t" << Nd << "\t"
+           << t << "\t" << w << "\t" << trace_ptr_before << "\t" << choice << "\t"
+           << (*hops)[choice]->getEgressPort()->at(0)->nodename() << "\n";
+    }
+    // ===== END ADDED (ofan-trace) =====
     if (_ofan_count) {
         // control packets are header_only() too, so test the type first
         const char* cls = (pkt.type() == UECDATA && pkt.header_only()) ? "TRIM" :
@@ -570,6 +621,29 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                 break;
             }
             // ===== END ADDED (ofan) =====
+            // ===== ADDED (switch-baselines) =====
+            case RR_FIXED:
+                // Simple RR as in the Ofan paper: fixed port order, one switch-wide pointer, no per-round permutation
+                if (pkt.size()<128)
+                    ecmp_choice = freeBSDHash(pkt.flow_id_src_dest(),pkt.pathid(),_hash_salt) % available_hops->size();
+                else {
+                    ecmp_choice = _crt_route % available_hops->size();
+                    _crt_route ++;
+                }
+                break;
+            case RANDOM:
+                if (pkt.size()<100)
+                    ecmp_choice = freeBSDHash(pkt.flow_id_src_dest(),pkt.pathid(),_hash_salt) % available_hops->size();
+                else
+                    ecmp_choice = random() % available_hops->size();
+                break;
+            case P2C:
+                if (pkt.size()<100)
+                    ecmp_choice = freeBSDHash(pkt.flow_id_src_dest(),pkt.pathid(),_hash_salt) % available_hops->size();
+                else
+                    ecmp_choice = adaptive_route_p2c(available_hops,fn);
+                break;
+            // ===== END ADDED (switch-baselines) =====
             }
 
         FibEntry* e = (*available_hops)[ecmp_choice];
@@ -664,7 +738,7 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                 }
                 _uproutes = _fib->getRoutes(pkt.dst());
                 // ===== ADDED (ofan) ===== Ofan needs one stable port order per switch
-                if (_strategy != OFAN)
+                if (_strategy != OFAN && _strategy != RR_FIXED)
                 // ===== END ADDED (ofan) =====
                 permute_paths(_uproutes);
             }
@@ -713,7 +787,7 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                 }
                 //_uproutes = _fib->getRoutes(pkt.dst());
                 // ===== ADDED (ofan) ===== per-destination shuffle would break key consolidation
-                if (_strategy != OFAN)
+                if (_strategy != OFAN && _strategy != RR_FIXED)
                 // ===== END ADDED (ofan) =====
                 permute_paths(_fib->getRoutes(pkt.dst()));
             }

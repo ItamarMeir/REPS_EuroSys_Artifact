@@ -1070,6 +1070,7 @@ Failure-knowledge model for switch-side load balancers (paper "Modeling routing 
 | `htsim/sim/datacenter/main_uec.cpp` + `fat_tree_switch.cpp` (hidden flag) | `-routing_check_random <trials> <seed> <p>`: knowledge-only test; random subset (prob p) of ALL pipes of the reference edge list (4 arrays, all bundle members) as the known-down set, `Pipe::_failed` untouched, synthetic production-vs-reference comparison for every (switch, dst ToR), real known set restored; requires `-routing_check`. Also: hard errors for source-routed algos / `-fail_src_paths` / `-sol_avoid_timed_failure` / non-finite or negative G; `-routing_check` exits 1 at end of run when mismatches > 0; `drops_after_known` uses the failure interval in force at the drop. | the flag |
 | `experiments/exp32_ofan/scripts/rc_random.sh`, `rc_random_suite.sh`, `topologies/fat_tree_32_bundle2_3t_400g.topo`, `workloads/derange{8,32,432}_1mb_s42.cm` | driver for the random test over 16/54/128/432 3-tier, 32 2-tier and two bundle topologies (`*.cm` gitignored: regenerate with `gen_derangement.py`) | manual |
 | `experiments/exp32_ofan/scripts/rc_check.py` | G2 driver: random failed-pipe sets x G x strategy on 16/54/128-host 3-tier and 32-host 2-tier | manual |
+| `htsim/sim/datacenter/fat_tree_switch.{h,cpp}` + `main_uec.cpp` (`// ===== ADDED (ofan-trace) =====`) | `-log_ofan_trace <tsv>` (hard-requires `-strat ofan`; zero behaviour change when absent, baseline SHA256 identical): per `ofan_choose` decision one TAB line `D time_ps switch TOR/AGG swid pkttype size dst d Nd t w ptr_before chosen_fib_idx egress_queue`, once per (switch,key) an `I` line (data+ACK initial pointers), once per w a `P` line (shared permutation). Consumed by `experiments/exp32_ofan/scripts/ofan_reference.py` (independent model from paper Sec.4/App.F.2 eq.16-18, with corruption self-tests); driver `scripts/run_vtrace.sh`. Traces under `data/vtrace/` are not committed. | manual |
 | `experiments/exp32_ofan/workloads/derange128_1mb_s42.cm`, `perm32_1mb_s42.cm` | check workloads (`*.cm` is gitignored: regenerate with `gen_derangement.py <out> 128 16 1048576 42`; `perm32` = seeded 32-host derangement) | n/a |
 
 ### `[ADDED: queue-stats]` — gated by `-log_queue_stats <file>`
@@ -1080,3 +1081,25 @@ Per-queue statistics dump used to validate Ofan (max data-queue occupancy, bytes
 |------|-------------|------|
 | `htsim/sim/compositequeue.h` / `.cpp` | `_stat_max_low`, `_stat_max_total`, `_stat_bytes_low`, `_stat_bytes_high`, `_stat_pkts_low`; trims/drops reuse `_num_stripped` / `num_drops()` | counters always on; output gated |
 | `htsim/sim/datacenter/main_uec.cpp` | `-log_queue_stats` flag and TSV writer | `-log_queue_stats` |
+
+### `[ADDED: switch-baselines]` — gated by `-strat ecmp_rr_fixed|ecmp_random|ecmp_p2c` and `-ar_method exact`
+
+Switch-side baselines for the Ofan paper reproduction (exp33; arXiv 2610.07230). Data-sized packets only; packets < 128 B (Simple RR) / < 100 B (others) are ECMP-hashed exactly like the existing `RR`/`ADAPTIVE_ROUTING` cases, so ACK/header handling matches the existing baselines. All three set `route_strategy = ECMP_FIB`, `path_entropy_size = 1` at parse time (use `-load_balancing_algo ecmp`; unlike `-strat ofan` there is no post-parse override, so a later `-paths` is not forced back to 1 and there is no `-use_srv6`/`path_*` guard). With a `-routing_convergence_us` failure model they run on the filtered vector through the generic path (verified by smoke run: all flows finish, `decisions_to_known_dead=0`).
+
+| Flag | Paper name | Behaviour |
+|------|-----------|-----------|
+| `-strat ecmp_rr_fixed` (`RR_FIXED = 7`) | Simple RR | Like `ecmp_rr` but WITHOUT the per-round `permute_paths`: fixed port order, one switch-wide pointer `_crt_route` (shared by all destinations), `ptr % n_hops`. The two `permute_paths` call sites of the FIB build (TOR up-routes, AGG up-routes) are skipped for this strategy (same guard as OFAN), otherwise the order would still be a random-but-fixed shuffle per destination. |
+| `-strat ecmp_random` (`RANDOM = 8`) | RSQ | Per-packet uniform random uplink `random() % n_hops`. Same libc `random()` stream as AR tie-breaking, so with `-q` large enough that every quantized queue reads 0 `ecmp_ar` is byte-identical to `ecmp_random` (observed, a useful sanity check). |
+| `-strat ecmp_p2c` (`P2C = 9`) | Choice/P2C | Wires the previously unused `adaptive_route_p2c`: 2 uniform random draws (with replacement), pick the smaller exact `queuesize()`. |
+| `-ar_method exact` | JSQ | New comparator `compare_queuesize_exact` on exact `queuesize()`; use with `-strat ecmp_ar`. Ties broken uniformly at random by the existing `adaptive_route`. The existing `queue` comparator is quantized to 5% of `maxsize()` (+ update period) and so degenerates to random at the large `-q` used for no-CCA runs. |
+
+| File | Lines / what | Gate |
+|------|-------------|------|
+| `htsim/sim/datacenter/fat_tree_switch.h` | `RR_FIXED/RANDOM/P2C` enum values; `compare_queuesize_exact` | new strategies / `-ar_method exact` |
+| `htsim/sim/datacenter/fat_tree_switch.cpp` | `compare_queuesize_exact`; three `case`s in `getNextHop`; `permute_paths` guards extended to `RR_FIXED` | as above |
+| `htsim/sim/datacenter/main_uec.cpp` | `-strat` handlers and `-ar_method exact` | as above |
+| `experiments/exp33_ofan_paper_repro/scripts/verify_baselines.sh` | 54 hosts, 1 MB permutation, no-CCA, per-layer max queue | manual |
+
+### `[ADDED: dctcp-debug-gate]` — behaviour-preserving
+
+The unconditional per-ACK `cout` at the top of `UecSrc::updateCwndOnAck_DCTCP` (`htsim/sim/uec.cpp`) is now guarded by `if (_debug)` (static `UecSrc::_debug`). No state change; only removes stdout volume (multi-GB at 432 hosts) for `-sender_cc_algo dctcp` runs.

@@ -2280,6 +2280,9 @@ void UecSrc::logMetricCwnd(uint64_t cwnd) {
 }
 
 void UecSrc::updateCwndOnAck_DCTCP(bool skip, simtime_picosec rtt, mem_b newly_acked_bytes) {
+    // ===== ADDED (dctcp-debug-gate) =====
+    if (_debug)
+    // ===== END ADDED (dctcp-debug-gate) =====
     cout << timeAsUs(eventlist().now()) << " DCTCP start " << _name << " cwnd " << _cwnd
          << " with params skip " << skip << " acked bytes " << newly_acked_bytes << endl;
 
