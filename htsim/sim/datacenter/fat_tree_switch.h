@@ -189,6 +189,9 @@ public:
     static bool _ofan_count;           // -log_ofan_counts: per-physical-port counters
     static void ofan_dump_counts(const string& file);
     // ===== END ADDED (ofan) =====
+    // ===== ADDED (ofan-weighted) =====
+    static bool _ofan_weighted;        // -strat ofan_weighted (OFAN + path-count weights; needs -routing_convergence_us)
+    // ===== END ADDED (ofan-weighted) =====
     // ===== ADDED (ofan-trace) =====
     static string _ofan_trace_file;    // -log_ofan_trace: per-decision TSV trace (empty = off)
     // ===== END ADDED (ofan-trace) =====
@@ -197,6 +200,12 @@ public:
     // valid[i] = FIB entry i of `hops` (a set of this switch toward dst ToR `dst_tor`) leads to dst_tor
     // using only pipes not known down. Public for the -routing_check debug pass.
     void rc_compute_mask(vector<FibEntry*>* hops, uint32_t dst_tor, vector<bool>& valid);
+    // ===== ADDED (ofan-weighted) =====
+    // weight[i] = live shortest paths through entry i (0 iff !valid[i]). Cleared when all valid weights are equal
+    // unless keep_uniform (used by the -routing_check pass). Public for that pass.
+    void rc_compute_weights(vector<FibEntry*>* hops, uint32_t dst_tor, const vector<bool>& valid, vector<int>& weight,
+                            bool keep_uniform = false);
+    // ===== END ADDED (ofan-weighted) =====
     // ===== END ADDED (routing-convergence) =====
 
 private:
@@ -222,7 +231,12 @@ private:
     // pod at AGG, t: 0 data, 1 small packets). Created lazily.
     unordered_map<uint32_t,int> _ofan_ptrs;
     // ===== ADDED (routing-convergence) ===== extra arg: validity mask (NULL = none)
-    uint32_t ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid = NULL);
+    // ===== ADDED (ofan-weighted) ===== extra arg: per-entry path-count weights (NULL = plain Ofan)
+    uint32_t ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid = NULL,
+                         const vector<int>* rc_weight = NULL);
+    // weighted schedule pointer per key id: (pointer, schedule length L)
+    unordered_map<uint32_t,pair<int,int> > _ofanw_ptrs;
+    // ===== END ADDED (ofan-weighted) =====
     // ===== END ADDED (routing-convergence) =====
     // ===== END ADDED (ofan) =====
 
@@ -240,12 +254,18 @@ private:
         vector<bool> valid;               // indexed like the ORIGINAL vector
         vector<FibEntry*> filtered;       // valid entries in original order (used if !all_valid && !dead_end)
         vector<FibEntry*> invalid;        // invalid entries by identity (the original vector may be re-permuted in place by RR)
+        // ===== ADDED (ofan-weighted) =====
+        vector<int> weight;               // valid-path count per entry; EMPTY unless -strat ofan_weighted AND the valid weights differ
+        // ===== END ADDED (ofan-weighted) =====
     };
     unordered_map<RcKey, RcEntry, RcKeyHash> _rc_cache;
     uint64_t _rc_last_epoch = 0;
     // NULL if every entry is valid (caller keeps using the original vector untouched)
     RcEntry* rc_lookup(vector<FibEntry*>* hops, uint32_t dst_tor);
     bool rc_agg_reaches(uint32_t agg, uint32_t dst_tor);
+    // ===== ADDED (ofan-weighted) =====
+    uint32_t rc_agg_paths(uint32_t agg, uint32_t dst_tor);   // number of live shortest paths agg -> dst ToR
+    // ===== END ADDED (ofan-weighted) =====
     // ===== END ADDED (routing-convergence) =====
 };
 

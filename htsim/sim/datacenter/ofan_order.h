@@ -96,6 +96,50 @@ inline int pick(int& ptr, uint32_t id, int w, const std::vector<bool>& valid,
 inline int init_ptr_data(int rnd, int w) { return rnd % w; }
 inline int init_ptr_ack(int data_init, int w) { return (data_init + w / 2) % w; }
 
+// ===== ADDED (ofan-weighted) =====
+// Weighted variant (extension, not in the paper): port i has integer weight wt[i] >= 0 (0 = invalid, e.g. the
+// number of valid paths through that port). The schedule is an interleaved weighted round robin over the SAME
+// permuted port order pi: sub-round r (r = 0..maxw-1) visits, in pi order, every port with wn[port] > r, where
+// wn = wt / gcd(positive weights). One full schedule has L = sum(wn) slots and gives port i exactly wn[i] slots.
+// With all weights equal and positive the schedule is exactly the plain Ofan order (L = w).
+// Header-only helpers; the plain functions above are untouched.
+inline int gcd_int(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }
+
+// Normalises wt in place by the gcd of its positive entries; returns L = sum (0 if no positive weight).
+inline int normalize_weights(std::vector<int>& wt) {
+    int g = 0, L = 0;
+    for (size_t i = 0; i < wt.size(); i++) if (wt[i] > 0) g = gcd_int(g, wt[i]);
+    if (g == 0) return 0;
+    for (size_t i = 0; i < wt.size(); i++) { wt[i] = wt[i] > 0 ? wt[i] / g : 0; L += wt[i]; }
+    return L;
+}
+
+// Physical port of schedule slot s in [0, L) for normalised weights wn (size w).
+inline int weighted_port(int s, uint32_t id, int w, const std::vector<int>& wn,
+                         uint64_t seed = DEFAULT_SEED, bool identity = false) {
+    int maxw = 0;
+    for (int i = 0; i < w; i++) if (wn[i] > maxw) maxw = wn[i];
+    for (int r = 0; r < maxw; r++) {
+        int cnt = 0;
+        for (int i = 0; i < w; i++) if (wn[pi(i, id, w, seed, identity)] > r) cnt++;
+        if (s >= cnt) { s -= cnt; continue; }
+        for (int i = 0; i < w; i++) {
+            int port = pi(i, id, w, seed, identity);
+            if (wn[port] > r) { if (s == 0) return port; s--; }
+        }
+    }
+    return pi(0, id, w, seed, identity);  // unreachable for 0 <= s < L
+}
+
+// Weighted step: output the port of slot ptr, then ptr = (ptr+1) mod L.
+inline int weighted_step(int& ptr, uint32_t id, int w, const std::vector<int>& wn, int L,
+                         uint64_t seed = DEFAULT_SEED, bool identity = false) {
+    int port = weighted_port(ptr, id, w, wn, seed, identity);
+    ptr = (ptr + 1) % L;
+    return port;
+}
+// ===== END ADDED (ofan-weighted) =====
+
 }  // namespace ofan
 
 #endif

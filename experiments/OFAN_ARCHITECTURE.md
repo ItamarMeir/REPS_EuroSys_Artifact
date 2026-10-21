@@ -111,3 +111,8 @@ Requires the flag. At t=0, at every knowledge transition and at the end, for eve
 ## Switch-side baselines (exp33)
 
 For the paper's comparison set the same switch hook also provides `-strat ecmp_rr_fixed` (Simple RR: fixed port order, one switch-wide pointer, no per-round permutation; the FIB-build `permute_paths` sites are skipped as for Ofan), `-strat ecmp_random` (RSQ), `-strat ecmp_p2c` (power of two choices) and `-ar_method exact` with `-strat ecmp_ar` (JSQ on exact queue size). Details and gates: MODIFICATIONS.md `switch-baselines`. They have no key/pointer structure and no mask handling of their own; under `-routing_convergence_us` they use the filtered vector like ECMP/AR.
+
+
+## Weighted Ofan (`-strat ofan_weighted`, extension)
+
+Not in the paper. Under a failure the paper's Ofan skips invalid ports and gives every live port one slot per round. On an asymmetric fabric (for example a pod's Agg that lost one of its core uplinks) the damaged Agg then receives the same share as the intact ones and its surviving links carry more than their share: in the 54-host k=6 test the hottest links carry 1.5x the healthy load instead of 9/8. `ofan_weighted` gives each ToR up-port a weight equal to the number of live shortest paths through it (from the same known-down set as the validity mask) and runs an interleaved weighted round robin over the same permuted port order. If all valid weights are equal it falls back to plain Ofan. Details, gates and results: `experiments/exp32_ofan/W1_weighted_ofan.md`.

@@ -375,6 +375,9 @@ bool FatTreeSwitch::use_adaptive_roce = false;
 bool FatTreeSwitch::_ofan_hash_small = false;
 bool FatTreeSwitch::_ofan_identity_order = false;
 bool FatTreeSwitch::_ofan_count = false;
+// ===== ADDED (ofan-weighted) =====
+bool FatTreeSwitch::_ofan_weighted = false;
+// ===== END ADDED (ofan-weighted) =====
 string FatTreeSwitch::_ofan_trace_file = "";  // ===== ADDED (ofan-trace) =====
 // "switch<TAB>d<TAB>t<TAB>class<TAB>egress queue" -> packets (TSV: node names contain commas). Keyed by PHYSICAL egress queue
 // (not FIB index) so it also catches port-order inconsistencies across keys.
@@ -399,7 +402,8 @@ static ofstream& ofan_trace_stream(const string& file) {
 // (caller then uses the ECMP hash) for any set Ofan does not own: only
 // northbound sets (TOR->AGG, AGG->CORE) have a per-destination pointer; DOWN
 // sets (incl. bundles) and CORE switches are single-path per destination.
-uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid) {
+uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& handled, const vector<bool>* rc_valid,
+                                    const vector<int>* rc_weight) {
     handled = false;
     if ((*hops)[0]->getDirection() != UP || (_type != TOR && _type != AGG))
         return 0;
@@ -419,6 +423,35 @@ uint32_t FatTreeSwitch::ofan_choose(Packet& pkt, vector<FibEntry*>* hops, bool& 
     }
     int w = (int)hops->size();
     uint32_t id = d + Nd * t;
+
+    // ===== ADDED (ofan-weighted) =====
+    // Weighted schedule (only when the valid entries have DIFFERENT path counts; otherwise plain Ofan below,
+    // so a symmetric fabric is byte-identical to -strat ofan). Own pointer map; reset (mod L) if L changes.
+    if (rc_weight && !rc_weight->empty()) {
+        vector<int> wn(*rc_weight);
+        int L = ofan::normalize_weights(wn);
+        if (L > 0) {
+            unordered_map<uint32_t,pair<int,int> >::iterator wit = _ofanw_ptrs.find(id);
+            if (wit == _ofanw_ptrs.end()) {
+                int data_init = ofan::init_ptr_data((int)(random() % (uint32_t)L), L);
+                _ofanw_ptrs[d] = make_pair(data_init, L);
+                _ofanw_ptrs[d + Nd] = make_pair(ofan::init_ptr_ack(data_init, L), L);
+                wit = _ofanw_ptrs.find(id);
+            }
+            if (wit->second.second != L) { wit->second.first %= L; wit->second.second = L; }
+            int wchoice = ofan::weighted_step(wit->second.first, id, w, wn, L, ofan::DEFAULT_SEED, _ofan_identity_order);
+            if (_ofan_count) {
+                const char* cls = (pkt.type() == UECDATA && pkt.header_only()) ? "TRIM" :
+                    pkt.type() == UECDATA ? "DATA" : pkt.type() == UECACK ? "ACK" :
+                    pkt.type() == UECNACK ? "NACK" : pkt.type() == UECPULL ? "PULL" : "OTHER";
+                g_ofan_counts[nodename() + "\t" + to_string(d) + "\t" + to_string(t) + "\t" + cls + "\t" +
+                              (*hops)[wchoice]->getEgressPort()->at(0)->nodename()]++;
+            }
+            handled = true;
+            return (uint32_t)wchoice;
+        }
+    }
+    // ===== END ADDED (ofan-weighted) =====
 
     // data/ACK pointers of a destination are created together: the ACK one
     // starts half a round away from the data one.
@@ -611,7 +644,10 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             // ===== ADDED (ofan) =====
             case OFAN: {
                 bool handled;
-                ecmp_choice = ofan_choose(pkt, available_hops, handled, rc ? &rc->valid : NULL);
+                // ===== ADDED (ofan-weighted) ===== weights only for non-dead-end entries (empty = plain Ofan)
+                ecmp_choice = ofan_choose(pkt, available_hops, handled, rc ? &rc->valid : NULL,
+                                          (rc && !rc->dead_end) ? &rc->weight : NULL);
+                // ===== END ADDED (ofan-weighted) =====
                 // ===== ADDED (routing-convergence) ===== non-owned sets hash over the filtered vector
                 if (!handled && rc && !rc->dead_end)
                     available_hops = &rc->filtered;
@@ -851,6 +887,9 @@ static bool g_known_stale = true;
 static unordered_set<Pipe*> g_known;
 
 static uint64_t g_mismatches = 0, g_runs = 0, g_real_checks = 0, g_synth_checks = 0;
+// ===== ADDED (ofan-weighted) =====
+static uint64_t g_weight_checks = 0;
+// ===== END ADDED (ofan-weighted) =====
 
 simtime_picosec G() { return g_G; }
 
@@ -1002,6 +1041,39 @@ static bool ref_reach(Switch* cur, int phase, int remaining, Switch* T) {
     return false;
 }
 
+// ===== ADDED (ofan-weighted) =====
+// Independent path count: number of distinct switch sequences (valley-free, exactly `remaining` hops, live pipes;
+// parallel bundle pipes between the same two switches count once) from cur to T.
+static int ref_count(Switch* cur, int phase, int remaining, Switch* T) {
+    if (cur == T) return remaining == 0 ? 1 : 0;
+    if (remaining == 0) return 0;
+    vector<int>& adj = g_adj[cur];
+    unordered_set<Switch*> seen;
+    int n = 0;
+    for (size_t k = 0; k < adj.size(); k++) {
+        const REdge& e = g_edges[adj[k]];
+        if (known_down(e.p)) continue;
+        if (phase == 1 && e.up) continue;
+        if (!seen.insert(e.to).second) continue;
+        n += ref_count(e.to, e.up ? 0 : 1, remaining - 1, T);
+    }
+    return n;
+}
+
+static void ref_weights(FatTreeTopology* ft, vector<FibEntry*>* hops, uint32_t T, const vector<bool>& mask, vector<int>& out) {
+    Switch* Tsw = ft->switches_lp[T];
+    out.assign(hops->size(), 0);
+    for (size_t i = 0; i < hops->size(); i++) {
+        if (!mask[i]) continue;
+        BaseQueue* q = dynamic_cast<BaseQueue*>((*hops)[i]->getEgressPort()->at(0));
+        unordered_map<BaseQueue*, int>::iterator it = g_edge_of_q.find(q);
+        if (it == g_edge_of_q.end()) continue;
+        const REdge& e = g_edges[it->second];
+        out[i] = e.up ? ref_count(e.to, 0, ref_minlen(e.from, Tsw) - 1, Tsw) : 1;
+    }
+}
+// ===== END ADDED (ofan-weighted) =====
+
 static void ref_mask(FatTreeTopology* ft, vector<FibEntry*>* hops, uint32_t T, vector<bool>& out, const char* who) {
     Switch* Tsw = ft->switches_lp[T];
     out.assign(hops->size(), true);
@@ -1128,6 +1200,21 @@ static void synth_pass(FatTreeTopology* ft, const char* when, bool item6) {
                 ref_mask(ft, &hops, T, ref, "synthetic");
                 compare_masks(S, T, prod, ref, "synthetic", when);
                 g_synth_checks++;
+                // ===== ADDED (ofan-weighted) =====
+                if (FatTreeSwitch::_ofan_weighted) {
+                    vector<int> pw, rw;
+                    S->rc_compute_weights(&hops, T, prod, pw, true);
+                    ref_weights(ft, &hops, T, ref, rw);
+                    for (size_t i = 0; i < pw.size(); i++)
+                        if (pw[i] != rw[i]) {
+                            g_mismatches++;
+                            if (g_mismatches <= 40)
+                                printf("ROUTING_CHECK MISMATCH (weights,%s) switch=%s dstTor=%u entry=%zu prod=%d ref=%d\n", when,
+                                       S->nodename().c_str(), T, i, pw[i], rw[i]);
+                        }
+                    g_weight_checks++;
+                }
+                // ===== END ADDED (ofan-weighted) =====
                 if (agg_up && item6) {
                     bool any = false;
                     for (size_t i = 0; i < prod.size(); i++) any = any || prod[i];
@@ -1174,6 +1261,10 @@ void schedule_checks(EventList& el, FatTreeTopology* ft) {
 }
 
 void print_summary() {
+    // ===== ADDED (ofan-weighted) =====
+    if (check && FatTreeSwitch::_ofan_weighted)
+        printf("ROUTING_CHECK_WEIGHTS checks=%llu\n", (unsigned long long)g_weight_checks);
+    // ===== END ADDED (ofan-weighted) =====
     printf("ROUTING_CONV decisions_to_known_dead=%llu drops_before_known=%llu drops_after_known=%llu\n",
            (unsigned long long)decisions_to_known_dead,
            (unsigned long long)Pipe::_rc_drops_before_known,
@@ -1210,6 +1301,51 @@ bool FatTreeSwitch::rc_agg_reaches(uint32_t k, uint32_t T) {
     }
     return false;
 }
+
+// ===== ADDED (ofan-weighted) =====
+// Number of live shortest agg->dst-ToR paths through AGG `k` (same legs as rc_agg_reaches, counted not or-ed;
+// a bundle of parallel pipes counts as one leg if any pipe is live).
+uint32_t FatTreeSwitch::rc_agg_paths(uint32_t k, uint32_t T) {
+    if (FatTreeTopology::get_tiers() == 2)
+        return rc_any_live(_ft->pipes_nup_nlp[k][T]) ? 1 : 0;
+    uint32_t A = _ft->agg_switches_per_pod();
+    uint32_t podT = T / _ft->tor_switches_per_pod();
+    if (k / A == podT)
+        return rc_any_live(_ft->pipes_nup_nlp[k][T]) ? 1 : 0;
+    uint32_t podpos = k % A, n = 0;
+    uint32_t uplink_bundles = _ft->radix_up(AGG_TIER) / _ft->bundlesize(CORE_TIER);
+    for (uint32_t l = 0; l < uplink_bundles; l++) {
+        uint32_t c = l * A + podpos;
+        if (!rc_any_live(_ft->pipes_nup_nc[k][c])) continue;
+        uint32_t dagg = podT * A + c % A;
+        if (rc_any_live(_ft->pipes_nc_nup[c][dagg]) && rc_any_live(_ft->pipes_nup_nlp[dagg][T])) n++;
+    }
+    return n;
+}
+
+// weight[i] = number of live shortest paths through FIB entry i (0 iff !valid[i]). Left EMPTY when all valid
+// entries have the same weight (then plain Ofan applies). Only ToR up-entries can differ; an AGG up-entry is a
+// single core -> dest agg -> dest ToR path (weight 1).
+void FatTreeSwitch::rc_compute_weights(vector<FibEntry*>* hops, uint32_t T, const vector<bool>& valid, vector<int>& weight,
+                                       bool keep_uniform) {
+    weight.assign(hops->size(), 0);
+    for (size_t i = 0; i < hops->size(); i++) {
+        if (!valid[i]) continue;
+        FibEntry* fe = (*hops)[i];
+        int wv = 1;
+        if (fe->getDirection() == UP && _type == TOR) {
+            FatTreeSwitch* n = dynamic_cast<FatTreeSwitch*>(fe->getEgressPort()->at(2));
+            if (n) wv = (int)rc_agg_paths(n->getID(), T);
+        }
+        weight[i] = wv;
+        if (wv <= 0) { fprintf(stderr, "rc_compute_weights: valid entry with 0 paths at %s\n", nodename().c_str()); exit(1); }
+    }
+    int first = 0; bool uniform = true;
+    for (size_t i = 0; i < weight.size(); i++)
+        if (weight[i] > 0) { if (!first) first = weight[i]; else if (weight[i] != first) uniform = false; }
+    if (uniform && !keep_uniform) weight.clear();
+}
+// ===== END ADDED (ofan-weighted) =====
 
 void FatTreeSwitch::rc_compute_mask(vector<FibEntry*>* hops, uint32_t T, vector<bool>& valid) {
     RoutingConvergence::refresh(eventlist().now());
@@ -1262,6 +1398,14 @@ FatTreeSwitch::RcEntry* FatTreeSwitch::rc_lookup(vector<FibEntry*>* hops, uint32
     for (size_t i = 0; i < e.valid.size(); i++) nvalid += e.valid[i] ? 1 : 0;
     e.all_valid = (nvalid == e.valid.size());
     e.dead_end = (nvalid == 0);
+    // ===== ADDED (ofan-weighted) =====
+    // weights only matter if the valid entries differ; an all-valid but unequal entry must still be returned
+    e.weight.clear();
+    if (_ofan_weighted && nvalid > 0) {
+        rc_compute_weights(hops, T, e.valid, e.weight);
+        if (!e.weight.empty()) e.all_valid = false;
+    }
+    // ===== END ADDED (ofan-weighted) =====
     e.filtered.clear();
     e.invalid.clear();
     for (size_t i = 0; i < hops->size(); i++) {

@@ -1387,6 +1387,14 @@ int main(int argc, char **argv) {
                 path_entropy_size = 1;
                 FatTreeSwitch::set_strategy(FatTreeSwitch::OFAN);
             // ===== END ADDED (ofan) =====
+            // ===== ADDED (ofan-weighted) =====
+            } else if (!strcmp(argv[i+1], "ofan_weighted")) {
+                // Ofan + path-count weights under known failures (extension; requires -routing_convergence_us)
+                route_strategy = ECMP_FIB;
+                path_entropy_size = 1;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::OFAN);
+                FatTreeSwitch::_ofan_weighted = true;
+            // ===== END ADDED (ofan-weighted) =====
             }
             i++;
         // ===== ADDED (queue-stats) =====
@@ -1584,6 +1592,16 @@ int main(int argc, char **argv) {
         exit(1);
     }
     // ===== END ADDED (routing-convergence) =====
+    // ===== ADDED (ofan-weighted) =====
+    if (FatTreeSwitch::_ofan_weighted && !RoutingConvergence::enabled) {
+        cerr << "-strat ofan_weighted requires -routing_convergence_us (weights come from the failure-knowledge model)" << endl;
+        exit(1);
+    }
+    if (FatTreeSwitch::_ofan_weighted && !FatTreeSwitch::_ofan_trace_file.empty()) {
+        cerr << "-log_ofan_trace is not supported with -strat ofan_weighted" << endl;
+        exit(1);
+    }
+    // ===== END ADDED (ofan-weighted) =====
     // ===== ADDED (ofan-trace) =====
     if (!FatTreeSwitch::_ofan_trace_file.empty() && FatTreeSwitch::_strategy != FatTreeSwitch::OFAN) {
         cerr << "-log_ofan_trace requires -strat ofan" << endl;
