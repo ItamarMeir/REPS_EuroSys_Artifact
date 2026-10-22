@@ -41,5 +41,22 @@ Excess over each instance's own ideal: plain Ofan 2.9-4.4%, weighted Ofan 1.3-1.
 
 What is established independently of the paper: plain Ofan under asymmetric failures leaves a 3-4% excess over the capacity-limited ideal and 15-20-packet queues; the path-weighted variant cuts that to ~1.5% and 7-8 packets (W1, `experiments/exp32_ofan/W1_weighted_ofan.md`, and here). The plain variant still beats REPS and AR by a clear margin in every case, so the paper's qualitative Fig 9 claim does not require weighting.
 
+## Follow-up (2026-10-22): more seeds and LP-optimal rho_max
+**More seeds.** 0.5% and 2% extended to 30 instances (seeds 1-30; 440 runs total, all flows finished, no drops). Means +- SEM of CCT increase: at 0.5% REPS 24.2 +- 0.6, AR 23.3 +- 0.7, plain Ofan 16.8 +- 0.9, weighted 15.4 +- 0.7; at 2% REPS 35.9 +- 1.6, AR 36.5 +- 1.7, plain 31.5 +- 1.8, weighted 29.4 +- 1.7. Paired lead over REPS (points), n=30:
+
+| p (%) | paper | plain Ofan | weighted Ofan |
+|---|---|---|---|
+| 0.5 | ~6 | 7.3 +- 0.5 | 8.8 +- 0.7 |
+| 2 | ~2.5 | 4.4 +- 0.6 | 6.5 +- 0.4 |
+
+With the tighter errors plain Ofan is still closer to the paper than weighted, but it is not an exact match either: it leads by about 1 point (0.5%) and 2 points (2%) more than the paper (read by eye, +-1). Weighted Ofan is 2.5-4 points above the paper. The earlier "plain reproduces the trend within error" is therefore softened to "plain is the closer of the two".
+
+**LP-optimal rho_max** (`scripts/lp_rho.py`, `scripts/make_lp_instances.sh`; max concurrent flow over valid shortest paths, so every host paces at the highest rate any split could carry). Seeds 1-10 at 0.5% and 2%, data in `data/e6lp/` (uncommitted). LP rho_max is higher than the equal-share one (e.g. 0.667 vs 0.620 at p=2% seed 1), so the ideal CCT increase drops (2%: 22.0 vs 28.2 for these seeds). Both Ofan variants, paced faster than their splits can carry, queue more (max queue plain 22 / 39 packets at 0.5 / 2%, weighted 9 / 28) and sit 5-8% (plain) and 2-6% (weighted) above that ideal. REPS/AR/JSQ are 10-13% above it. CCT increase barely moves for any strategy (0.5%: plain 17.6, weighted 14.3, REPS 25.1; 2%: plain 31.9, weighted 29.3, REPS 35.3), and the paired lead over REPS is unchanged (plain 7.5 +- 0.6 / 3.5 +- 1.1, weighted 10.8 +- 2.0 / 6.1 +- 1.2). So the rho_max definition does not decide the weighted-vs-plain question.
+
+**Not done:** another topology size (needs a new topology file and instance generator settings; the paper's size is unknown) and a ToR-only-weighted variant.
+
+## Verdict after follow-up
+The data lean toward unweighted Ofan (closer to the paper's lead over REPS/AR at both p values, robust to the rho_max definition), but no variant matches exactly and the paper's topology, message size and values are uncertain. Treat as "more consistent with plain", not as proof.
+
 ## Possible follow-ups (not done)
-Other topology sizes (the paper's Fig 9 size is unknown), an LP-optimal rho_max, a variant that weights only the ToR tier versus both tiers, and a larger seed count at 0.5% and 2%.
+Other topology sizes (the paper's Fig 9 size is unknown), a variant that weights only the ToR tier versus both tiers.

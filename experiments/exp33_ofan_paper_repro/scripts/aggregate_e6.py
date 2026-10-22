@@ -4,7 +4,7 @@ CCT increase = (max flow finish / LB1 - 1) * 100 with LB1 = healthy single flow 
 'ideal' = healthy single flow paced at the instance's rho_max (rate loss only, no queueing).
 excess = increase - ideal increase (what the LB itself costs beyond the capacity lost to failures)."""
 import csv, glob, json, os, re, statistics, sys
-H = os.path.dirname(os.path.abspath(__file__)); B = os.path.join(H, ".."); D = f"{B}/data/e6"
+H = os.path.dirname(os.path.abspath(__file__)); B = os.path.join(H, ".."); DN = os.environ.get("E6DIR", "e6"); D = f"{B}/data/{DN}"
 
 def cct(path):
     t = [float(x) for x in re.findall(r"finished at ([0-9.]+)", open(path, errors="ignore").read())]
@@ -74,7 +74,7 @@ print("\n".join(lines))
 # ---- plot (paper style): paper values read by eye from Fig 9 (approximate)
 from paperstyle import *
 import numpy as np
-os.makedirs(f"{B}/plots/e6_fig9", exist_ok=True)
+PD = "e6_fig9" if DN == "e6" else f"{DN}_fig9"; os.makedirs(f"{B}/plots/{PD}", exist_ok=True)
 paper = {"reps": [13, 21, 24.5, 28, 30.5], "ar193": [12.5, 21, 24.5, 27.5, 31], "ofan": [3.5, 15, 19.5, 23, 28]}
 px = [0, 0.5, 1, 1.5, 2]
 fig, axs = plt.subplots(1, 2, figsize=(6.4, 2.3))
@@ -94,4 +94,4 @@ for ax, (title, sel) in zip(axs, [("this repo (432 hosts)", True), ("paper Fig 9
     ax.set_xlabel("Link Failure Probability (%)"); ax.set_ylabel("CCT Increase (%)"); ax.grid(True, zorder=0); ax.set_title(title, fontsize=7)
     ax.legend(fontsize=5.5, frameon=False)
 axs[1].set_ylim(axs[0].get_ylim())
-fig.tight_layout(); fig.savefig(f"{B}/plots/e6_fig9/fig9.png"); print("plot written")
+fig.tight_layout(); fig.savefig(f"{B}/plots/{PD}/fig9.png"); print("plot written")
