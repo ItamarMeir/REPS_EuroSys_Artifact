@@ -22,7 +22,7 @@ Data: existing C1 traces (`meeting_06_10_26/C1`) plus new single-seed runs (seed
 2. **That queue is inside the ECN ramp.** Degraded links scale buffer and ECN thresholds by 0.5 (12 to 38 pkts at 200 Gbps, 2 to 6 us). A 25-pkt standing queue marks about half the packets; at the 6 us target (about 36 pkts) it marks most. Prediction confirmed by the target sweep: ECN share and random share fall monotonically as the target drops (1 us: 7.7% ECN, 17% random), at the cost of longer FCT (764 us vs 731 us), since a low target underfills the pipe.
 3. **Not a ToR0-only artifact.** Degrading every ToR uplink in the tree gives the same numbers as ToR0 alone (57 vs 59% random at 4.17 us).
 4. **The "inherently slower network" control must keep the NIC faster than the fabric.** Native 200G (NICs also 200G) looks healthy because the host NIC is the bottleneck, so no network queue forms and the cwnd stays flat at 79 with 0.1% ECN. A 400G-NIC / 200G-fabric tree cannot be built with this topology generator (radix mismatch: 64 uplinks required), so the all-ToR-uplink x0.5 run is the faithful equivalent.
-5. **Freezing is not involved**: trim is on, so overload yields NACKs, `rtos` and `freeze_entries` stay 0 in these runs (see the stdout files).
+5. **Freezing is not involved**: trim is on, so overload yields NACKs, `rtos` and `freeze_entries` are 0 summed over all 1024 flows in every run saved in `data/*.stdout.txt`.
 6. MPRDMA (window cut on ECN, no delay target) keeps the marked share at 9% and the valid share at 89%, consistent with the C1 result.
 
 ## Implication for the meeting question

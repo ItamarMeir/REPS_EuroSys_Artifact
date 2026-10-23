@@ -21,4 +21,8 @@ Tornado (1024 flows), max FCT (us), RTOs:
 | 200 | 689.94, no ECN | 706.84, 64k ECN acks (matched) |
 | 400 | 356.61, 9.7k ECN acks | 715.62, 136k ECN acks (over) |
 
-No RTOs in any cell. Flag absent: identical flow-finish lines to the pre-change binary (tornado NSCC x32, md5 equal).
+No RTOs in any cell. Finish lines show `cwnd 4150000000` bytes (the override reached the sources).
+
+Injection rate measured from the `-log_reps_events` trace (SEND+RTX rows of ToR0 host 0, degraded fabric, 100 us windows): R=200 -> 6.00 pkts/us (expected 6.02, 43 rtx); R=400 -> 11.9 to 12.05 pkts/us in steady state (expected 12.05; 3989 of 8096 packets are retransmits, so retransmits do spend the budget and the over-capacity sender is not ACK-throttled). Early windows run ~1.5% under R (shared NIC with ACK/control traffic).
+
+Flag absent: every full flow-finish line (time and all counters) of the tornado NSCC x32 run is identical between the pre-change and post-change binary (`diff` empty, 1024 lines).

@@ -1066,7 +1066,7 @@ Switch-side Ofan load balancer (arXiv 2610.07230): one round-robin pointer per d
 | `htsim/sim/datacenter/fat_tree_switch.cpp` | `ofan_choose()` and counter map; `case OFAN` in `getNextHop`; both `permute_paths` call sites for up-route vectors skipped when `_strategy == OFAN` (keeps a stable port order per switch) | `_strategy == OFAN` |
 | `htsim/sim/datacenter/main_uec.cpp` | `-strat ofan` (sets `ECMP_FIB`, `path_entropy_size=1`); `-ofan_ack_mode spray\|hash`, `-ofan_identity_order`, `-log_ofan_counts`; post-parse guard (error with `-use_srv6`, `path_*` LB, `-host_lb_overrides`; re-forces `path_entropy_size=1`); counts dump at end of run | `-strat ofan` / the flags |
 
-### `[ADDED: routing-convergence]` � gated by `-routing_convergence_us <G>`
+### `[ADDED: routing-convergence]` � gated by `-routing_convergence_us <G>`
 
 Failure-knowledge model for switch-side load balancers (paper "Modeling routing convergence": one parameter G, the same for every switch). A pipe failed at `t_fail` and restored at `t_recover` is *known down* iff `t_fail+G <= now < t_recover+G`; before that switches keep forwarding into the dead pipe (`Pipe::_failed` drops the packets). Once known, every multi-entry FIB set is filtered to the entries that still reach the destination ToR. Applied identically to `ofan`, `ecmp_host`, `ecmp_ar`, `ecmp_rr`, `rr_ecmp`, `ecmp_host_ar`. Under the flag Ofan's legacy instant local `Pipe::isFailed()` skip is disabled. Hard errors: `-failures_input`, `-routing_check` without the flag. Out of scope: `-failed N` degradation, host links, FAILURE_GENERATOR failures. Design and limits: [`OFAN_ARCHITECTURE.md`](OFAN_ARCHITECTURE.md) section "Failure convergence model". With the flag absent, output is byte-identical (regression hashes in `exp32_ofan/baseline/`, checked after this change).
 
@@ -1138,7 +1138,7 @@ Fails an arbitrary set of cables of a 3-tier fat-tree from 0.01 us for the whole
 
 ### `[ADDED: rate-const-sender]` — `-rate_const_gbps <R>` (timer-paced constant-rate sender)
 
-Per-source sender that injects data packets (new and retransmitted) at most at R Gbps of wire rate (packet size incl. header, i.e. `_mtu`-sized packets), independent of ACK arrival. Requires `-sender_cc_algo constant`; `cwnd` is forced to 1,000,000 packets so the window never binds. Gate `rateGate()` is checked at every data-send entry point; `rateCharge()` advances an absolute per-source schedule after each emitted data packet; a lazily-created `UecRatePacer` event wakes `sendIfPermitted()` at the next permitted time. RTS/control packets are not charged. Design and validation: [`RATE_CONST_ARCHITECTURE.md`](RATE_CONST_ARCHITECTURE.md). Flag absent: byte-identical (verified, tornado NSCC x32, 1024 flow-finish lines, md5 equal).
+Per-source sender that injects data packets (new and retransmitted) at most at R Gbps of wire rate (packet size incl. header, i.e. `_mtu`-sized packets), independent of ACK arrival. Requires `-sender_cc_algo constant`; `cwnd` is forced to 1,000,000 packets so the window never binds. Gate `rateGate()` is checked at every data-send entry point; `rateCharge()` advances an absolute per-source schedule after each emitted data packet; a lazily-created `UecRatePacer` event wakes `sendIfPermitted()` at the next permitted time. RTS/control packets are not charged. Design and validation: [`RATE_CONST_ARCHITECTURE.md`](RATE_CONST_ARCHITECTURE.md). Flag absent: byte-identical (verified: full flow-finish lines incl. times and counters identical, tornado NSCC x32, 1024 lines).
 
 | File | What | Gate |
 |------|------|------|
@@ -1148,7 +1148,7 @@ Per-source sender that injects data packets (new and retransmitted) at most at R
 
 ### `[ADDED: per-link-degrade]` — `-degrade_links_file <file>` (non-uniform ToR uplink degradation)
 
-Lines `tor agg ratio` (`#` comments ok, ratio in (0,1]) slow that ToR->agg uplink to ratio x speed; queue size and both ECN thresholds scale with the same ratio (same behavior as `-failed`/`-down_ratio`, but per link). Independent of `-failed`/`-skip_asy`/`-down_ratio`; uplinks only (downlink degrade is disabled in the existing code). Works on 2-tier fat trees (unlike `-fail_pipes_file`, which kills links in 3-tier only). Validation: uniform 0.5 on ToR0 uplinks reproduces `-failed 32 -down_ratio 0.5` byte-identically (flow-finish md5 equal); non-uniform (even agg 0.25, odd 0.75) prints 32 `Failure:` lines summing to 16/32 of healthy capacity. Flag absent: no change.
+Lines `tor agg ratio` (`#` comments ok, ratio in (0,1]) slow that ToR->agg uplink to ratio x speed; queue size and both ECN thresholds scale with the same ratio (same behavior as `-failed`/`-down_ratio`, but per link). Independent of `-failed`/`-skip_asy`/`-down_ratio`; uplinks only (downlink degrade is disabled in the existing code). Works on 2-tier fat trees (unlike `-fail_pipes_file`, which kills links in 3-tier only). Validation: uniform 0.5 on ToR0 uplinks reproduces `-failed 32 -down_ratio 0.5` byte-identically (full flow-finish lines identical, 1024 lines); non-uniform (even agg 0.25, odd 0.75) prints 32 `Failure:` lines summing to 16/32 of healthy capacity. Flag absent: no change.
 
 | File | What | Gate |
 |------|------|------|
