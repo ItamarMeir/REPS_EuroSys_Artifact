@@ -1,0 +1,3 @@
+single__ofan_perm_16777216_4160 ofan single 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+single__ar_q20000_perm_16777216_4160 ar_q20000 single 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+single__reps_perm_16777216_4160 reps single 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000

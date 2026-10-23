@@ -1,0 +1,8 @@
+trim__reps__perm_16777216_4160_s1 reps perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+trim__reps_q193__perm_16777216_4160_s1 reps_q193 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+trim__reps_trim_q20000__perm_16777216_4160_s1 reps_trim_q20000 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+trim__reps_trim_q193__perm_16777216_4160_s1 reps_trim_q193 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 16777216 4160 1 200000
+trim__reps__perm_67108864_4160_s1 reps perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 67108864 4160 1 200000
+trim__reps_q193__perm_67108864_4160_s1 reps_q193 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 67108864 4160 1 200000
+trim__reps_trim_q20000__perm_67108864_4160_s1 reps_trim_q20000 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 67108864 4160 1 200000
+trim__reps_trim_q193__perm_67108864_4160_s1 reps_trim_q193 perm 432 /workspace/experiments/exp33_ofan_paper_repro/topologies/fat_tree_432_1os_3t_800g.topo 36 67108864 4160 1 200000
