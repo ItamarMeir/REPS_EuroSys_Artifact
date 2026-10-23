@@ -30,6 +30,7 @@
 
 static const unsigned uecMaxInFlightPkts = 1 << 14;
 class UecPullPacer;
+class UecRatePacer; // ===== ADDED (rate-const-sender) =====
 class UecSink;
 class UecSrc;
 class UecLogger;
@@ -666,6 +667,22 @@ public:
     void startFlow();
     bool isSpeculative();
     void sendIfPermitted();
+
+    // ===== ADDED (rate-const-sender) =====
+    // Timer-paced sender: with -rate_const_gbps R (needs -sender_cc_algo constant
+    // and a non-binding cwnd), data packets (new + rtx) leave at most at R per
+    // source, independent of ACK arrival. _rate_const_bps == 0 means off.
+public:
+    static double _rate_const_bps;
+private:
+    simtime_picosec _rate_next_send = 0;
+    bool _rate_pacer_armed = false;
+    UecRatePacer* _rate_pacer = nullptr;
+    bool rateGate();                 // true if a data packet may leave now; else arms pacer
+    void rateCharge(mem_b pkt_size); // account one emitted data packet
+    void rateWake();                 // pacer fired
+    friend class UecRatePacer;
+    // ===== END ADDED (rate-const-sender) =====
     mem_b sendPacket(const Route& route);
     mem_b sendNewPacket(const Route& route);
     mem_b sendRtxPacket(const Route& route);
@@ -1417,6 +1434,16 @@ public:
     static bool _oversubscribed_cc;
     static bool _model_pcie;
 };
+
+// ===== ADDED (rate-const-sender) =====
+class UecRatePacer : public EventSource {
+public:
+    UecRatePacer(EventList& el, UecSrc& src) : EventSource(el, "uecRatePacer"), _src(src) {}
+    void doNextEvent() override;
+private:
+    UecSrc& _src;
+};
+// ===== END ADDED (rate-const-sender) =====
 
 class UecPullPacer : public EventSource {
    public:

@@ -42,6 +42,10 @@ mem_b FatTreeTopology::_ecn_low = 0;
 mem_b FatTreeTopology::_ecn_high = 0;
 uint32_t FatTreeTopology::_num_failed_links = 0;
 double FatTreeTopology::_failed_link_ratio = 0.5;
+// ===== ADDED (per-link-degrade) =====
+std::map<std::pair<uint32_t,uint32_t>, double> FatTreeTopology::_degrade_links;
+double FatTreeTopology::_alloc_ratio_override = 0;
+// ===== END ADDED (per-link-degrade) =====
 
 void
 FatTreeTopology::set_tier_parameters(int tier, int radix_up, int radix_down, mem_b queue_up, mem_b queue_down, int bundlesize, linkspeed_bps linkspeed, int oversub) {
@@ -720,9 +724,12 @@ BaseQueue*
 FatTreeTopology::alloc_queue(QueueLogger* queueLogger, linkspeed_bps speed, mem_b queuesize,
                              link_direction dir, int switch_tier, bool tor, bool reduced_speed){
 
+    // ===== ADDED (per-link-degrade) =====
+    double ratio = _alloc_ratio_override > 0 ? _alloc_ratio_override : _failed_link_ratio;
+    // ===== END ADDED (per-link-degrade) =====
     if (reduced_speed){
-        speed = speed * _failed_link_ratio;
-        queuesize = queuesize * _failed_link_ratio;
+        speed = speed * ratio;
+        queuesize = queuesize * ratio;
     }
 
     switch (_qt) {
@@ -737,7 +744,7 @@ FatTreeTopology::alloc_queue(QueueLogger* queueLogger, linkspeed_bps speed, mem_
                 if (!tor || dir == UPLINK || _enable_ecn_on_tor_downlink) {
                         // don't use ECN on ToR downlinks unless configured so.
                         if (reduced_speed)
-                            q->set_ecn_thresholds(_ecn_low * _failed_link_ratio, _ecn_high * _failed_link_ratio);
+                            q->set_ecn_thresholds(_ecn_low * ratio, _ecn_high * ratio);
                         else
                             q->set_ecn_thresholds(_ecn_low, _ecn_high);
                 }
@@ -979,6 +986,15 @@ void FatTreeTopology::init_network(){
                     queueLogger = NULL;
                 }
 
+                // ===== ADDED (per-link-degrade) =====
+                auto dl_it = _degrade_links.find(std::make_pair(tor, agg));
+                if (dl_it != _degrade_links.end()) {
+                    _alloc_ratio_override = dl_it->second;
+                    queues_nlp_nup[tor][agg][b] = alloc_queue(queueLogger, _downlink_speeds[AGG_TIER], _queue_up[TOR_TIER], UPLINK, TOR_TIER, true, true);
+                    _alloc_ratio_override = 0;
+                    cout << "Failure: LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_downlink_speeds[AGG_TIER] * dl_it->second) << endl;
+                } else
+                // ===== END ADDED (per-link-degrade) =====
                 if (can_fail &&/* _tiers == 2 &&  */(agg - agg_min) < _num_failed_links && degraded_cables < _num_failed_links){
                     queues_nlp_nup[tor][agg][b] = alloc_queue(queueLogger, _downlink_speeds[AGG_TIER], _queue_up[TOR_TIER], UPLINK, TOR_TIER, true, true);
                     cout << "Failure: LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_downlink_speeds[AGG_TIER] * _failed_link_ratio) << endl;

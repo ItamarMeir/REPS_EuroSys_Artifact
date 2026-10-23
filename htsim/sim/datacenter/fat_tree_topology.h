@@ -13,6 +13,7 @@
 #include "eventlist.h"
 #include "switch.h"
 #include <ostream>
+#include <map>
 
 //#define N K*K*K/4
 
@@ -201,7 +202,14 @@ public:
     }
 
     static double _failed_link_ratio;
-    
+    // ===== ADDED (per-link-degrade) =====
+    // -degrade_links_file: per ToR->agg uplink speed ratio, keyed (tor,agg).
+    // Independent of -failed/-skip_asy. _alloc_ratio_override (>0) is set around
+    // a single alloc_queue call so it replaces _failed_link_ratio for that link.
+    static std::map<std::pair<uint32_t,uint32_t>, double> _degrade_links;
+    static double _alloc_ratio_override;
+    // ===== END ADDED (per-link-degrade) =====
+
     //uint32_t getK() const {return K;}
     uint32_t getNAGG() const {return NAGG;}
 private:

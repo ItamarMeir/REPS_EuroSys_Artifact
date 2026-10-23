@@ -1134,3 +1134,23 @@ Fails an arbitrary set of cables of a 3-tier fat-tree from 0.01 us for the whole
 | File | What | Gate |
 |------|------|------|
 | `htsim/sim/datacenter/main_uec.cpp` | variable `fail_pipes_file`, argument parsing, one block after the `-fail_link_*` scheduling | `-fail_pipes_file` |
+
+
+### `[ADDED: rate-const-sender]` — `-rate_const_gbps <R>` (timer-paced constant-rate sender)
+
+Per-source sender that injects data packets (new and retransmitted) at most at R Gbps of wire rate (packet size incl. header, i.e. `_mtu`-sized packets), independent of ACK arrival. Requires `-sender_cc_algo constant`; `cwnd` is forced to 1,000,000 packets so the window never binds. Gate `rateGate()` is checked at every data-send entry point; `rateCharge()` advances an absolute per-source schedule after each emitted data packet; a lazily-created `UecRatePacer` event wakes `sendIfPermitted()` at the next permitted time. RTS/control packets are not charged. Design and validation: [`RATE_CONST_ARCHITECTURE.md`](RATE_CONST_ARCHITECTURE.md). Flag absent: byte-identical (verified, tornado NSCC x32, 1024 flow-finish lines, md5 equal).
+
+| File | What | Gate |
+|------|------|------|
+| `htsim/sim/uec.h` | `class UecRatePacer`; `UecSrc::_rate_const_bps`, `_rate_next_send`, `_rate_pacer*`, `rateGate/rateCharge/rateWake` | `_rate_const_bps > 0` |
+| `htsim/sim/uec.cpp` | gate calls in `startFlow()` loop, `sendIfPermitted()`, `timeToSend()`, RTO-rtx path in `rtxTimerExpired()`; `rateCharge()` at the end of `sendNewPacket()` / `sendRtxPacket()` | as above |
+| `htsim/sim/datacenter/main_uec.cpp` | flag parse; error unless constant CC; cwnd override | `-rate_const_gbps` |
+
+### `[ADDED: per-link-degrade]` — `-degrade_links_file <file>` (non-uniform ToR uplink degradation)
+
+Lines `tor agg ratio` (`#` comments ok, ratio in (0,1]) slow that ToR->agg uplink to ratio x speed; queue size and both ECN thresholds scale with the same ratio (same behavior as `-failed`/`-down_ratio`, but per link). Independent of `-failed`/`-skip_asy`/`-down_ratio`; uplinks only (downlink degrade is disabled in the existing code). Works on 2-tier fat trees (unlike `-fail_pipes_file`, which kills links in 3-tier only). Validation: uniform 0.5 on ToR0 uplinks reproduces `-failed 32 -down_ratio 0.5` byte-identically (flow-finish md5 equal); non-uniform (even agg 0.25, odd 0.75) prints 32 `Failure:` lines summing to 16/32 of healthy capacity. Flag absent: no change.
+
+| File | What | Gate |
+|------|------|------|
+| `htsim/sim/datacenter/fat_tree_topology.h/.cpp` | static `_degrade_links` map and `_alloc_ratio_override`; `alloc_queue` uses the override ratio when set; new branch in the ToR->agg uplink loop | non-empty map |
+| `htsim/sim/datacenter/main_uec.cpp` | `-degrade_links_file` parser | flag |

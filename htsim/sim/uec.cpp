@@ -3453,7 +3453,7 @@ void UecSrc::startFlow() {
     _rtx_backlog = 0;
     _send_blocked_on_nic = false;
     flowlet_timeout = 0.5 * _base_rtt;
-    while (_send_blocked_on_nic == false && credit() > 0 && _backlog > 0) {
+    while (_send_blocked_on_nic == false && credit() > 0 && _backlog > 0 && rateGate()) { // rateGate: ADDED (rate-const-sender)
         if (_debug_src) {
             cout << _flow.str() << " " << "requestSending 0 "<< endl;
         }
@@ -3550,6 +3550,39 @@ UecBasePacket::pull_quanta UecSrc::computePullTarget() {
     return quant_pull_target;
 }
 
+// ===== ADDED (rate-const-sender) =====
+double UecSrc::_rate_const_bps = 0;
+
+void UecRatePacer::doNextEvent() { _src.rateWake(); }
+
+bool UecSrc::rateGate() {
+    if (_rate_const_bps <= 0) return true;
+    simtime_picosec now = eventlist().now();
+    if (now >= _rate_next_send) return true;
+    if (!_rate_pacer_armed) {
+        if (!_rate_pacer) _rate_pacer = new UecRatePacer(eventlist(), *this);
+        _rate_pacer_armed = true;
+        eventlist().sourceIsPending(*_rate_pacer, _rate_next_send);
+    }
+    return false;
+}
+
+void UecSrc::rateCharge(mem_b pkt_size) {
+    if (_rate_const_bps <= 0) return;
+    simtime_picosec now = eventlist().now();
+    simtime_picosec gap = (simtime_picosec)((double)pkt_size * 8.0 * 1e12 / _rate_const_bps);
+    // idle for more than one gap: restart the schedule at now (no banked credit);
+    // otherwise advance the absolute schedule so average rate does not drift.
+    if (now > _rate_next_send + gap) _rate_next_send = now;
+    _rate_next_send += gap;
+}
+
+void UecSrc::rateWake() {
+    _rate_pacer_armed = false;
+    sendIfPermitted();
+}
+// ===== END ADDED (rate-const-sender) =====
+
 void UecSrc::sendIfPermitted() {
     // send if the NIC, credit and window allow.
 
@@ -3580,6 +3613,7 @@ void UecSrc::sendIfPermitted() {
             return;
         }
     }
+    if (!rateGate()) return; // ===== ADDED (rate-const-sender) =====
     if (_flow.flow_id() == _debug_flowid)
     {
         cout << timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() <<" sendIfPermitted requestSending _send_blocked_on_nic "<< _send_blocked_on_nic
@@ -4762,6 +4796,7 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     _highest_sent++;
     _new_packets_sent++;
     startRTO(eventlist().now());
+    rateCharge(full_pkt_size); // ===== ADDED (rate-const-sender) =====
 
     if (!sent_one) {
         sent_one = true;
@@ -4877,6 +4912,7 @@ mem_b UecSrc::sendRtxPacket(const Route& route) {
     p->sendOn();
     _rtx_packets_sent++;
     startRTO(eventlist().now());
+    rateCharge(full_pkt_size); // ===== ADDED (rate-const-sender) =====
     return full_pkt_size;
 }
 
@@ -4971,6 +5007,13 @@ void UecSrc::timeToSend(const Route& route) {
     // UecNIC::startSending or UecNIC::cantSend from this function
     // to update the NIC as to what happened, so they stay in sync.
     _send_blocked_on_nic = false;
+
+    // ===== ADDED (rate-const-sender) =====
+    if (!rateGate()) {
+        _nic.cantSend(*this);
+        return;
+    }
+    // ===== END ADDED (rate-const-sender) =====
 
     mem_b full_pkt_size = _mtu;
     // how much do we want to send?
@@ -5269,6 +5312,7 @@ void UecSrc::rtxTimerExpired() {
         cout << "requestSending 4\n"
              << " flow " << _flow.str() << endl;
 
+    if (!rateGate()) return; // ===== ADDED (rate-const-sender) =====
     const Route* route = _nic.requestSending(*this);
     if (route) {
         bool bytes_sent = sendRtxPacket(*route);

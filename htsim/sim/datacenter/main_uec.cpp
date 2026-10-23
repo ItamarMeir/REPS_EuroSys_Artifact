@@ -572,6 +572,34 @@ int main(int argc, char **argv) {
             UecSrc::set_fair_decrease_scaling_factor(fair_decrease_scaling_factor);
             printf("Fair decrease: %f\n", fair_decrease_scaling_factor);
             i++;
+        // ===== ADDED (per-link-degrade) =====
+        // -degrade_links_file <f>: lines "tor agg ratio" (# comments ok). Slows that
+        // ToR->agg uplink to ratio x speed, with queue size and ECN thresholds
+        // scaled by the same ratio. Independent of -failed / -down_ratio.
+        } else if (!strcmp(argv[i], "-degrade_links_file")) {
+            ifstream dlf(argv[i + 1]);
+            if (!dlf) { cerr << "cannot open -degrade_links_file " << argv[i + 1] << endl; exit(1); }
+            string dline;
+            while (getline(dlf, dline)) {
+                if (dline.empty() || dline[0] == '#') continue;
+                istringstream dls(dline);
+                uint32_t dt, da; double dr;
+                if (!(dls >> dt >> da >> dr) || dr <= 0 || dr > 1) {
+                    cerr << "bad -degrade_links_file line: " << dline << endl; exit(1);
+                }
+                FatTreeTopology::_degrade_links[make_pair(dt, da)] = dr;
+            }
+            i++;
+        // ===== END ADDED (per-link-degrade) =====
+        // ===== ADDED (rate-const-sender) =====
+        // -rate_const_gbps <R>: timer-paced sender at R Gbps per source (new + rtx
+        // packets), not ACK-clocked. Requires -sender_cc_algo constant; cwnd is
+        // forced non-binding. See experiments/RATE_CONST_ARCHITECTURE.md.
+        } else if (!strcmp(argv[i], "-rate_const_gbps")) {
+            UecSrc::_rate_const_bps = std::stod(argv[i + 1]) * 1e9;
+            cout << "rate_const_gbps " << argv[i + 1] << endl;
+            i++;
+        // ===== END ADDED (rate-const-sender) =====
         } else if (!strcmp(argv[i], "-down_ratio")) {
             FatTreeTopology::_failed_link_ratio = std::stod(argv[i + 1]);
             i++;
@@ -1939,6 +1967,15 @@ int main(int argc, char **argv) {
     }
 
 
+    // ===== ADDED (rate-const-sender) =====
+    if (UecSrc::_rate_const_bps > 0) {
+        if (UecSrc::_sender_cc_algo != UecSrc::CONSTANT) {
+            cerr << "ERROR: -rate_const_gbps requires -sender_cc_algo constant" << endl;
+            exit(1);
+        }
+        cwnd = 1000000; // packets; window never binds, the pacer is the only limiter
+    }
+    // ===== END ADDED (rate-const-sender) =====
     mem_b cwnd_b = cwnd*Packet::data_packet_size();
 
     _global_metric->LogData({std::to_string(speedAsGbps(linkspeed)),
