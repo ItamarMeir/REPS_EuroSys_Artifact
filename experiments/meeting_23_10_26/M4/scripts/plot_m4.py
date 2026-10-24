@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 H = Path(__file__).resolve().parents[1]
 src = Path(sys.argv[1]) if len(sys.argv) > 1 else H / "data/results.jsonl"
 df = pd.DataFrame([json.loads(l) for l in src.read_text().splitlines()])
-METRICS = ["pct_random", "k_mean", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_max", "spray_width32", "distinct_ev_per_src",
+METRICS = ["pct_random", "k_mean", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "k_max", "spray_width32", "distinct_ev_per_src",
            "fct_p50", "fct_p99", "fct_max", "fct_tor0_mean", "fct_tor0_max", "rtos", "freeze_entries", "ecn_acks", "rtx"]
 T975 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,9:2.262}  # t(.975, df)
 def ci(x):

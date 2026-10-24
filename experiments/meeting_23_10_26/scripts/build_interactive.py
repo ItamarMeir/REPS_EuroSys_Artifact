@@ -2,7 +2,7 @@
 """Emit self-contained Plotly pages for the meeting_23_10_26 plots (Plotly from cdnjs).
 
   M1/plots/interactive.html   cwnd(t), target-delay sweep, per-cell marking/random shares
-  M4/plots/interactive.html   REPS buffer-size sweep at constant send rates (metric dropdown)
+  M4/plots/interactive.html   REPS buffer-size sweep, one section per sending rate (under/matched/over)
 
 Inputs (committed): M1/data/m1_summary.csv, M1/data/m1_cwnd_series_25us.csv,
                     M4/data/m4_summary.csv (written by M4/scripts/plot_m4.py).
@@ -166,78 +166,118 @@ def build_m1():
 
 # ----------------------------------------------------------------------------- M4
 M4_BODY = """
-<h1>M4: REPS buffer size B at known constant send rates</h1>
+<h1>M4: does the REPS buffer size B matter, at each sending rate?</h1>
 <div class="note">Constant-rate sender (<code>-rate_const_gbps</code>, no congestion control), REPS (freezing), SRv6 32 paths,
-tornado 16 MiB, trimming on. Rate = 100 / 200 / 400 Gbps per source (under / matched / over the 200G degraded ToR0
-capacity). Failure models: healthy; uniform50 (all 32 ToR0 uplinks at 50%); nonuniform (even agg 25%, odd agg 75%).
-Points = mean over seeds 42-46, bars = 95% t-CI. Random-EV and k statistics are over the first 8 ToR0 sources; FCT over all flows
-(ToR0 columns over the 32 ToR0 flows). Pick a metric below.</div>
-<div class="note">Metric: <select id="metric"></select>
-&nbsp; <label><input type="checkbox" id="logy"> log y</label></div>
-<div class="grid">
-  __P1__ __P2__
-  __P3__ __P4__
-</div>
+tornado 16 MiB, 1024 flows, trimming on, seeds 42-46 (means; FCT error bars = 95% t-CI). One section per sending rate
+per source: <b>under</b> 100G, <b>matched</b> 200G, <b>over</b> 400G, relative to the 200G that a 50%-degraded ToR0 uplink
+leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 uplinks); non-uniform (even agg 25%, odd agg 75%).<br>
+<b>Split</b>: share of sends that used a random EV vs a valid EV from the buffer (stale = 0: no RTOs and no freezing in any run).
+<b>k</b>: valid EVs in the buffer just before each send, from the ToR0 sources 0-7 event traces; shares derived from the
+k&ge;1,2,3,4,8 counters. k is a post-event snapshot, so at B=1 it reads 0 even though about a third of sends are not random:
+B=1 (and B=2) cannot test the k claim, they are greyed in the k plots. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
+32 ToR0 flows. Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
+The acks-per-window panel from the C1 page is not reproduced: those traces were analysed and deleted in the sweep.</div>
+__SECTIONS__
 <script>
 const DATA = __PAYLOAD__;
 """ + COMMON_JS + """
-const RATES = ["under", "matched", "over"], FAILS = ["healthy", "uniform50", "nonuniform"];
-const COL = {under: "#2a788e", matched: "#22a884", over: "#dc2626"};
-const LAB = {under: "under (100G)", matched: "matched (200G)", over: "over (400G)"};
-const FLAB = {healthy: "healthy", uniform50: "uniform 50%", nonuniform: "non-uniform 25/75%"};
-const METRICS = DATA.metrics;
-const sel = document.getElementById("metric");
-METRICS.forEach(m => { const o = document.createElement("option"); o.value = m.key; o.textContent = m.label; sel.appendChild(o); });
-const rowsOf = (f, r) => DATA.rows.filter(x => x.fail === f && x.rate === r).sort((a, b) => a.B - b.B);
+const RATES = [["under", "UNDER capacity: 100 Gbps per source"], ["matched", "MATCHED to degraded capacity: 200 Gbps per source"],
+               ["over", "OVER capacity: 400 Gbps per source"]];
+const FAILS = [["healthy", "healthy"], ["uniform50", "uniform 50%"], ["nonuniform", "non-uniform 25/75%"]];
+const BS = [1, 2, 4, 8, 16, 32, 64], BCAT = BS.map(b => "B=" + b);
+const rows = (r, f) => DATA.rows.filter(x => x.rate === r && x.fail === f).sort((a, b) => a.B - b.B);
+const at = (rs, b) => rs.find(x => x.B === b);
+const F = (v, d) => v == null ? "-" : v.toFixed(d);
 
-function lines(fail, divId) {
-  const m = METRICS.find(x => x.key === sel.value), log = document.getElementById("logy").checked;
-  const traces = RATES.map(r => { const rs = rowsOf(fail, r);
-    return {x: rs.map(x => x.B), y: rs.map(x => x[m.key + "_mean"]), mode: "lines+markers", name: LAB[r],
-      error_y: {type: "data", array: rs.map(x => x[m.key + "_ci95"]), visible: true, thickness: 1, width: 3},
-      line: {color: COL[r]}, marker: {color: COL[r]}}; });
-  plotWithHeadline(divId, traces, {title: {text: m.label + " vs B -- " + FLAB[fail], font: {size: 13}},
-    xaxis: {title: "REPS buffer size B", type: "log", tickvals: [1, 2, 4, 8, 16, 32, 64], ticktext: ["1", "2", "4", "8", "16", "32", "64"]},
-    yaxis: {title: m.label, type: log ? "log" : "linear"}, legend: {orientation: "h", y: -0.3},
-    margin: {t: 40, b: 100}, height: 400}, {responsive: true});
+function splitPlot(r, f, id) {
+  const rs = rows(r, f);
+  plotWithHeadline(id, [
+    {x: BCAT, y: rs.map(x => 100 - x.pct_random_mean), type: "bar", name: "valid", marker: {color: "#22a884"}},
+    {x: BCAT, y: rs.map(x => x.pct_random_mean), type: "bar", name: "random", marker: {color: "#94a3b8"}}],
+    {title: {text: "EV source split -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
+     xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.25},
+     margin: {t: 36, b: 70, l: 50, r: 10}, height: 320}, {responsive: true});
 }
-function heat() {
-  const m = METRICS.find(x => x.key === sel.value);
-  const ylab = [], z = [];
-  FAILS.forEach(f => RATES.forEach(r => { ylab.push(FLAB[f] + " / " + LAB[r]);
-    z.push(rowsOf(f, r).map(x => x[m.key + "_mean"])); }));
-  plotWithHeadline("heat", [{z, x: [1, 2, 4, 8, 16, 32, 64].map(b => "B=" + b), y: ylab, type: "heatmap", colorscale: "Viridis",
-    text: z.map(row => row.map(v => v == null ? "" : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)))), texttemplate: "%{text}",
-    colorbar: {title: m.label}}],
-    {title: {text: m.label + ": every cell (mean over seeds)", font: {size: 13}}, yaxis: {autorange: "reversed", automargin: true},
-     margin: {t: 40, b: 40, l: 230}, height: 420}, {responsive: true});
+function kPlot(r, f, id) {
+  const rs = rows(r, f);
+  const parts = [["k=0", x => 100 - x.k_ge1_mean, "#94a3b8"], ["k=1", x => x.k_ge1_mean - x.k_ge2_mean, "#bde0d0"],
+    ["k=2", x => x.k_ge2_mean - x.k_ge3_mean, "#7ad151"], ["k=3", x => x.k_ge3_mean - x.k_ge4_mean, "#22a884"],
+    ["k=4-7", x => x.k_ge4_mean - x.k_ge8_mean, "#2a788e"], ["k>=8", x => x.k_ge8_mean, "#440154"]];
+  const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(x => x.B <= 2 ? null : fn(x)), type: "bar", name: n, marker: {color: c}}));
+  traces.push({x: BCAT, y: rs.map(x => x.B <= 2 ? 100 : null), type: "bar", name: "B<=2 n/a", marker: {color: "#e5e7eb"}, hoverinfo: "skip"});
+  plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer at send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
+    xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
+    margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
 }
-function draw() { lines("healthy", "p_healthy"); lines("uniform50", "p_uniform50"); lines("nonuniform", "p_nonuniform"); heat(); }
-sel.onchange = draw; document.getElementById("logy").onchange = draw;
-sel.value = "pct_random"; draw();
+function fctPlot(r, f, id) {
+  const rs = rows(r, f);
+  const ser = [["fct_p50", "p50 (all)", "#2a788e"], ["fct_p99", "p99 (all)", "#f59e0b"], ["fct_max", "max (all)", "#dc2626"],
+               ["fct_tor0_mean", "mean (ToR0 flows)", "#111"]];
+  const traces = ser.map(([k, n, c]) => ({x: BCAT, y: rs.map(x => x[k + "_mean"]), mode: "lines+markers", name: n, line: {color: c, width: 1.6},
+    error_y: {type: "data", array: rs.map(x => x[k + "_ci95"]), visible: true, thickness: 1, width: 3}}));
+  plotWithHeadline(id, traces, {title: {text: "FCT (us) -- " + r + " / " + f, font: {size: 12}},
+    xaxis: {type: "category"}, yaxis: {title: "us"}, legend: {orientation: "h", y: -0.3},
+    margin: {t: 36, b: 90, l: 55, r: 10}, height: 320}, {responsive: true});
+}
+function lossPlot(r, f, id) {
+  const rs = rows(r, f);
+  plotWithHeadline(id, [
+    {x: BCAT, y: rs.map(x => x.rtx_mean), type: "bar", name: "retransmits / run", marker: {color: "#dc2626"}},
+    {x: BCAT, y: rs.map(x => x.ecn_acks_mean), type: "bar", name: "ECN-marked ACKs / run", marker: {color: "#f59e0b"}}],
+    {title: {text: "Loss and marking per run -- " + r + " / " + f, font: {size: 12}}, barmode: "group",
+     xaxis: {type: "category"}, yaxis: {title: "count"}, legend: {orientation: "h", y: -0.3},
+     margin: {t: 36, b: 90, l: 55, r: 10}, height: 320}, {responsive: true});
+}
+function verdict(r, id) {
+  let h = "<table><tr><th>failure model</th><th>% random B=1</th><th>B=2</th><th>B=4</th><th>B=8</th><th>B=64</th>" +
+          "<th>ToR0 mean FCT B=1 (us)</th><th>B=8</th><th>B=64</th><th>FCT change B=1&rarr;8</th><th>FCT change B=8&rarr;64</th></tr>";
+  FAILS.forEach(([f, lab]) => { const rs = rows(r, f), g = b => at(rs, b);
+    const a = g(1).fct_tor0_mean_mean, c = g(8).fct_tor0_mean_mean, d = g(64).fct_tor0_mean_mean;
+    h += "<tr><td>" + lab + "</td>" + [1, 2, 4, 8, 64].map(b => "<td>" + F(g(b).pct_random_mean, 1) + "</td>").join("") +
+         "<td>" + F(a, 1) + "</td><td>" + F(c, 1) + "</td><td>" + F(d, 1) + "</td><td>" + F(100 * (c - a) / a, 2) + "%</td><td>" + F(100 * (d - c) / c, 2) + "%</td></tr>"; });
+  document.getElementById(id).innerHTML = h + "</table>";
+}
+RATES.forEach(([r]) => { verdict(r, "verdict_" + r);
+  FAILS.forEach(([f]) => { splitPlot(r, f, "split_" + r + "_" + f); kPlot(r, f, "k_" + r + "_" + f);
+    fctPlot(r, f, "fct_" + r + "_" + f); lossPlot(r, f, "loss_" + r + "_" + f); }); });
 </script>
 </body></html>
 """
 
-M4_METRICS = [
-    ("pct_random", "% sends with random EV"), ("k_mean", "mean k (valid EVs at send)"),
-    ("k_ge1", "% sends with k >= 1"), ("k_ge2", "% sends with k >= 2"), ("k_ge3", "% sends with k >= 3"),
-    ("k_ge4", "% sends with k >= 4"), ("k_max", "max k"), ("spray_width32", "distinct EVs per 32 sends"),
-    ("distinct_ev_per_src", "distinct EVs per source"), ("fct_tor0_mean", "mean FCT of ToR0 flows (us)"),
-    ("fct_tor0_max", "max FCT of ToR0 flows (us)"), ("fct_p50", "p50 FCT (us)"), ("fct_p99", "p99 FCT (us)"),
-    ("fct_max", "max FCT (us)"), ("rtx", "retransmits per run"), ("ecn_acks", "ECN-marked ACKs per run"),
-    ("rtos", "RTOs per run"), ("freeze_entries", "freeze entries per run"),
-]
+M4_EXTRA_CSS = """<style>
+h2 { font-size: 16px; margin: 22px 0 4px; padding-top: 10px; border-top: 2px solid #111; }
+h3 { font-size: 13px; margin: 8px 0 2px; color: #333; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+table { border-collapse: collapse; font-size: 12px; margin: 4px 0 8px; }
+th, td { border: 1px solid #ddd; padding: 3px 7px; text-align: right; }
+th:first-child, td:first-child { text-align: left; }
+th { background: #f3f4f6; }
+@media (max-width: 1100px) { .grid3 { grid-template-columns: 1fr; } }
+</style>
+"""
+
+M4_RATES = [("under", "UNDER capacity: 100 Gbps per source"),
+            ("matched", "MATCHED to degraded capacity: 200 Gbps per source"),
+            ("over", "OVER capacity: 400 Gbps per source")]
+M4_FAILS = ["healthy", "uniform50", "nonuniform"]
+M4_METRICS = ["pct_random", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "fct_p50", "fct_p99", "fct_max",
+              "fct_tor0_mean", "rtx", "ecn_acks"]
 
 
 def build_m4():
     s = pd.read_csv(ROOT / "M4" / "data" / "m4_summary.csv")
-    keep = ["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k, _ in M4_METRICS for t in ("mean", "ci95")]
+    keep = ["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
     rows = [{k: clean(v) for k, v in r.items()} for r in s[keep].to_dict("records")]
-    payload = {"rows": rows, "metrics": [{"key": k, "label": l} for k, l in M4_METRICS]}
-    html = fill(HEAD.replace("__TITLE__", "M4 REPS buffer size at constant rate") + M4_BODY,
-                ["p_healthy", "p_uniform50", "p_nonuniform", "heat"])
-    html = html.replace("__PAYLOAD__", json.dumps(payload))
+    sections = ""
+    for r, title in M4_RATES:
+        sections += f'<h2>{title}</h2>\n<div id="verdict_{r}"></div>\n'
+        for kind, label in [("split", "valid vs random EV"), ("k", "k distribution"), ("fct", "FCT statistics"),
+                            ("loss", "retransmits and ECN marks")]:
+            sections += f'<h3>{label}</h3>\n<div class="grid3">' + "".join(
+                panel(f"{kind}_{r}_{f}") for f in M4_FAILS) + "</div>\n"
+    html = HEAD.replace("__TITLE__", "M4 REPS buffer size per sending rate").replace("</head>", M4_EXTRA_CSS + "</head>")
+    html += M4_BODY.replace("__SECTIONS__", sections)
+    html = html.replace("__PAYLOAD__", json.dumps({"rows": rows}))
     out = ROOT / "M4" / "plots" / "interactive.html"
     out.write_text(html, encoding="utf-8")
     print("wrote", out)
