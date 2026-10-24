@@ -27,3 +27,6 @@ Data: existing C1 traces (`meeting_06_10_26/C1`) plus new single-seed runs (seed
 
 ## Implication for the meeting question
 The CC does adapt; the metric that moves is "queue the CC is willing to hold", which on degraded links is large relative to the ECN thresholds. For the buffer study this means NSCC results mix two effects (rate and standing-queue ECN pressure). The constant-rate sender (M2) removes both and gives a clean per-rate picture. Open follow-up: NSCC with a target below the ECN kmin delay, or WTD (`-wtd_in_nscc`, exp07, null result on FCT) evaluated on the valid-EV share rather than FCT.
+
+## Interactive page
+`python ../scripts/build_interactive.py` writes `plots/interactive.html` (Plotly from cdnjs; gitignored, publish via the thesis repo on request).

@@ -47,3 +47,6 @@ FCT (ToR0 mean, us; p99 tracks it within ~0.5 us):
 - Single workload (tornado 16 MiB), single topology, trimming on. `rtx` counts at "over" reflect the constant-rate sender ignoring loss (retransmits are charged against R).
 - "Random draw" = fresh buffer empty at send; it is reported as measured from the first 8 ToR0 sources' event traces (8 of 32 per-ToR hosts), not all 1024.
 - Plots: `plots/m4_pct_random.png`, `m4_k_mean.png`, `m4_k_ge3.png`, `m4_fct_tor0.png`, `m4_fct_p99.png`, `m4_spray_width.png`.
+
+## Interactive page
+`python ../scripts/build_interactive.py` writes `plots/interactive.html` (Plotly from cdnjs; gitignored, publish via the thesis repo on request).
