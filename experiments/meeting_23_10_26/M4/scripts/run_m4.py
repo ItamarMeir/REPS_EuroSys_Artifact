@@ -40,12 +40,25 @@ def analyze(trace, stdout):
     r = dict(flows=len(fcts), fct_p50=float(np.percentile(fcts, 50)), fct_p99=float(np.percentile(fcts, 99)),
              fct_max=float(max(fcts)), fct_tor0_mean=float(np.mean(t0f)), fct_tor0_max=float(max(t0f)), rtos=rtos, freeze_entries=frz, ecn_acks=ecn)
     df = pd.read_csv(trace, usecols=["src_id", "event", "ev", "ev_src", "fresh"], dtype={"ev_src": str})
-    snd = df[df.event.isin(["SEND", "RTX"])]
+    # k = valid EVs in the buffer immediately BEFORE a draw = the previous row's post-event `fresh` of the same
+    # source (a row's own `fresh` is already post-pop). Post-warmup = after the source's first ACK, same
+    # definition as meeting_06_10_26/C1/scripts/send_occupancy.py. Draw events = SEND, RTX, RTS.
+    g = df.groupby("src_id")
+    df["prev_fresh"] = g.fresh.shift(1).fillna(0).astype(int)
+    df["seen_ack"] = g.event.transform(lambda s: (s == "ACK").cummax())
+    draws = df[df.event.isin(["SEND", "RTX", "RTS"])]
+    post = draws[draws.seen_ack]
+    k = post.prev_fresh.to_numpy()
     new = df[df.event == "SEND"]
-    k = new.fresh.to_numpy()
-    r.update(sends=int(len(new)), rtx=int((snd.event == "RTX").sum()),
-             pct_random=float(100 * (new.ev_src == "random").mean()),
-             k_mean=float(k.mean()), k_max=int(k.max()),
+    pop = post[post.ev_src == "fresh_pop"]; rnd = post[post.ev_src == "random"]
+    mism = int((pop.fresh != pop.prev_fresh - 1).sum() + ((rnd.prev_fresh != 0) | (rnd.fresh != 0)).sum())
+    kh = np.bincount(np.minimum(k, 32), minlength=33)
+    r.update(sends=int(len(new)), rtx=int((draws.event == "RTX").sum()), draws_post=int(len(post)),
+             draws_warmup=int(len(draws) - len(post)), n_random_post=int((post.ev_src == "random").sum()),
+             n_fresh_pop_post=int(len(pop)), n_other_post=int(len(post) - len(pop) - len(rnd)), recon_mismatch=mism,
+             pct_random=float(100 * (post.ev_src == "random").mean()),
+             pct_random_incl_warmup=float(100 * (draws.ev_src == "random").mean()),
+             k_mean=float(k.mean()), k_max=int(k.max()), k_hist=[int(v) for v in kh],
              **{f"k_ge{j}": float(100 * (k >= j).mean()) for j in (1, 2, 3, 4, 8)},
              distinct_ev_per_src=float(new.groupby("src_id").ev.nunique().mean()))
     # spray width: distinct EVs in each consecutive window of 32 sends, averaged

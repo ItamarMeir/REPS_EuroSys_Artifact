@@ -172,9 +172,8 @@ tornado 16 MiB, 1024 flows, trimming on, seeds 42-46 (means; FCT error bars = 95
 per source: <b>under</b> 100G, <b>matched</b> 200G, <b>over</b> 400G, relative to the 200G that a 50%-degraded ToR0 uplink
 leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 uplinks); non-uniform (even agg 25%, odd agg 75%).<br>
 <b>Split</b>: share of sends that used a random EV vs a valid EV from the buffer (stale = 0: no RTOs and no freezing in any run).
-<b>k</b>: valid EVs in the buffer just before each send, from the ToR0 sources 0-7 event traces; shares derived from the
-k&ge;1,2,3,4,8 counters. k is a post-event snapshot, so at B=1 it reads 0 even though about a third of sends are not random:
-B=1 (and B=2) cannot test the k claim, they are greyed in the k plots. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
+<b>k</b>: valid EVs in the buffer immediately before each draw (the previous trace row's post-event count), after the source's first ACK
+(same definition as the C1 page), ToR0 sources 0-7 event traces; draws = SEND/RTX/RTS. The split uses the same post-warmup draws. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
 32 ToR0 flows. Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
 The acks-per-window panel from the C1 page is not reproduced: those traces were analysed and deleted in the sweep.</div>
 __SECTIONS__
@@ -200,12 +199,12 @@ function splitPlot(r, f, id) {
 }
 function kPlot(r, f, id) {
   const rs = rows(r, f);
-  const parts = [["k=0", x => 100 - x.k_ge1_mean, "#94a3b8"], ["k=1", x => x.k_ge1_mean - x.k_ge2_mean, "#bde0d0"],
-    ["k=2", x => x.k_ge2_mean - x.k_ge3_mean, "#7ad151"], ["k=3", x => x.k_ge3_mean - x.k_ge4_mean, "#22a884"],
-    ["k=4-7", x => x.k_ge4_mean - x.k_ge8_mean, "#2a788e"], ["k>=8", x => x.k_ge8_mean, "#440154"]];
-  const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(x => x.B <= 2 ? null : fn(x)), type: "bar", name: n, marker: {color: c}}));
-  traces.push({x: BCAT, y: rs.map(x => x.B <= 2 ? 100 : null), type: "bar", name: "B<=2 n/a", marker: {color: "#e5e7eb"}, hoverinfo: "skip"});
-  plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer at send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
+  const sum = (x, lo, hi) => { let s = 0; for (let i = lo; i <= hi; i++) s += x["kdist_" + i] || 0; return s; };
+  const parts = [["k=0", x => sum(x, 0, 0), "#94a3b8"], ["k=1", x => sum(x, 1, 1), "#bde0d0"],
+    ["k=2", x => sum(x, 2, 2), "#7ad151"], ["k=3", x => sum(x, 3, 3), "#22a884"],
+    ["k=4-7", x => sum(x, 4, 7), "#2a788e"], ["k>=8", x => sum(x, 8, 32), "#440154"]];
+  const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
+  plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer just before a send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
     xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
     margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
 }
@@ -260,13 +259,14 @@ M4_RATES = [("under", "UNDER capacity: 100 Gbps per source"),
             ("matched", "MATCHED to degraded capacity: 200 Gbps per source"),
             ("over", "OVER capacity: 400 Gbps per source")]
 M4_FAILS = ["healthy", "uniform50", "nonuniform"]
-M4_METRICS = ["pct_random", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "fct_p50", "fct_p99", "fct_max",
+M4_METRICS = ["pct_random", "pct_random_incl_warmup", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "fct_p50", "fct_p99", "fct_max",
               "fct_tor0_mean", "rtx", "ecn_acks"]
 
 
 def build_m4():
     s = pd.read_csv(ROOT / "M4" / "data" / "m4_summary.csv")
-    keep = ["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
+    keep = (["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
+            + [f"kdist_{i}" for i in range(33)])
     rows = [{k: clean(v) for k, v in r.items()} for r in s[keep].to_dict("records")]
     sections = ""
     for r, title in M4_RATES:

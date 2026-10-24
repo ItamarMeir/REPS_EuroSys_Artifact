@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 H = Path(__file__).resolve().parents[1]
 src = Path(sys.argv[1]) if len(sys.argv) > 1 else H / "data/results.jsonl"
 df = pd.DataFrame([json.loads(l) for l in src.read_text().splitlines()])
-METRICS = ["pct_random", "k_mean", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "k_max", "spray_width32", "distinct_ev_per_src",
+METRICS = ["pct_random", "k_mean", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "k_max", "spray_width32", "distinct_ev_per_src", "pct_random_incl_warmup", "draws_post", "draws_warmup",
            "fct_p50", "fct_p99", "fct_max", "fct_tor0_mean", "fct_tor0_max", "rtos", "freeze_entries", "ecn_acks", "rtx"]
 T975 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,9:2.262}  # t(.975, df)
 def ci(x):
@@ -16,6 +16,13 @@ def ci(x):
     return T975[len(x) - 1] * x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else np.nan
 g = df.groupby(["rate_gbps", "rate", "fail", "B"])
 summ = g[METRICS].mean().add_suffix("_mean").join(g[METRICS].agg(ci).add_suffix("_ci95")).join(g.size().rename("n_seeds")).reset_index()
+def kshare(h):
+    h = np.asarray(h, float); return 100 * h / h.sum()
+df["_ks"] = df.k_hist.apply(kshare)
+kd = df.groupby(["rate_gbps", "rate", "fail", "B"])["_ks"].apply(lambda s: np.mean(np.vstack(list(s)), axis=0)).reset_index()
+for i in range(33):
+    kd[f"kdist_{i}"] = kd["_ks"].apply(lambda a, i=i: a[i])
+summ = summ.merge(kd.drop(columns="_ks"), on=["rate_gbps", "rate", "fail", "B"])
 summ.to_csv(H / "data/m4_summary.csv", index=False)
 RATES = ["under", "matched", "over"]; FAILS = ["healthy", "uniform50", "nonuniform"]
 COL = {"under": "tab:blue", "matched": "tab:green", "over": "tab:red"}
