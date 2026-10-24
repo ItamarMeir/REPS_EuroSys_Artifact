@@ -168,7 +168,7 @@ def build_m1():
 M4_BODY = """
 <h1>M4: does the REPS buffer size B matter, at each sending rate?</h1>
 <div class="note">Constant-rate sender (<code>-rate_const_gbps</code>, no congestion control), REPS (freezing), SRv6 32 paths,
-tornado 16 MiB, 1024 flows, trimming on, seeds 42-46 (means; FCT error bars = 95% t-CI). One section per sending rate
+tornado 16 MiB, 1024 flows, trimming on, seeds 42-44 (means of 3; FCT error bars = 95% t-CI). One section per sending rate
 per source: <b>under</b> 100G, <b>matched</b> 200G, <b>over</b> 400G, relative to the 200G that a 50%-degraded ToR0 uplink
 leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 uplinks); non-uniform (even agg 25%, odd agg 75%).<br>
 <b>Split</b>: share of sends that used a random EV vs a valid EV from the buffer (stale = 0: no RTOs and no freezing in any run).
@@ -223,7 +223,7 @@ function lossPlot(r, f, id) {
   plotWithHeadline(id, [
     {x: BCAT, y: rs.map(x => x.rtx_mean), type: "bar", name: "retransmits / run", marker: {color: "#dc2626"}},
     {x: BCAT, y: rs.map(x => x.ecn_acks_mean), type: "bar", name: "ECN-marked ACKs / run", marker: {color: "#f59e0b"}}],
-    {title: {text: "Loss and marking per run -- " + r + " / " + f, font: {size: 12}}, barmode: "group",
+    {title: {text: "Loss and marking per run, whole run (all 1024 flows) -- " + r + " / " + f, font: {size: 12}}, barmode: "group",
      xaxis: {type: "category"}, yaxis: {title: "count"}, legend: {orientation: "h", y: -0.3},
      margin: {t: 36, b: 90, l: 55, r: 10}, height: 320}, {responsive: true});
 }
