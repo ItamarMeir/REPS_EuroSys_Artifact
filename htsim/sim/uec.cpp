@@ -976,7 +976,9 @@ void UecNIC::startSending(UecSrc& src, mem_b pkt_size, const Route* rt) {
         assert(queued_src == &src);
     }
 
-    simtime_picosec endtime = eventlist().now() + (pkt_size * 8 * timeFromSec(1.0)) / _linkspeed;
+    // ===== ADDED (rate-const-nic): egressSpeed() == _linkspeed unless the shaper is on =====
+    simtime_picosec endtime = eventlist().now() + (pkt_size * 8 * timeFromSec(1.0)) / egressSpeed();
+    // ===== END ADDED (rate-const-nic) =====
     sendOnFreePortNow(endtime, rt);
 }
 
@@ -1047,7 +1049,9 @@ void UecNIC::sendControlPktNow() {
     _control.pop_front();
     UecBasePacket* p = cp.pkt;
 
-    simtime_picosec endtime  = eventlist().now() + (p->size() * 8 * timeFromSec(1.0)) / _linkspeed;
+    // ===== ADDED (rate-const-nic): egressSpeed() == _linkspeed unless the shaper is on =====
+    simtime_picosec endtime  = eventlist().now() + (p->size() * 8 * timeFromSec(1.0)) / egressSpeed();
+    // ===== END ADDED (rate-const-nic) =====
     uint32_t port_to_use = sendOnFreePortNow(endtime, NULL);
     if (UecSrc::_debug)
         cout << "NIC " << this << " send control of size " << p->size() << " at "
@@ -3552,11 +3556,15 @@ UecBasePacket::pull_quanta UecSrc::computePullTarget() {
 
 // ===== ADDED (rate-const-sender) =====
 double UecSrc::_rate_const_bps = 0;
+// ===== ADDED (rate-const-nic) =====
+bool UecSrc::_rate_const_data_only = false;
+linkspeed_bps UecNIC::_egress_bps = 0;
+// ===== END ADDED (rate-const-nic) =====
 
 void UecRatePacer::doNextEvent() { _src.rateWake(); }
 
 bool UecSrc::rateGate() {
-    if (_rate_const_bps <= 0) return true;
+    if (_rate_const_bps <= 0 || !_rate_const_data_only) return true; // ===== ADDED (rate-const-nic): NIC shaper mode bypasses the source pacer =====
     simtime_picosec now = eventlist().now();
     if (now >= _rate_next_send) return true;
     if (!_rate_pacer_armed) {
@@ -3568,7 +3576,7 @@ bool UecSrc::rateGate() {
 }
 
 void UecSrc::rateCharge(mem_b pkt_size) {
-    if (_rate_const_bps <= 0) return;
+    if (_rate_const_bps <= 0 || !_rate_const_data_only) return; // ===== ADDED (rate-const-nic) =====
     simtime_picosec now = eventlist().now();
     simtime_picosec gap = (simtime_picosec)((double)pkt_size * 8.0 * 1e12 / _rate_const_bps);
     // idle for more than one gap: restart the schedule at now (no banked credit);

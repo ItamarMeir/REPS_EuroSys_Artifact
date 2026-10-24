@@ -599,6 +599,12 @@ int main(int argc, char **argv) {
             UecSrc::_rate_const_bps = std::stod(argv[i + 1]) * 1e9;
             cout << "rate_const_gbps " << argv[i + 1] << endl;
             i++;
+        // ===== ADDED (rate-const-nic) =====
+        // -rate_const_data_only: old behaviour of -rate_const_gbps (per-source pacer, data packets only,
+        // ACKs not counted). Default is now an NIC egress shaper covering data + ACK/control.
+        } else if (!strcmp(argv[i], "-rate_const_data_only")) {
+            UecSrc::_rate_const_data_only = true;
+        // ===== END ADDED (rate-const-nic) =====
         // ===== END ADDED (rate-const-sender) =====
         } else if (!strcmp(argv[i], "-down_ratio")) {
             FatTreeTopology::_failed_link_ratio = std::stod(argv[i + 1]);
@@ -1974,6 +1980,16 @@ int main(int argc, char **argv) {
             exit(1);
         }
         cwnd = 1000000; // packets; window never binds, the pacer is the only limiter
+        // ===== ADDED (rate-const-nic) =====
+        if (!UecSrc::_rate_const_data_only) {
+            if (ports != 1) {
+                cerr << "ERROR: -rate_const_gbps (NIC egress shaper) needs a single-port NIC; use -rate_const_data_only otherwise" << endl;
+                exit(1);
+            }
+            UecNIC::_egress_bps = (linkspeed_bps)(UecSrc::_rate_const_bps);
+            cout << "rate_const NIC egress shaper: " << UecNIC::_egress_bps << " bps (data + ACK/control)" << endl;
+        }
+        // ===== END ADDED (rate-const-nic) =====
     }
     // ===== END ADDED (rate-const-sender) =====
     mem_b cwnd_b = cwnd*Packet::data_packet_size();

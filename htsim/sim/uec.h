@@ -81,6 +81,14 @@ public:
 
     linkspeed_bps linkspeed() const {return _linkspeed;}
 
+    // ===== ADDED (rate-const-nic) =====
+    // -rate_const_gbps R (default meaning): NIC egress shaper. When > 0, port busy time
+    // for EVERY packet the NIC sends (data, rtx, ACK/NACK/control) is size/R instead of
+    // size/linkspeed, so the NIC emits at most R on average. 0 == off (stock behaviour).
+    static linkspeed_bps _egress_bps;
+    linkspeed_bps egressSpeed() const {return _egress_bps > 0 ? _egress_bps : _linkspeed;}
+    // ===== END ADDED (rate-const-nic) =====
+
     int activeSources() const { return _active_srcs.size(); }
     virtual const string& nodename() const {return _nodename;}
     list<UecSrc*> _active_srcs;
@@ -674,6 +682,11 @@ public:
     // source, independent of ACK arrival. _rate_const_bps == 0 means off.
 public:
     static double _rate_const_bps;
+    // ===== ADDED (rate-const-nic) =====
+    // true: old data-only per-source pacer (-rate_const_data_only); false (default): R is enforced
+    // by the NIC egress shaper (UecNIC::_egress_bps) and the source pacer is bypassed.
+    static bool _rate_const_data_only;
+    // ===== END ADDED (rate-const-nic) =====
 private:
     simtime_picosec _rate_next_send = 0;
     bool _rate_pacer_armed = false;

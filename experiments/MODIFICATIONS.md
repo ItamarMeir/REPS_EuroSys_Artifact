@@ -1136,9 +1136,17 @@ Fails an arbitrary set of cables of a 3-tier fat-tree from 0.01 us for the whole
 | `htsim/sim/datacenter/main_uec.cpp` | variable `fail_pipes_file`, argument parsing, one block after the `-fail_link_*` scheduling | `-fail_pipes_file` |
 
 
-### `[ADDED: rate-const-sender]` — `-rate_const_gbps <R>` (timer-paced constant-rate sender)
+### `[ADDED: rate-const-sender]` — `-rate_const_gbps <R>` (constant-rate sender; NIC egress shaper by default, `-rate_const_data_only` = old data-only pacer)
 
 Per-source sender that injects data packets (new and retransmitted) at most at R Gbps of wire rate (packet size incl. header, i.e. `_mtu`-sized packets), independent of ACK arrival. Requires `-sender_cc_algo constant`; `cwnd` is forced to 1,000,000 packets so the window never binds. Gate `rateGate()` is checked at every data-send entry point; `rateCharge()` advances an absolute per-source schedule after each emitted data packet; a lazily-created `UecRatePacer` event wakes `sendIfPermitted()` at the next permitted time. RTS/control packets are not charged. Design and validation: [`RATE_CONST_ARCHITECTURE.md`](RATE_CONST_ARCHITECTURE.md). Flag absent: byte-identical (verified: full flow-finish lines incl. times and counters identical, tornado NSCC x32, 1024 lines).
+
+**Semantics change (`rate-const-nic`, 2026-10-24).** The description above is the `-rate_const_data_only` behaviour. By default `-rate_const_gbps R` now shapes the whole NIC egress: port busy time of every packet the `UecNIC` sends (data, rtx, ACK/NACK/control) is `size/R` instead of `size/linkspeed` (`UecNIC::_egress_bps`, `egressSpeed()`), and the per-source pacer is bypassed (`rateGate()` true, `rateCharge()` no-op unless `-rate_const_data_only`). Motivation: in tornado every host also returns ACKs through the same (degraded) ToR uplinks, so a data-only rate of 200G offers 203G to a 200G uplink (rho 1.015) and REPS saw ~50% random EVs from standing-queue ECN marking; at R=197G data-only it was ~1% (meeting_23_10_26 M4 README). Requires a single-port NIC (error otherwise). Flag-absent and `-rate_const_data_only` runs are byte-identical to the pre-change binary (validation in `RATE_CONST_ARCHITECTURE.md`).
+
+| File | What | Gate |
+|------|------|------|
+| `htsim/sim/uec.h` | `UecNIC::_egress_bps`, `egressSpeed()`; `UecSrc::_rate_const_data_only` | `rate-const-nic` |
+| `htsim/sim/uec.cpp` | `startSending()` and `sendControlPktNow()` use `egressSpeed()`; `rateGate()`/`rateCharge()` bypass unless data-only | `_egress_bps > 0` |
+| `htsim/sim/datacenter/main_uec.cpp` | `-rate_const_data_only` parse; sets `_egress_bps`; single-port check | `-rate_const_gbps` |
 
 | File | What | Gate |
 |------|------|------|
