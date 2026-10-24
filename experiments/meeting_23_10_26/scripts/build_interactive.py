@@ -124,10 +124,10 @@ const byCell = {}; DATA.summary.forEach(r => byCell[r.cell] = r);
 (function () {
   const x = SWEEP.map(s => s[0]);
   plotWithHeadline("tend", [
-    {x, y: SWEEP.map(s => byCell[s[1]].t_end_us), type: "bar", name: "t_end (us)", marker: {color: "#2a788e"}},
+    {x, y: SWEEP.map(s => byCell[s[1]].t_end_us), mode: "lines+markers", name: "t_end (us)", line: {color: "#2a788e", width: 2}, marker: {size: 8}},
     {x, y: SWEEP.map(s => byCell[s[1]].cwnd_med), mode: "lines+markers", yaxis: "y2", name: "median cwnd", line: {color: "#dc2626"}}],
     {title: {text: "Trace end time and median cwnd vs target (single seed)", font: {size: 13}},
-     xaxis: {title: "target_q_delay", type: "category"}, yaxis: {title: "t_end (us)", range: [650, 790]},
+     xaxis: {title: "target_q_delay", type: "category"}, yaxis: {title: "t_end (us) (zoomed axis, not zero-based)", range: [650, 790]},
      yaxis2: {title: "median cwnd (pkts)", overlaying: "y", side: "right", range: [40, 100]},
      legend: {orientation: "h", y: -0.3}, margin: {t: 40, b: 100}, height: 440}, {responsive: true});
 })();
@@ -167,15 +167,15 @@ def build_m1():
 # ----------------------------------------------------------------------------- M4
 M4_BODY = """
 <h1>M4: does the REPS buffer size B matter, at each sending rate?</h1>
-<div class="note">Constant-rate sender (<code>-rate_const_gbps</code>, no congestion control), REPS (freezing), SRv6 32 paths,
+<div class="note">Constant-rate sender (<code>-rate_const_gbps</code> = NIC egress rate of data + ACKs, no congestion control), REPS (freezing), SRv6 32 paths,
 tornado 16 MiB, 1024 flows, trimming on, seeds 42-44 (means of 3; FCT error bars = 95% t-CI). One section per sending rate
-per source: <b>under</b> 100G, <b>matched</b> 200G, <b>over</b> 400G, relative to the 200G that a 50%-degraded ToR0 uplink
+per host: <b>under</b> 100G, <b>matched</b> 200G, <b>over</b> 400G, relative to the 200G that a 50%-degraded ToR0 uplink
 leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 uplinks); non-uniform (even agg 25%, odd agg 75%).<br>
 <b>Split</b>: share of sends that used a random EV vs a valid EV from the buffer (stale = 0: no RTOs and no freezing in any run).
 <b>k</b>: valid EVs in the buffer immediately before each draw (the previous trace row's post-event count), after the source's first ACK
 (same definition as the C1 page), ToR0 sources 0-7 event traces; draws = SEND/RTX/RTS. The split uses the same post-warmup draws. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
-32 ToR0 flows. Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
-The acks-per-window panel from the C1 page is not reproduced: those traces were analysed and deleted in the sweep.</div>
+32 ToR0 flows. <b>Overwrite</b>: a clean (unmarked) ACK writes its EV at the buffer head; if the buffer is full that slot still holds a valid EV, which is lost (counted from the traces: clean ACK arriving with fresh == B before it; ToR0 sources 0-7, summed per run, only clean ACKs before the source's last send, since after it the buffer just fills in the flow tail; the line is the share of clean ACKs that did this). Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
+The acks-per-window panel from the C1 page is not reproduced here.</div>
 __SECTIONS__
 <script>
 const DATA = __PAYLOAD__;
@@ -186,7 +186,7 @@ const FAILS = [["healthy", "healthy"], ["uniform50", "uniform 50%"], ["nonunifor
 const BS = [1, 2, 4, 8, 16, 32, 64], BCAT = BS.map(b => "B=" + b);
 const rows = (r, f) => DATA.rows.filter(x => x.rate === r && x.fail === f).sort((a, b) => a.B - b.B);
 const at = (rs, b) => rs.find(x => x.B === b);
-const F = (v, d) => v == null ? "-" : v.toFixed(d);
+const F = (v, d) => v == null ? "-" : (Math.abs(v) < 0.5 * Math.pow(10, -d) ? 0 : v).toFixed(d);
 
 function splitPlot(r, f, id) {
   const rs = rows(r, f);
@@ -214,18 +214,35 @@ function fctPlot(r, f, id) {
                ["fct_tor0_mean", "mean (ToR0 flows)", "#111"]];
   const traces = ser.map(([k, n, c]) => ({x: BCAT, y: rs.map(x => x[k + "_mean"]), mode: "lines+markers", name: n, line: {color: c, width: 1.6},
     error_y: {type: "data", array: rs.map(x => x[k + "_ci95"]), visible: true, thickness: 1, width: 3}}));
+  // Keep a minimum visible span (+-2% of the mean) so sub-microsecond jitter is not blown up to look like an effect.
+  let lo = Infinity, hi = -Infinity;
+  ser.forEach(([k]) => rs.forEach(x => { lo = Math.min(lo, x[k + "_mean"] - (x[k + "_ci95"] || 0)); hi = Math.max(hi, x[k + "_mean"] + (x[k + "_ci95"] || 0)); }));
+  const mid = (lo + hi) / 2, half = Math.max((hi - lo) / 2 * 1.08, 0.02 * mid);
   plotWithHeadline(id, traces, {title: {text: "FCT (us) -- " + r + " / " + f, font: {size: 12}},
-    xaxis: {type: "category"}, yaxis: {title: "us"}, legend: {orientation: "h", y: -0.3},
+    xaxis: {type: "category"}, yaxis: {title: "us", range: [mid - half, mid + half]}, legend: {orientation: "h", y: -0.3},
     margin: {t: 36, b: 90, l: 55, r: 10}, height: 320}, {responsive: true});
 }
 function lossPlot(r, f, id) {
   const rs = rows(r, f);
+  const allZero = rs.every(x => !x.rtx_mean && !x.ecn_acks_mean);
   plotWithHeadline(id, [
     {x: BCAT, y: rs.map(x => x.rtx_mean), type: "bar", name: "retransmits / run", marker: {color: "#dc2626"}},
     {x: BCAT, y: rs.map(x => x.ecn_acks_mean), type: "bar", name: "ECN-marked ACKs / run", marker: {color: "#f59e0b"}}],
-    {title: {text: "Loss and marking per run, whole run (all 1024 flows) -- " + r + " / " + f, font: {size: 12}}, barmode: "group",
-     xaxis: {type: "category"}, yaxis: {title: "count"}, legend: {orientation: "h", y: -0.3},
+    {title: {text: "Whole-run loss/marking (1024 flows) -- " + r + "/" + f, font: {size: 12}}, barmode: "group",
+     xaxis: {type: "category"}, yaxis: {title: "count", rangemode: "tozero", range: allZero ? [0, 1] : undefined}, legend: {orientation: "h", y: -0.3},
+     annotations: allZero ? [{text: "none (0 retransmits, 0 ECN marks)", xref: "paper", yref: "paper", x: 0.5, y: 0.5, showarrow: false}] : [],
      margin: {t: 36, b: 90, l: 55, r: 10}, height: 320}, {responsive: true});
+}
+function overwritePlot(r, f, id) {
+  if (!document.getElementById(id)) return;
+  const rs = rows(r, f);
+  plotWithHeadline(id, [
+    {x: BCAT, y: rs.map(x => x.ev_overwrites_mean), type: "bar", name: "valid EVs overwritten / run (ToR0 srcs 0-7)", marker: {color: "#7c3aed"},
+     error_y: {type: "data", array: rs.map(x => x.ev_overwrites_ci95), visible: true, thickness: 1, width: 3}},
+    {x: BCAT, y: rs.map(x => x.pct_overwrite_mean), mode: "lines+markers", name: "% of clean ACKs that overwrote", yaxis: "y2", line: {color: "#111", width: 1.6}}],
+    {title: {text: "Valid EVs lost to overwrite -- " + r + " / " + f, font: {size: 12}},
+     xaxis: {type: "category"}, yaxis: {title: "EVs per run"}, yaxis2: {title: "% of clean ACKs", overlaying: "y", side: "right", rangemode: "tozero"},
+     legend: {orientation: "h", y: -0.3}, margin: {t: 36, b: 90, l: 55, r: 50}, height: 320}, {responsive: true});
 }
 function verdict(r, id) {
   let h = "<table><tr><th>failure model</th><th>% random B=1</th><th>B=2</th><th>B=4</th><th>B=8</th><th>B=64</th>" +
@@ -238,7 +255,7 @@ function verdict(r, id) {
 }
 RATES.forEach(([r]) => { verdict(r, "verdict_" + r);
   FAILS.forEach(([f]) => { splitPlot(r, f, "split_" + r + "_" + f); kPlot(r, f, "k_" + r + "_" + f);
-    fctPlot(r, f, "fct_" + r + "_" + f); lossPlot(r, f, "loss_" + r + "_" + f); }); });
+    fctPlot(r, f, "fct_" + r + "_" + f); overwritePlot(r, f, "overwrite_" + r + "_" + f); lossPlot(r, f, "loss_" + r + "_" + f); }); });
 </script>
 </body></html>
 """
@@ -260,19 +277,23 @@ M4_RATES = [("under", "UNDER capacity: 100 Gbps per source"),
             ("over", "OVER capacity: 400 Gbps per source")]
 M4_FAILS = ["healthy", "uniform50", "nonuniform"]
 M4_METRICS = ["pct_random", "pct_random_incl_warmup", "k_ge1", "k_ge2", "k_ge3", "k_ge4", "k_ge8", "fct_p50", "fct_p99", "fct_max",
-              "fct_tor0_mean", "rtx", "ecn_acks"]
+              "fct_tor0_mean", "rtx", "ecn_acks", "ev_overwrites", "pct_overwrite", "clean_acks"]
 
 
 def build_m4():
     s = pd.read_csv(ROOT / "M4" / "data" / "m4_summary.csv")
     keep = (["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
             + [f"kdist_{i}" for i in range(33)])
+    keep = [c for c in keep if c in s.columns]
+    has_ow = "ev_overwrites_mean" in s.columns
     rows = [{k: clean(v) for k, v in r.items()} for r in s[keep].to_dict("records")]
     sections = ""
     for r, title in M4_RATES:
         sections += f'<h2>{title}</h2>\n<div id="verdict_{r}"></div>\n'
-        for kind, label in [("split", "valid vs random EV"), ("k", "k distribution"), ("fct", "FCT statistics"),
-                            ("loss", "retransmits and ECN marks")]:
+        kinds = [("split", "valid vs random EV"), ("k", "k distribution"), ("fct", "FCT statistics")]
+        if has_ow:
+            kinds.append(("overwrite", "valid EVs overwritten by a clean ACK (buffer full)"))
+        for kind, label in kinds + [("loss", "retransmits and ECN marks")]:
             sections += f'<h3>{label}</h3>\n<div class="grid3">' + "".join(
                 panel(f"{kind}_{r}_{f}") for f in M4_FAILS) + "</div>\n"
     html = HEAD.replace("__TITLE__", "M4 REPS buffer size per sending rate").replace("</head>", M4_EXTRA_CSS + "</head>")
