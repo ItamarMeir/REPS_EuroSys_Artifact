@@ -103,7 +103,7 @@ A first run of exp03 with leaf ECN accidentally enabled was not preserved; the l
 
 ## Code changes
 
-All changes to `htsim/sim/` are gated behind CLI flags and are additions or wraps; with no new flag the binary behaves like vanilla NSCC + REPS/FREEZING. The gate flags and exact locations are listed in [`MODIFICATIONS.md`](MODIFICATIONS.md); the project guide in the repo root `CLAUDE.original.md` has a one-line summary of each mechanism (`state-aware`, `smart-filter`, `wtd-in-nscc`, `ev-health-counter`, `swift-cc`, `path-rr`, `srv6`, `freezing-pxr`, `timed-failure`, and others). Rule for new mechanisms: a `// ===== ADDED (<name>) =====` banner at each modification site, a row in `MODIFICATIONS.md`, and an architecture doc here.
+All changes to `htsim/sim/` are gated behind CLI flags and are additions or wraps; with no new flag the binary behaves like vanilla NSCC + REPS/FREEZING. The gate flags and exact locations are listed in [`MODIFICATIONS.md`](MODIFICATIONS.md); the project guide in `htsim/sim/CLAUDE.md` has a one-line summary of each mechanism (`state-aware`, `smart-filter`, `wtd-in-nscc`, `ev-health-counter`, `swift-cc`, `path-rr`, `srv6`, `freezing-pxr`, `timed-failure`, and others). Rule for new mechanisms: a `// ===== ADDED (<name>) =====` banner at each modification site, a row in `MODIFICATIONS.md`, and an architecture doc here.
 
 ## Directory map
 
@@ -130,7 +130,7 @@ Already covered, no longer open: real-CDF workloads (exp09), long failures and f
 ## Reproducing
 
 ```bash
-# Build htsim_uec (use the Docker image: see the repo-root README / CLAUDE.original.md)
+# Build htsim_uec (use the Docker image: see the repo-root README / `build-htsim` skill)
 cd htsim/sim && make -j 8 && cd datacenter && make -j 8 && cd ../../..
 
 # Regenerate shared workloads

@@ -4,7 +4,7 @@ Validation of the Ofan implementation (`-strat ofan`, [`../OFAN_ARCHITECTURE.md`
 
 ## Method note
 
-- Build and run inside Docker container `ofan-dev` (see `CLAUDE.original.md`, "Docker environment"). `scripts/build.sh`, `scripts/baseline.sh`.
+- Build and run inside Docker container `ofan-dev` (see `.claude/skills/build-htsim/SKILL.md`). `scripts/build.sh`, `scripts/baseline.sh`.
 - Always `-load_balancing_algo ecmp` for ofan and AR (constant entropy); REPS uses `-load_balancing_algo freezing -paths 65535` with default switch ECMP.
 - `-sender_cc_only` runs all pass `-disable_tor_ecn` (project rule). `reps_dl` in S5 is a sensitivity run that omits it.
 - Buffers: `-q 193` (800,950 B per port), `-ecn 19 19` (about 80 KB). **Deviation from the paper:** its footnote 6 uses 800 KB buffers only in the CCA experiments and "practically infinite" buffers in the no-CCA ones, so the S5 drops/RTOs of AR and REPS at m >= 16 are an artifact of this setup and not paper-comparable (the Ofan bound and the queue-vs-m trend are unaffected). S5 uses `-disable_trim` so trim counts are 0 by construction.

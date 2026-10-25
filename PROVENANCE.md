@@ -26,7 +26,7 @@ later commits is ours.
 | `experiments/` | `[ADDED]` | Our extension code's experiment harness + all findings. |
 | `docs/assets/*.svg` | `[ADDED]` (commit `fd44085`) | Diagrams for `HTSIM_BEGINNERS_GUIDE.md`. |
 | `htsim/README.md` | `[ORIGINAL]` (commit `0bd00a6`, author Tommaso Bonato) | Paper author's own htsim fork-lineage doc (Handley → Raiciu/MPTCP → NDP → Correct Networks/Broadcom/EQDS → Ultra Ethernet Consortium → REPS paper), landed 2nd commit, not the 1st — not written by us. |
-| `CLAUDE.md`, `CLAUDE.original.md` | `[ADDED]` | This project's agent-guidance docs. |
+| `CLAUDE.md` (root + `htsim/sim/` + `experiments/`), `.claude/skills/` | `[ADDED]` | This project's agent-guidance docs and skills. |
 | `AGENTS.md` | `[ADDED]` | Agent-guidance doc. |
 | `HTSIM_BEGINNERS_GUIDE.md` | `[ADDED]` | Fact-checked beginner's guide to the simulator internals. |
 | `code-review.md` | `[ADDED]` | Our code-review notes. |

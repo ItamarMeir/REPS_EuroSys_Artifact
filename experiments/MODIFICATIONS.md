@@ -1,6 +1,6 @@
 # Modifications inventory — full detail
 
-Split out of `CLAUDE.original.md` to keep the loaded `CLAUDE.md` context small. This file is
+Split out of the root `CLAUDE.md` to keep the loaded `CLAUDE.md` context small. This file is
 the **source of truth for the original-vs-added boundary** in `htsim/sim/`. `CLAUDE.md` keeps
 only a one-line-per-entry index pointing here.
 
@@ -770,7 +770,7 @@ Four review findings were about **pre-existing code this task didn't touch**. On
 (`-fail_src_paths` blackholing 100% of a source's traffic instead of a fraction when used
 without SRv6/PATH_RR/RANDOM/STATIC) was flagged and left unfixed as out of scope, at the
 user's direction. The other three were fixed at the user's later request — see
-`reps-metrics-per-host-key` and `timed-failure-guards` in `CLAUDE.original.md`'s
+`reps-metrics-per-host-key` and `timed-failure-guards` in `htsim/sim/CLAUDE.md`'s
 modifications table: `g_reps_metrics` rekeyed from `_node_num` (per-flow) to `_srcaddr`
 (per-host, matching its own "per-host" framing); `-timed_window`/`-timed_fail_tor_uplinks`/
 `-timed_fail_tor_downlinks` now hard-error if combined with `-fail_link_time`/

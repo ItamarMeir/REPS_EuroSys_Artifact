@@ -164,7 +164,7 @@ Open [`experiments/README.md`](README.md), add a new row to the lineage table, a
 
 Commit: C++ source, scripts (`*.py`, `*.sh`), docs (`*.md`), small config/schedule `*.json`, topology/connection-matrix inputs.
 
-Do NOT commit (all covered by `.gitignore`; do not `git add -f` them): event traces (`traces/`, `*.csv.gz`), per-run dirs (`runs/`), run bundles (`*.tar.gz`), interactive pages (`*.html` — published via the thesis repo, see CLAUDE.original.md), derived `*.csv`, stdout (`*.txt`, `*.stdout`), backups (`_prev_*/`) and scratch (`temp/`). Anything over ~1 MB stays local; the scripts that regenerate it are the record.
+Do NOT commit (all covered by `.gitignore`; do not `git add -f` them): event traces (`traces/`, `*.csv.gz`), per-run dirs (`runs/`), run bundles (`*.tar.gz`), interactive pages (`*.html` — published via the thesis repo, see the `thesis-sync` skill), derived `*.csv`, stdout (`*.txt`, `*.stdout`), backups (`_prev_*/`) and scratch (`temp/`). Anything over ~1 MB stays local; the scripts that regenerate it are the record.
 
 Before committing: `git status --short --untracked-files=all`, check no large or generated file is staged (`git diff --cached --stat`).
 
@@ -209,4 +209,4 @@ grep -q "$EXP" experiments/README.md || echo "TODO: update master README"
 
 If all four checks pass, you're done.
 
-**Optional, only if the user asks to publish to the thesis repo:** commit here first, then in `C:\git_repos\Thesis_Itamar_BGU_Networking` add the new `interactive.html` to the `$map` in `sync_from_sim.ps1` and run `.\sync_from_sim.ps1`. See `CLAUDE.original.md` § "Companion repo: thesis results".
+**Optional, only if the user asks to publish to the thesis repo:** commit here first, then in `C:\git_repos\Thesis_Itamar_BGU_Networking` add the new `interactive.html` to the `$map` in `sync_from_sim.ps1` and run `.\sync_from_sim.ps1`. See the `thesis-sync` skill.
