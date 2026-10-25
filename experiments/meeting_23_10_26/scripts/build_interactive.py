@@ -175,7 +175,7 @@ leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 upli
 <b>k</b>: valid EVs in the buffer immediately before each draw (the previous trace row's post-event count), after the source's first ACK
 (same definition as the C1 page), ToR0 sources 0-7 event traces; draws = SEND/RTX/RTS. The split uses the same post-warmup draws. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
 32 ToR0 flows. <b>Overwrite</b>: a clean (unmarked) ACK writes its EV at the buffer head; if the buffer is full that slot still holds a valid EV, which is lost (counted from the traces: clean ACK arriving with fresh == B before it; ToR0 sources 0-7, summed per run, only clean ACKs before the source's last send, since after it the buffer just fills in the flow tail; the line is the share of clean ACKs that did this). Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
-<br><b>ACKs per window</b> (as in C1): the number of ACKs of a source between two consecutive draws, over the same post-warmup draws as k (it ties out 1:1 to the draw count). k is a running sum of (ACKs in the window - 1), so the spread of this distribution, not its mean (about 1 by conservation), sets how far k wanders.</div>
+<br><b>ACKs per window</b> (as in C1): the number of ACKs of a source between two consecutive draws, over the same post-warmup draws as k (it ties out 1:1 to the draw count). k is a running sum of (ACKs in the window - 1), so it follows the in-flight count; the distribution alone does not explain why k differs between cells (see M4/investigate_k).</div>
 __SECTIONS__
 <script>
 const DATA = __PAYLOAD__;
