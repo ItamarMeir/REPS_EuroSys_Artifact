@@ -6,10 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.path.insert(0, "/work")
 from run_m4 import flags, DC, TRACE_SRCS
-CELLS = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398)]
+CELLS = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398), ("deg", 200), ("deg", 198)]
 def run(c, out):
     fab, R = c; n = f"{fab}_R{R}_s42"
     f = flags("over", "healthy", 8, 42); f[f.index("-rate_const_gbps") + 1] = str(R); f[f.index("-end") + 1] = "500"
+    if fab == "deg": f += ["-degrade_links_file", "/work/degrade_uniform50.txt"]
     if fab == "fab800": f[f.index("-topo") + 1] = "topologies/reps/fat_tree_1024_1os_2t_fabric800_nic400.topo"
     tr = f"/tmp/t_{n}.csv"
     cmd = ["./htsim_uec"] + f + ["-log_reps_events", tr, "-log_reps_events_max", "50000000", "-log_queue_stats", str(out / f"{n}.queues.tsv"),
@@ -23,5 +24,5 @@ def run(c, out):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--out", default="/out_t"); a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    with ThreadPoolExecutor(4) as ex:
+    with ThreadPoolExecutor(2) as ex:
         for r in ex.map(lambda c: run(c, out), CELLS): print(r, flush=True)

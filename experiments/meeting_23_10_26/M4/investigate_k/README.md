@@ -124,11 +124,48 @@ Within the healthy cells k gets tighter as ECN marks and random draws increase (
 adds no EV to the buffer, so each mark lowers k by one until a random draw re-anchors it; that is a candidate mechanism. It is not
 sufficient on its own: matched/uniform50 R=200 has the same mark and random-draw rates as over/healthy seed 42 yet a wide k.
 
+## Mechanism: k is the drawdown of the in-flight count from its running maximum
+(`replay_k.py`, `drawdown.py`, `structfn.py`, `ramp_cf.py`; srcs 0-7, draws 100-600 us, B=8 unless stated)
+
+1. **Identity.** The constant-rate sender's timing does not depend on k, so k can be replayed from the event stream alone: clean ACK
+   +1 (cap B), ECN-marked ACK +0, draw -1 (floor 0). The replay reproduces the traced `fresh` on every row (0 mismatches in all cells
+   tried). Hence k is a reflected walk driven by in-flight changes; without the cap (B = infinity) it is exactly the drawdown of
+   M(t) = in-flight + marked ACKs from its running maximum since the source's first ACK.
+2. **The B = infinity drawdown orders the cells like the observed k**:
+
+| cell | mean drawdown (pkts) | observed k (B=8) | local in-flight fluctuation (10 us moving average removed, pkts) | fluctuation over 1 us |
+|---|---|---|---|---|
+| native 200G R=200 | 1.2 | 2.14 | 0.41 | 0.58 |
+| over/healthy R=400, s42 / s43 / s44 | 1.4 / 1.4 / 1.9 | 2.21 / 2.13 / 2.20 | 0.43 / - / 0.54 | 0.60 / - / 0.77 |
+| healthy R=398, s42 / s43 / s44 | 2.7 / 2.8 / 2.1 | 3.40 / 3.38 / 2.78 | 0.57 / - / 0.54 | 0.71 / - / 0.71 |
+| native 200G R=198 | 2.8 | 3.67 | - | - |
+| matched/healthy (R=200) | 2.4 | 3.28 | 0.59 | 0.85 |
+| matched/uniform50 (R=200) | 4.1 | 3.96 | 1.04 | 1.49 |
+| healthy R=350 | 4.6 | 5.29 | 0.68 | 0.96 |
+| uniform50 R=198 | 5.9 | 4.51 | - | - |
+
+3. **Over/healthy's drawdown is small because its in-flight count fluctuates least around its own level.** Removing the fitted linear
+   trend of M leaves over/healthy's drawdown at 1.4 / 1.5 / 2.0 (s42/s43/s44; actual 1.4 / 1.4 / 1.9), so the creeping queue is *not*
+   what keeps it small there. For the native-200G twin the trend does matter (1.16 -> 2.87 detrended). Adding a ramp of +0.02 pkts/us
+   to R=398 cells lowers their drawdown from 2.7 to 1.95 but not to 1.4; the extra-EV-loss counterfactual (`replay_k.py`: lose 0.25-0.5%
+   of clean ACKs) moves R=398 seed 42 from k=3.40 to 2.5-2.8 and matched/uniform50 from 3.96 to 3.4-3.6, and removing the
+   ECN-mark effect from over/healthy changes its k by only +0.0 to +0.2. So neither marks nor drift is the main cause.
+4. **Matched/uniform50's drawdown is large because its in-flight count fluctuates about 2x more**, at every time scale from 0.2 us up
+   (hf amplitude 1.04 vs 0.43-0.54), and no ramp closes the gap (detrended it is 5.1; +0.04 pkts/us only gets it to 2.9). It is the
+   degraded uplinks, not the sending rate, that adds this: matched/healthy at the same R=200 has 0.59. The ACK stream of matched/uniform50
+   is also the clumpiest (ACK-spacing CV 0.95, vs 0.66-0.68 at line rate).
+5. **What is not the cause**: the spread of queue length across the 32 sprayed uplinks, converted to time, is about the same (R=400:
+   6.6 packets x 83 ns = 0.55 us; matched/uniform50: 2.8 packets x 166 ns = 0.46 us; per-packet RTT std 0.57 vs 0.49 us). Receiver-downlink
+   occupancy, ECN marks and ACK-window counts were each tested and do not separate the cells (sections above).
+
 ## Status
-- Established: the implementation passes the single-flow and pair checks; over/healthy's tight k is robust across 3 seeds and is
-  reproduced by a native 200G fabric; every sub-line-rate cell and matched/uniform50 have a wide k; at R=400 the ToR uplink queues
-  keep growing while at R=398 they plateau.
-- Open: why this makes k tight. ACK burstiness, a creeping receiver downlink, and ECN rate alone were each tested and do not
-  explain it. Not run: the 800G-fabric / 400G-NIC test (the topology parser derives the uplink count from the speed ratio, so a
-  32 x 800G uplink ToR is rejected; it would need a topology-parser change or oversubscription flags), receiver-downlink degrade
-  (`-degrade_links_file` supports ToR uplinks only), more seeds for the steady-state queue sampling.
+- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k is robust over 3 seeds and is
+  reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count from its running maximum, and the
+  drawdown tracks how much the in-flight count fluctuates locally: smallest at line rate (0.4-0.5 packets), about 2x larger with
+  degraded uplinks (1.0), in between elsewhere. At R=400 the ToR uplink queue also keeps growing (+0.010-0.020 pkt/us, vs a plateau at R=398),
+  which adds to the effect only in some cells.
+- **Open.** The microscopic reason why in-flight fluctuates less at R = line rate and about twice as much with degraded 200G uplinks.
+  A busy-period explanation (links that never idle emit evenly spaced departures, so the ACK stream is regular) fits the line-rate side
+  but not the intermediate cells monotonically (matched/healthy 0.59 < R=350's 0.68). Not run: an 800G-fabric / 400G-NIC topology
+  (the topology parser derives the uplink count from the speed ratio and rejects 32 x 800G uplinks), receiver-downlink degradation
+  (`-degrade_links_file` supports ToR uplinks only), per-hop departure/arrival logging.
