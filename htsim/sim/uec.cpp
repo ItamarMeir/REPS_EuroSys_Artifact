@@ -5472,8 +5472,18 @@ void UecSink::handlePullTarget(UecBasePacket::seq_t pt) {
     }
 }
 
+// ===== ADDED (sink-arrival-log) =====
+FILE* UecSink::_arrival_log = nullptr;
+std::set<uint32_t> UecSink::_arrival_log_flows;
+// ===== END ADDED (sink-arrival-log) =====
+
 void UecSink::processData(UecDataPacket& pkt) {
     bool force_ack = false;
+    // ===== ADDED (sink-arrival-log) =====
+    if (_arrival_log && (_arrival_log_flows.empty() || _arrival_log_flows.count(pkt.flow_id())))
+        fprintf(_arrival_log, "%llu,%u,%lld,%d,%d\n", (unsigned long long)EventList::getTheEventList().now(), pkt.flow_id(),
+                (long long)pkt.epsn(), (int)pkt.path_id(), (int)pkt.size());
+    // ===== END ADDED (sink-arrival-log) =====
 
     //PCIeModel processing
 

@@ -237,8 +237,26 @@ concluded that the trend does not matter; the scripts producing that were remove
    - **The rho = 0.99 tension is resolved:** with the ToR->host link at 50% and R=198 the smoothing survives (hf 0.67-0.68 vs 0.55-0.65 at R=200)
      but the rise is gone (M falls, the queue drains from the start-up peak), so the drawdown is large (dd_first 4.9-6.3) and k is wide. Native 200G
      R=198 (hf 0.84) and healthy R=398 (hf 0.67 vs 0.57-0.72 at R=400) fit the same reading: the rise needs rho >= 1 exactly.
-   - Mechanism (inferred from these interventions, not logged per packet): a rho = 1 uplink queue is a random walk that adds per-path delay jitter;
-     the busy receiver-side ToR->host FIFO releases packets back-to-back, which evens the arrival spacing seen by the receiver and so the ACK stream.
+   - **Measured per packet at the receivers** (`-log_sink_arrivals`, a new diagnostic added for this check, see `experiments/MODIFICATIONS.md`; `arrivals.py`;
+     data packets of the 8 flows from ToR0's hosts, window 100-330 us, seed 42; the flow-completion lines of the flag-absent run are byte-identical):
+
+| cell | CV of the spacing of data arrivals at the receiver | CV of the ACK spacing at the sender |
+|---|---|---|
+| over/healthy R=400 | **0.04** | 0.67 |
+| healthy R=398 | 0.07 | 0.67 |
+| native 200G R=200 | 0.06 | 0.66 |
+| allt + every ToR->host link at 50% | **0.01** | 0.65 |
+| allt + only ToR16's ToR->host links at 50% (the receivers) | **0.02** | 0.55 |
+| matched/uniform50 (ToR0 uplinks at 50%) | 0.74 | 0.95 |
+| allt (all uplinks at 50%) | 0.73 | 0.89 |
+| allt + only ToR0's ToR->host links at 50% | 0.77 | 0.96 |
+
+     The data stream is almost perfectly evenly spaced where the receiver's ToR->host link is busy (CV 0.01-0.07, including R=398) and clumped, near
+     exponential spacing, where it is not (CV 0.73-0.77), and the ACK stream seen at the sender follows (0.55-0.67 vs 0.89-0.96). This is the smoothing
+     itself, observed at the receiver, and it is switched on and off by the receiver-side ToR->host links alone (rows 4-5 vs 8). (A "jitter about a straight
+     line" statistic was also computed; it does not separate the cells because ~40% of packets are reordered in all of them, so it is not used.)
+   - Mechanism: a rho = 1 uplink queue is a random walk that adds per-path delay jitter; the busy ToR->host FIFO of the receiver releases packets
+     back-to-back, which evens the arrival spacing the receiver sees and therefore the ACK stream and the in-flight count.
 
 ## Status
 - **Established.** The implementation passes the single-flow and pair checks and the byte-identity check after both sim extensions. Over/healthy's tight k
@@ -247,6 +265,5 @@ concluded that the trend does not matter; the scripts producing that were remove
   the agg->ToR links do not), and (b) a rising in-flight count, which needs a queue at exactly rho = 1 (the uplinks in over/healthy; downstream in the
   sped-up-uplink fabric). Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
   creep (scaled ECN thresholds) is a second-order difference: doubling the thresholds restores it without making k tight.
-- **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the smoothing mechanism is inferred from the interventions
-  (receiver-side last hop alone suffices; marks and trims excluded), not logged per packet; allt and allt + ToR->host have 3 seeds, the per-ToR and per-hop cells 2,
+- **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the receiver-side smoothing is now measured per packet (arrival CV above, single seed 42); allt and allt + ToR->host have 3 seeds, the per-ToR and per-hop cells 2,
   the queue-sampling controls and the ramp counterfactuals (consistent-with only) are single seed 42; staggered flow starts untested.

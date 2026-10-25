@@ -1271,6 +1271,12 @@ private:
 
 class UecSink : public DataReceiver {
    public:
+    // ===== ADDED (sink-arrival-log) =====
+    // -log_sink_arrivals <file> [-log_sink_arrivals_flow <id> ...]: one CSV row per data packet reaching the sink
+    // (time_ps,flow_id,epsn,path_id,size); empty flow set = all flows. Diagnostic only, no behaviour change.
+    static FILE* _arrival_log;
+    static std::set<uint32_t> _arrival_log_flows;
+    // ===== END ADDED (sink-arrival-log) =====
     struct Stats {
         uint64_t received;
         uint64_t bytes_received;

@@ -1183,6 +1183,16 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[i],"-log_buffer_contents")) { // ===== ADDED (buffer-contents-log) =====
             UecSrc::_log_buffer_contents = true;
             cout << "Buffer contents logging enabled (appends buf_contents column to reps_state_log)" << endl;
+        // ===== ADDED (sink-arrival-log) =====
+        } else if (!strcmp(argv[i],"-log_sink_arrivals")){
+            UecSink::_arrival_log = fopen(argv[i+1], "w");
+            if (!UecSink::_arrival_log) { cerr << "Could not open sink arrival log: " << argv[i+1] << endl; exit(1); }
+            fprintf(UecSink::_arrival_log, "time_ps,flow_id,epsn,path_id,size\n");
+            i++;
+        } else if (!strcmp(argv[i],"-log_sink_arrivals_flow")){
+            UecSink::_arrival_log_flows.insert((uint32_t)atoi(argv[i+1]));
+            i++;
+        // ===== END ADDED (sink-arrival-log) =====
         // ===== ADDED (reps-event-trace) =====
         } else if (!strcmp(argv[i],"-log_reps_events")){
             // Open unified send+ACK+freeze event trace (independent of -log_reps_state,
