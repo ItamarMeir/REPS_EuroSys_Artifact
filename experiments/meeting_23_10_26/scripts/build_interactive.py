@@ -206,7 +206,7 @@ function kPlot(r, f, id) {
     ["k=17-32", x => sum(x, 17, 32), "#7e3a9a"], ["k=33-64", x => sum(x, 33, 64), "#440154"]];
   const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
   plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer just before a send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
-    xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
+    xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3, traceorder: "normal"},
     margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
 }
 function ackWinPlot(r, f, id) {
@@ -217,7 +217,7 @@ function ackWinPlot(r, f, id) {
     ["2 ACKs", x => sum(x, 2, 2), "#fee08b"], ["3 ACKs", x => sum(x, 3, 3), "#fdae61"], ["4+ ACKs", x => sum(x, 4, 8), "#a50026"]];
   const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
   plotWithHeadline(id, traces, {title: {text: "ACKs per SEND-to-SEND window -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
-    xaxis: {type: "category"}, yaxis: {title: "% of post-warmup windows", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
+    xaxis: {type: "category"}, yaxis: {title: "% of post-warmup windows", range: [0, 100]}, legend: {orientation: "h", y: -0.3, traceorder: "normal"},
     margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
 }
 function fctPlot(r, f, id) {
