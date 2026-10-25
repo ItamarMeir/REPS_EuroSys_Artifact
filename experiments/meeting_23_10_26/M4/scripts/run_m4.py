@@ -85,7 +85,7 @@ def analyze(trace, stdout, B):
     new = df[df.event == "SEND"]
     pop = post[post.ev_src == "fresh_pop"]; rnd = post[post.ev_src == "random"]
     mism = int((pop.fresh != pop.prev_fresh - 1).sum() + ((rnd.prev_fresh != 0) | (rnd.fresh != 0)).sum())
-    kh = np.bincount(np.minimum(k, 32), minlength=33)
+    kh = np.bincount(np.minimum(k, 64), minlength=65)
     r.update(sends=int(len(new)), rtx=int((draws.event == "RTX").sum()), draws_post=int(len(post)),
              draws_warmup=int(len(draws) - len(post)), n_random_post=int((post.ev_src == "random").sum()),
              n_fresh_pop_post=int(len(pop)), n_other_post=int(len(post) - len(pop) - len(rnd)), recon_mismatch=mism,

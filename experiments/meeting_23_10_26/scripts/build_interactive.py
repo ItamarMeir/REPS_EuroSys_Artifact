@@ -202,7 +202,8 @@ function kPlot(r, f, id) {
   const sum = (x, lo, hi) => { let s = 0; for (let i = lo; i <= hi; i++) s += x["kdist_" + i] || 0; return s; };
   const parts = [["k=0", x => sum(x, 0, 0), "#94a3b8"], ["k=1", x => sum(x, 1, 1), "#bde0d0"],
     ["k=2", x => sum(x, 2, 2), "#7ad151"], ["k=3", x => sum(x, 3, 3), "#22a884"],
-    ["k=4-7", x => sum(x, 4, 7), "#2a788e"], ["k>=8", x => sum(x, 8, 32), "#440154"]];
+    ["k=4-7", x => sum(x, 4, 7), "#2a788e"], ["k=8-16", x => sum(x, 8, 16), "#3b528b"],
+    ["k=17-32", x => sum(x, 17, 32), "#7e3a9a"], ["k=33-64", x => sum(x, 33, 64), "#440154"]];
   const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
   plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer just before a send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
     xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
@@ -294,7 +295,7 @@ M4_METRICS = ["pct_random", "pct_random_incl_warmup", "k_ge1", "k_ge2", "k_ge3",
 def build_m4():
     s = pd.read_csv(ROOT / "M4" / "data" / "m4_summary.csv")
     keep = (["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
-            + [f"kdist_{i}" for i in range(33)] + [f"awdist_{i}" for i in range(9)])
+            + [f"kdist_{i}" for i in range(65)] + [f"awdist_{i}" for i in range(9)])
     keep = [c for c in keep if c in s.columns]
     has_ow = "ev_overwrites_mean" in s.columns
     has_aw = "awdist_0" in s.columns

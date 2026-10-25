@@ -20,7 +20,7 @@ def kshare(h):
     h = np.asarray(h, float); return 100 * h / h.sum()
 df["_ks"] = df.k_hist.apply(kshare)
 kd = df.groupby(["rate_gbps", "rate", "fail", "B"])["_ks"].apply(lambda s: np.mean(np.vstack(list(s)), axis=0)).reset_index()
-for i in range(33):
+for i in range(65):
     kd[f"kdist_{i}"] = kd["_ks"].apply(lambda a, i=i: a[i])
 summ = summ.merge(kd.drop(columns="_ks"), on=["rate_gbps", "rate", "fail", "B"])
 # ACKs per SEND-to-SEND window (C1 definition): share of windows with i ACKs, i = 0..7, 8 = 8 or more
