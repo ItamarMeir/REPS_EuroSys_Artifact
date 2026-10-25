@@ -212,15 +212,19 @@ concluded that the trend does not matter; the scripts producing that were remove
 | allt (nothing else changed) | 3.44 / 3.16 | 16.9 / 21.4 | 1.44 / 1.52 | wide |
 | + every agg->ToR link at 50% | 3.55 / 3.90 | 15.1 / 9.7 | 1.40 / 1.29 | still wide |
 | **+ every ToR->host link at 50%** | **2.23 / 2.16** | **58.3 / 65.3** | **0.55 / 0.65** | **tight** |
-| + agg->ToR and ToR->host at 50% | 2.34 / 2.12 | 50.1 / 62.8 | 0.56 / 0.58 | tight (= native 200G) |
+| + agg->ToR and ToR->host at 50% | 2.34 / 2.12 | 50.1 / 62.8 | 0.56 / 0.58 | tight (host->ToR links stay 400G, so not identical to native 200G) |
 | + ToR->host at 50%, R=198 | 4.86 / 5.46 | 4.8 / 5.3 | 0.68 / 0.67 | wide, M falling (-0.006 / -0.015 pkts/us) |
 | native 200G with the uplinks sped up to 400G, R=200 | 2.28 / 2.18 | 51.5 / 59.6 | 0.61 / 0.60 | tight (uplink queue 0.7 packets) |
 | matched/healthy R=200 (400G everywhere) | 3.28 | 14.1 | 0.73 | wide, M flat |
 
-   - **The receiver-side ToR->host link at rho = 1 is what makes the fluctuation small and k tight** (2 seeds, an intervention that changes only that
-     link). The agg->ToR links do not. A rho = 1 uplink without it gives the large fluctuation (hf 1.4-1.5), and an uplink at rho = 0.5 (queue
+   - **The last hop, the ToR->host links at rho = 1, is what makes the fluctuation small and k tight** (2 seeds, an intervention that changes only those
+     links). Every host is both sender and receiver, so each such link carries the incoming data and the returning ACKs; the two directions were not separated.
+     It is the stage where the 32 sprayed paths reconverge into one FIFO, which agg->ToR (still a sprayed parallel stage) is not. The agg->ToR links do not. A rho = 1 uplink without it gives the large fluctuation (hf 1.4-1.5), and an uplink at rho = 0.5 (queue
      0.7 packets) is not needed. The host->ToR link could not be varied: `-linkspeed 200000` left the results identical to the digit (`ph_h` = `ph_none`,
      `ph_had` = `ph_ad`), so that arm is untested.
+   - **Loss is not the explanation:** in every cell above the ToR->host queues have 0 trims and 0 drops (peak 21-24 packets of 50 with them at 50%), the traced sources
+     have 0 RTX / NACK / RTS, and the whole-run RTS count is 0. The cells do trim some packets on the 200G uplinks (allt 227-484 trims, +ToR->host 1,187-2,752), and
+     the ECN-marked ACK count rises with them (allt 118-134k, +ToR->host 149-222k); these were not separated from the smoothing.
    - **The two factors act separately.** The no/no cell (matched/healthy) is wide because nothing rises (M flat), not because of large fluctuation
      (hf 0.73). The cells with a rho = 1 uplink but no rho = 1 ToR->host link are wide because of large fluctuation. Tight needs both: smoothing from the
      ToR->host link at rho = 1 and a rising in-flight count, which only a queue at exactly rho = 1 provides.
@@ -233,7 +237,7 @@ concluded that the trend does not matter; the scripts producing that were remove
 ## Status
 - **Established.** The implementation passes the single-flow and pair checks and the byte-identity check after both sim extensions. Over/healthy's tight k
   holds in 3 seeds and is reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its
-  running maximum. A tight k needs (a) small local in-flight fluctuation, which the busy receiver-side ToR->host link provides (intervention, 2 seeds;
+  running maximum. A tight k needs (a) small local in-flight fluctuation, which the busy last-hop ToR->host links provide (intervention, 2 seeds;
   the agg->ToR links do not), and (b) a rising in-flight count, which needs a queue at exactly rho = 1 (the uplinks in over/healthy; downstream in the
   sped-up-uplink fabric). Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
   creep (scaled ECN thresholds) is a second-order difference: doubling the thresholds restores it without making k tight.
