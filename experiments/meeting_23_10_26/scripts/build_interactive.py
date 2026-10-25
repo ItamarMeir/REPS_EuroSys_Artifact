@@ -284,7 +284,7 @@ th { background: #f3f4f6; }
 </style>
 """
 
-K_WHY = """<div class="note" style="max-width:none"><b>Why over/healthy's k is tight and matched/degraded's isn't?</b>
+K_WHY = """<div class="note" style="max-width:none; font-size:16px; line-height:1.55; color:#111"><b>Why over/healthy's k is tight and matched/degraded's isn't?</b>
 <ul>
 <li>Over/healthy runs at line rate, so the receivers' last link (ToR&rarr;host) is backlogged. A backlogged link releases packets back-to-back, so data arrives evenly (spacing CV 0.03&ndash;0.07). The ACKs come back evenly, in-flight barely moves, and k stays near 2. A queue at exactly &rho;=1 also keeps in-flight rising, which holds k near its floor.</li>
 <li>Matched/degraded has backlogged degraded uplinks. A &rho;=1 queue is a random walk, and the 32 sprayed paths get different delays, which creates jitter. The healthy links run at &rho;=0.5 and are mostly empty, so they pass packets straight through and don't remove it. Data arrives clumped (CV about 0.73), in-flight fluctuates 2&ndash;3&times; more, and k spreads over 2&ndash;6.</li>
