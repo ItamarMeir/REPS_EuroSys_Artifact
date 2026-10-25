@@ -284,6 +284,13 @@ th { background: #f3f4f6; }
 </style>
 """
 
+K_WHY = """<div class="note" style="max-width:none"><b>Why over/healthy's k is tight and matched/degraded's isn't?</b>
+<ul>
+<li>Over/healthy runs at line rate, so the receivers' last link (ToR&rarr;host) is backlogged. A backlogged link releases packets back-to-back, so data arrives evenly (spacing CV 0.03&ndash;0.07). The ACKs come back evenly, in-flight barely moves, and k stays near 2. A queue at exactly &rho;=1 also keeps in-flight rising, which holds k near its floor.</li>
+<li>Matched/degraded has backlogged degraded uplinks. A &rho;=1 queue is a random walk, and the 32 sprayed paths get different delays, which creates jitter. The healthy links run at &rho;=0.5 and are mostly empty, so they pass packets straight through and don't remove it. Data arrives clumped (CV about 0.73), in-flight fluctuates 2&ndash;3&times; more, and k spreads over 2&ndash;6.</li>
+</ul></div>
+"""
+
 M4_RATES = [("under", "UNDER capacity: 100 Gbps per source"),
             ("matched", "MATCHED to degraded capacity: 200 Gbps per source"),
             ("over", "OVER capacity: 400 Gbps per source")]
@@ -312,6 +319,8 @@ def build_m4():
         for kind, label in kinds + [("loss", "retransmits and ECN marks")]:
             sections += f'<h3>{label}</h3>\n<div class="grid3">' + "".join(
                 panel(f"{kind}_{r}_{f}") for f in M4_FAILS) + "</div>\n"
+            if kind == "k" and r == "matched":
+                sections += K_WHY
     html = HEAD.replace("__TITLE__", "M4 REPS buffer size per sending rate").replace("</head>", M4_EXTRA_CSS + "</head>")
     html += M4_BODY.replace("__SECTIONS__", sections)
     html = html.replace("__PAYLOAD__", json.dumps({"rows": rows}))
