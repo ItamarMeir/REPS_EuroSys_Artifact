@@ -584,7 +584,9 @@ int main(int argc, char **argv) {
                 if (dline.empty() || dline[0] == '#') continue;
                 istringstream dls(dline);
                 uint32_t dt, da; double dr;
-                if (!(dls >> dt >> da >> dr) || dr <= 0 || dr > 1) {
+                // ===== ADDED (per-link-degrade-speedup): ratios in (1, 4] speed the uplink up (investigation controls, M4 investigate_k) =====
+                if (!(dls >> dt >> da >> dr) || dr <= 0 || dr > 4) {
+                // ===== END ADDED (per-link-degrade-speedup) =====
                     cerr << "bad -degrade_links_file line: " << dline << endl; exit(1);
                 }
                 FatTreeTopology::_degrade_links[make_pair(dt, da)] = dr;

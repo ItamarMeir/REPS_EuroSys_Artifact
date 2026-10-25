@@ -1162,3 +1162,5 @@ Lines `tor agg ratio` (`#` comments ok, ratio in (0,1]) slow that ToR->agg uplin
 |------|------|------|
 | `htsim/sim/datacenter/fat_tree_topology.h/.cpp` | static `_degrade_links` map and `_alloc_ratio_override`; `alloc_queue` uses the override ratio when set; new branch in the ToR->agg uplink loop | non-empty map |
 | `htsim/sim/datacenter/main_uec.cpp` | `-degrade_links_file` parser | flag |
+
+**Extension (`per-link-degrade-speedup`, 2026-10-25):** the ratio column now accepts values in (1, 4]; a ratio above 1 speeds that uplink up (queue size and ECN thresholds scale with it, the same code path). Used only by the M4 `investigate_k` controls (native 200G fabric with 400G uplinks). Files with ratios <= 1 and the flag-absent run are unchanged.

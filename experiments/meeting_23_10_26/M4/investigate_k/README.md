@@ -203,14 +203,35 @@ concluded that the trend does not matter; the scripts producing that were remove
    - Why the degraded 200G-uplink cells fluctuate more is not established. The native 200G fabric (200G uplinks at the same load, hf 0.59) differs
      from them in that its host links and downlinks are also at rho = 1.0; that is the remaining candidate, from single runs and not tested.
 
+8. **Which hops matter: a 2x2 intervention** (single runs, seed 42 unless stated; window 100-330 us; `run_queue_ts.py` cell `n200up2` uses
+   `-degrade_links_file` with ratio 2.0, enabled by the `per-link-degrade-speedup` extension, a one-token relaxation of the ratio check, see
+   `experiments/MODIFICATIONS.md`). "Uplinks at rho = 1" = the ToR->agg links carry exactly their capacity; "downstream at rho = 1" = the host
+   links, agg->ToR links and ToR->host links do.
+
+| uplinks at rho = 1 | downstream at rho = 1 | cell | k mean | k=2 % | hf | slope of M (pkts/us) |
+|---|---|---|---|---|---|---|
+| yes | yes | native 200G R=200 | 2.14 | 57.0 | 0.59 | +0.046 |
+| yes | yes | over/healthy R=400 (3 seeds) | 2.13-2.21 | 53-62 | 0.57-0.72 | +0.033 to +0.042 |
+| yes | **no** | all ToR uplinks at 50%, R=200 (hosts, downlinks at 0.5) | 3.44 | 16.9 | 1.44 | (mostly marks) |
+| yes | **no** | only ToR0 uplinks at 50%, R=200 | 3.96 | 8.9 | 1.20 | +0.016 |
+| **no** | yes | native 200G fabric with 400G uplinks, R=200, seeds 42 / 43 | 2.28 / 2.18 | 51.5 / 59.6 | 0.61 / 0.60 | +0.024 / +0.028 |
+| no | no | matched/healthy R=200 (400G everywhere) | 3.28 | 14.1 | 0.73 | -0.000 |
+
+   - **Downstream hops at rho = 1 are what makes k tight**, and the uplink hop at rho = 1 is not needed: with the uplinks sped up to 400G (uplink
+     queue 0.7 packets, no creep there) k stays tight (2.2-2.3), hf stays 0.6, and M still rises (+0.024-0.028 pkts/us, from the downstream hops).
+   - **Uplinks at rho = 1 without the downstream hops at rho = 1 is what makes the fluctuation large** (hf 1.2-1.4 vs 0.6-0.7 with neither at rho = 1).
+   - Reading (mechanism, not separately measured): a rho = 1 uplink queue is a random walk that adds a lot of per-path delay jitter; a downstream FIFO
+     that is continuously busy releases packets back-to-back at line rate, so the receiver sees (and acknowledges) an evenly spaced stream whatever
+     the upstream jitter. Without such a busy downstream hop the jitter reaches the ACK stream and the in-flight count (ACK-spacing CV 0.95 vs 0.66).
+     The intermediate cells fit this ordering (R=398, downlink rho = 0.995, is in between). Which of the three downstream hops does the smoothing
+     was not separated (it needs per-hop speed control that `-degrade_links_file` does not offer for agg->ToR / ToR->host links).
+
 ## Status
 - **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k holds in 3 seeds and is reproduced by a native 200G
   fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its running maximum. Over/healthy's drawdown is small
-  because its in-flight count keeps rising (+0.004 to +0.020 pkts/us in-flight, +0.03 to +0.05 with marks) while its local fluctuation is small (hf 0.57); adding
-  such a ramp to sub-line-rate cells moves their drawdown into that range (consistent with, not a causal proof). The degraded-uplink cells (ToR0 only
-  or all ToRs) have 2-3x the local fluctuation, and their queue creeps slowly because the ECN thresholds scale with the link; fixing the creep
-  (doubled ECN thresholds) does not make k tight.
-- **Open.** Why the degraded 200G-uplink cells fluctuate more (host-link / downlink rho = 1.0 is the remaining candidate). Not run: an 800G-fabric /
-  400G-NIC topology (the topology parser derives the uplink count from the speed ratio and rejects 32 x 800G uplinks), receiver-downlink degradation
-  (`-degrade_links_file` supports ToR uplinks only), per-hop departure logging, staggered flow starts, more seeds (queue sampling and all
-  degraded controls are single seed 42).
+  because its in-flight count keeps rising while its local fluctuation is small (hf 0.57). The 2x2 intervention (point 8) shows the small
+  fluctuation requires the downstream hops (host links, agg->ToR, ToR->host) to be at rho = 1, while a rho = 1 uplink on its own produces the large
+  fluctuation (hf 1.2-1.4) that makes the degraded cells wide. The uplink queue of the degraded cells also creeps more slowly because the ECN thresholds scale with
+  the link, but fixing that (doubled thresholds) does not make k tight.
+- **Open.** Which downstream hop smooths the stream; seeds (all degraded and queue-sampling controls are single seed 42, `n200up2` has 2 seeds);
+  per-hop departure logging to show the smoothing directly instead of inferring it; staggered flow starts.
