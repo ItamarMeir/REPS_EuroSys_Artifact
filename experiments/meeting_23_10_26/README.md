@@ -92,6 +92,8 @@ Grid: rate {under, matched, over capacity} x failure {healthy, uniform 50% on To
 ## M5. REPS vs OPS
 Same grid with an oblivious sprayer (no memory) against REPS with small B, to answer Chen's question 4. Reuse existing LB options (`path_random` and the other non-memory algorithms in the simulator).
 
+**Done (2026-10-25):** see `M5/README.md`. OPS = `oblivious` over the same SRv6 paths; REPS B=1,2,4. REPS wins by 24% on matched/nonuniform (941 vs 704 us, 44k vs 0.2k trims), ties on symmetric degradation, small OPS cost at over/healthy.
+
 ## M6. "Break REPS" search
 Ask Claude for adversarial failure models, for example asymmetric degradation, flapping or transient links, correlated multi-tier failures, failures timed to the RTT, partial-path loss where all stored EVs are bad. Implement via `-fail_pipes_file`, `-timed_*`, `-fail_src_paths`. Run against OPS and PATH_RR baselines and rank by REPS FCT gap.
 
