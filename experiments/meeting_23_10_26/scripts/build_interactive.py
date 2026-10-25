@@ -250,10 +250,12 @@ function overwritePlot(r, f, id) {
   const rs = rows(r, f);
   plotWithHeadline(id, [
     {x: BCAT, y: rs.map(x => x.ev_overwrites_mean), type: "bar", name: "valid EVs overwritten / run (ToR0 srcs 0-7)", marker: {color: "#7c3aed"},
-     error_y: {type: "data", array: rs.map(x => x.ev_overwrites_ci95), visible: true, thickness: 1, width: 3}},
+     // the lower whisker is clipped at the mean: a count cannot be below 0 (the 3-seed t-CI is wider than the mean at small values)
+     error_y: {type: "data", symmetric: false, array: rs.map(x => x.ev_overwrites_ci95),
+               arrayminus: rs.map(x => Math.min(x.ev_overwrites_ci95 || 0, x.ev_overwrites_mean)), visible: true, thickness: 1, width: 3}},
     {x: BCAT, y: rs.map(x => x.pct_overwrite_mean), mode: "lines+markers", name: "% of clean ACKs that overwrote", yaxis: "y2", line: {color: "#111", width: 1.6}}],
     {title: {text: "Valid EVs lost to overwrite -- " + r + " / " + f, font: {size: 12}},
-     xaxis: {type: "category"}, yaxis: {title: "EVs per run"}, yaxis2: {title: "% of clean ACKs", overlaying: "y", side: "right", rangemode: "tozero"},
+     xaxis: {type: "category"}, yaxis: {title: "EVs per run", rangemode: "tozero"}, yaxis2: {title: "% of clean ACKs", overlaying: "y", side: "right", rangemode: "tozero"},
      legend: {orientation: "h", y: -0.3}, margin: {t: 36, b: 90, l: 55, r: 50}, height: 320}, {responsive: true});
 }
 function verdict(r, id) {
