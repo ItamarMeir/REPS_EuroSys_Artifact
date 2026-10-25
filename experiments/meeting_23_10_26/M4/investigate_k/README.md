@@ -217,10 +217,14 @@ concluded that the trend does not matter; the scripts producing that were remove
 | **no** | yes | native 200G fabric with 400G uplinks, R=200, seeds 42 / 43 | 2.28 / 2.18 | 51.5 / 59.6 | 0.61 / 0.60 | +0.024 / +0.028 |
 | no | no | matched/healthy R=200 (400G everywhere) | 3.28 | 14.1 | 0.73 | -0.000 |
 
-   - **Downstream hops at rho = 1 are what makes k tight**, and the uplink hop at rho = 1 is not needed: with the uplinks sped up to 400G (uplink
-     queue 0.7 packets, no creep there) k stays tight (2.2-2.3), hf stays 0.6, and M still rises (+0.024-0.028 pkts/us, from the downstream hops).
-   - **Uplinks at rho = 1 without the downstream hops at rho = 1 is what makes the fluctuation large** (hf 1.2-1.4 vs 0.6-0.7 with neither at rho = 1).
-   - Reading (mechanism, not separately measured): a rho = 1 uplink queue is a random walk that adds a lot of per-path delay jitter; a downstream FIFO
+   - The two factors act separately, so the k column mixes two causes: a tight k needs **both** a rising in-flight count and small local fluctuation.
+     yes/yes cells have both (hf 0.6, M rising). The yes/no cells are wide because the fluctuation is large (hf 1.2-1.4, a rho = 1 uplink without
+     downstream smoothing). The no/no cell (matched/healthy) is wide although its fluctuation is small (hf 0.73), because nothing rises (slope 0).
+     The no/yes cell stays tight (2.2-2.3, 2 seeds): the uplink at rho = 1 is not needed, the downstream hops at rho = 1 supply both small fluctuation and the rise.
+   - **Open tension.** Cells with every hop at rho = 0.99 are wide: native 200G R=198 (k 3.51, hf 0.84) and healthy R=398 (downstream at 0.995; k 3.4-3.7, hf 0.67).
+     So the smoothing needs exactly rho = 1 (R equal to the host-link rate), not just a nearly busy downstream FIFO; "a busy FIFO releases back-to-back
+     departures" alone does not predict that a 1% idle fraction already weakens it.
+   - Reading (mechanism, inferred, not measured per hop): a rho = 1 uplink queue is a random walk that adds a lot of per-path delay jitter; a downstream FIFO
      that is continuously busy releases packets back-to-back at line rate, so the receiver sees (and acknowledges) an evenly spaced stream whatever
      the upstream jitter. Without such a busy downstream hop the jitter reaches the ACK stream and the in-flight count (ACK-spacing CV 0.95 vs 0.66).
      The intermediate cells fit this ordering (R=398, downlink rho = 0.995, is in between). Which of the three downstream hops does the smoothing
@@ -233,5 +237,6 @@ concluded that the trend does not matter; the scripts producing that were remove
   fluctuation requires the downstream hops (host links, agg->ToR, ToR->host) to be at rho = 1, while a rho = 1 uplink on its own produces the large
   fluctuation (hf 1.2-1.4) that makes the degraded cells wide. The uplink queue of the degraded cells also creeps more slowly because the ECN thresholds scale with
   the link, but fixing that (doubled thresholds) does not make k tight.
-- **Open.** Which downstream hop smooths the stream; seeds (all degraded and queue-sampling controls are single seed 42, `n200up2` has 2 seeds);
-  per-hop departure logging to show the smoothing directly instead of inferring it; staggered flow starts.
+- **Open.** Which of the three downstream hops smooths the stream (needs degrade support for agg->ToR and ToR->host links, a new mechanism);
+  why rho = 0.99 everywhere already loses the effect; seeds (all degraded and queue-sampling controls are single seed 42, `n200up2` has 2 seeds);
+  per-hop departure logging; staggered flow starts.
