@@ -10,6 +10,16 @@ What has NOT been changed:
 - No original lines deleted from `htsim/sim/`. Every modification is an addition or a wrap.
 - With all new flags absent, the binary produces byte-identical behavior to vanilla NSCC + REPS/FREEZING.
 
+## Extensions overview
+
+All gated behind CLI flags:
+1. **State-aware NSCC + REPS** (`-state_aware_ecn`) — binary ECN gate driven by REPS freeze/unfreeze events + dynamic link-failure machinery. Experiments: exp01–03.
+2. **Smart filter** (`-smart_filter_mode`) — continuous, evidence-based dampening of NSCC's MD step using REPS buffer saturation. Mutually exclusive with state-aware. Experiments: exp06.
+3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
+4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
+
+Later mechanisms (Swift CCs, Ofan, constant-rate sender, per-link degrade, ...) are in the inventory at the bottom.
+
 ## The state-aware NSCC + REPS extension
 
 ### What it does
