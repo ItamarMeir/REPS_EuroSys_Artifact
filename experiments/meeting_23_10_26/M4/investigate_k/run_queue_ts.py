@@ -10,6 +10,11 @@ CELLS_OLD = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398),
 def run(c, out):
     fab, R = c[0], c[1]; seed = c[2] if len(c) > 2 else 42; n = f"{fab}_R{R}_s{seed}"
     f = flags("over", "healthy", 8, seed); f[f.index("-rate_const_gbps") + 1] = str(R); f[f.index("-end") + 1] = "500"
+    if fab.startswith("ph_"):   # per-hop intervention on top of 'allt' (all ToR uplinks at 50%, R=200): h = host links at 200G (-linkspeed 200000),
+        # a = all agg->ToR links at 50%, d = all ToR->host links at 50% (per-hop-degrade); 'none' = allt itself
+        o = fab[3:]; df = {"none": "alltor50", "h": "alltor50", "a": "ph_a", "d": "ph_d", "ad": "ph_ad", "had": "ph_ad"}[o]
+        f += ["-degrade_links_file", f"/work/degrade_{df}.txt"]; f[f.index("-end") + 1] = "900"
+        if "h" in o: f[f.index("-linkspeed") + 1] = "200000"
     if fab == "n200up2":   # native 200G fabric (all links 200G, NIC 200G) but every ToR uplink sped up to 400G (ratio 2.0): uplinks at rho 0.5, host links / agg->ToR / ToR->host at rho 1
         f[f.index("-topo") + 1] = "topologies/reps/fat_tree_1024_1os_2t_200g_native.topo"; f[f.index("-linkspeed") + 1] = "200000"
         f += ["-degrade_links_file", "/work/degrade_alltor200pct.txt"]; f[f.index("-end") + 1] = "900"

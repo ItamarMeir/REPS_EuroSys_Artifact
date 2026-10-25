@@ -203,40 +203,40 @@ concluded that the trend does not matter; the scripts producing that were remove
    - Why the degraded 200G-uplink cells fluctuate more is not established. The native 200G fabric (200G uplinks at the same load, hf 0.59) differs
      from them in that its host links and downlinks are also at rho = 1.0; that is the remaining candidate, from single runs and not tested.
 
-8. **Which hops matter: a 2x2 intervention** (single runs, seed 42 unless stated; window 100-330 us; `run_queue_ts.py` cell `n200up2` uses
-   `-degrade_links_file` with ratio 2.0, enabled by the `per-link-degrade-speedup` extension, a one-token relaxation of the ratio check, see
-   `experiments/MODIFICATIONS.md`). "Uplinks at rho = 1" = the ToR->agg links carry exactly their capacity; "downstream at rho = 1" = the host
-   links, agg->ToR links and ToR->host links do.
+8. **Which hop matters: interventions on the all-ToR-uplinks-at-50% fabric** (`allt`: every uplink at rho = 1.0, host links, agg->ToR and ToR->host at
+   rho = 0.5; R=200; seeds 42 / 43; window 100-330 us; `run_queue_ts.py` cells `ph_*`). The `per-link-degrade-speedup` and `per-hop-degrade` extensions
+   (see `experiments/MODIFICATIONS.md`) let the degrade file speed up uplinks and scale every agg->ToR / ToR->host link.
 
-| uplinks at rho = 1 | downstream at rho = 1 | cell | k mean | k=2 % | hf | slope of M (pkts/us) |
-|---|---|---|---|---|---|---|
-| yes | yes | native 200G R=200 | 2.14 | 57.0 | 0.59 | +0.046 |
-| yes | yes | over/healthy R=400 (3 seeds) | 2.13-2.21 | 53-62 | 0.57-0.72 | +0.033 to +0.042 |
-| yes | **no** | all ToR uplinks at 50%, R=200 (hosts, downlinks at 0.5) | 3.44 | 16.9 | 1.44 | (mostly marks) |
-| yes | **no** | only ToR0 uplinks at 50%, R=200 | 3.96 | 8.9 | 1.20 | +0.016 |
-| **no** | yes | native 200G fabric with 400G uplinks, R=200, seeds 42 / 43 | 2.28 / 2.18 | 51.5 / 59.6 | 0.61 / 0.60 | +0.024 / +0.028 |
-| no | no | matched/healthy R=200 (400G everywhere) | 3.28 | 14.1 | 0.73 | -0.000 |
+| cell (all uplinks at 50%, R=200 unless stated) | k mean s42 / s43 | k=2 % | hf | note |
+|---|---|---|---|---|
+| allt (nothing else changed) | 3.44 / 3.16 | 16.9 / 21.4 | 1.44 / 1.52 | wide |
+| + every agg->ToR link at 50% | 3.55 / 3.90 | 15.1 / 9.7 | 1.40 / 1.29 | still wide |
+| **+ every ToR->host link at 50%** | **2.23 / 2.16** | **58.3 / 65.3** | **0.55 / 0.65** | **tight** |
+| + agg->ToR and ToR->host at 50% | 2.34 / 2.12 | 50.1 / 62.8 | 0.56 / 0.58 | tight (= native 200G) |
+| + ToR->host at 50%, R=198 | 4.86 / 5.46 | 4.8 / 5.3 | 0.68 / 0.67 | wide, M falling (-0.006 / -0.015 pkts/us) |
+| native 200G with the uplinks sped up to 400G, R=200 | 2.28 / 2.18 | 51.5 / 59.6 | 0.61 / 0.60 | tight (uplink queue 0.7 packets) |
+| matched/healthy R=200 (400G everywhere) | 3.28 | 14.1 | 0.73 | wide, M flat |
 
-   - The two factors act separately, so the k column mixes two causes: a tight k needs **both** a rising in-flight count and small local fluctuation.
-     yes/yes cells have both (hf 0.6, M rising). The yes/no cells are wide because the fluctuation is large (hf 1.2-1.4, a rho = 1 uplink without
-     downstream smoothing). The no/no cell (matched/healthy) is wide although its fluctuation is small (hf 0.73), because nothing rises (slope 0).
-     The no/yes cell stays tight (2.2-2.3, 2 seeds): the uplink at rho = 1 is not needed, the downstream hops at rho = 1 supply both small fluctuation and the rise.
-   - **Open tension.** Cells with every hop at rho = 0.99 are wide: native 200G R=198 (k 3.51, hf 0.84) and healthy R=398 (downstream at 0.995; k 3.4-3.7, hf 0.67).
-     So the smoothing needs exactly rho = 1 (R equal to the host-link rate), not just a nearly busy downstream FIFO; "a busy FIFO releases back-to-back
-     departures" alone does not predict that a 1% idle fraction already weakens it.
-   - Reading (mechanism, inferred, not measured per hop): a rho = 1 uplink queue is a random walk that adds a lot of per-path delay jitter; a downstream FIFO
-     that is continuously busy releases packets back-to-back at line rate, so the receiver sees (and acknowledges) an evenly spaced stream whatever
-     the upstream jitter. Without such a busy downstream hop the jitter reaches the ACK stream and the in-flight count (ACK-spacing CV 0.95 vs 0.66).
-     The intermediate cells fit this ordering (R=398, downlink rho = 0.995, is in between). Which of the three downstream hops does the smoothing
-     was not separated (it needs per-hop speed control that `-degrade_links_file` does not offer for agg->ToR / ToR->host links).
+   - **The receiver-side ToR->host link at rho = 1 is what makes the fluctuation small and k tight** (2 seeds, an intervention that changes only that
+     link). The agg->ToR links do not. A rho = 1 uplink without it gives the large fluctuation (hf 1.4-1.5), and an uplink at rho = 0.5 (queue
+     0.7 packets) is not needed. The host->ToR link could not be varied: `-linkspeed 200000` left the results identical to the digit (`ph_h` = `ph_none`,
+     `ph_had` = `ph_ad`), so that arm is untested.
+   - **The two factors act separately.** The no/no cell (matched/healthy) is wide because nothing rises (M flat), not because of large fluctuation
+     (hf 0.73). The cells with a rho = 1 uplink but no rho = 1 ToR->host link are wide because of large fluctuation. Tight needs both: smoothing from the
+     ToR->host link at rho = 1 and a rising in-flight count, which only a queue at exactly rho = 1 provides.
+   - **The rho = 0.99 tension is resolved:** with the ToR->host link at 50% and R=198 the smoothing survives (hf 0.67-0.68 vs 0.55-0.65 at R=200)
+     but the rise is gone (M falls, the queue drains from the start-up peak), so the drawdown is large (dd_first 4.9-6.3) and k is wide. Native 200G
+     R=198 (hf 0.84) and healthy R=398 (hf 0.67 vs 0.57-0.72 at R=400) fit the same reading: the rise needs rho >= 1 exactly.
+   - Mechanism (inferred from these interventions, not logged per packet): a rho = 1 uplink queue is a random walk that adds per-path delay jitter;
+     the busy receiver-side ToR->host FIFO releases packets back-to-back, which evens the arrival spacing seen by the receiver and so the ACK stream.
 
 ## Status
-- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k holds in 3 seeds and is reproduced by a native 200G
-  fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its running maximum. Over/healthy's drawdown is small
-  because its in-flight count keeps rising while its local fluctuation is small (hf 0.57). The 2x2 intervention (point 8) shows the small
-  fluctuation requires the downstream hops (host links, agg->ToR, ToR->host) to be at rho = 1, while a rho = 1 uplink on its own produces the large
-  fluctuation (hf 1.2-1.4) that makes the degraded cells wide. The uplink queue of the degraded cells also creeps more slowly because the ECN thresholds scale with
-  the link, but fixing that (doubled thresholds) does not make k tight.
-- **Open.** Which of the three downstream hops smooths the stream (needs degrade support for agg->ToR and ToR->host links, a new mechanism);
-  why rho = 0.99 everywhere already loses the effect; seeds (all degraded and queue-sampling controls are single seed 42, `n200up2` has 2 seeds);
-  per-hop departure logging; staggered flow starts.
+- **Established.** The implementation passes the single-flow and pair checks and the byte-identity check after both sim extensions. Over/healthy's tight k
+  holds in 3 seeds and is reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its
+  running maximum. A tight k needs (a) small local in-flight fluctuation, which the busy receiver-side ToR->host link provides (intervention, 2 seeds;
+  the agg->ToR links do not), and (b) a rising in-flight count, which needs a queue at exactly rho = 1 (the uplinks in over/healthy; downstream in the
+  sped-up-uplink fabric). Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
+  creep (scaled ECN thresholds) is a second-order difference: doubling the thresholds restores it without making k tight.
+- **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the smoothing mechanism is inferred from the interventions,
+  not logged per packet; the all-ToR / per-hop cells have 2 seeds, the queue-sampling controls and the ramp counterfactuals (consistent-with only) are
+  single seed 42; staggered flow starts untested.

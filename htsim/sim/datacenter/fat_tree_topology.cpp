@@ -45,6 +45,10 @@ double FatTreeTopology::_failed_link_ratio = 0.5;
 // ===== ADDED (per-link-degrade) =====
 std::map<std::pair<uint32_t,uint32_t>, double> FatTreeTopology::_degrade_links;
 double FatTreeTopology::_alloc_ratio_override = 0;
+// ===== ADDED (per-hop-degrade) =====
+double FatTreeTopology::_degrade_all_adown = 0;
+double FatTreeTopology::_degrade_all_hdown = 0;
+// ===== END ADDED (per-hop-degrade) =====
 // ===== END ADDED (per-link-degrade) =====
 
 void
@@ -885,6 +889,13 @@ void FatTreeTopology::init_network(){
                     queueLogger = NULL;
                 }
             
+                // ===== ADDED (per-hop-degrade) =====
+                if (_degrade_all_hdown > 0) {
+                    _alloc_ratio_override = _degrade_all_hdown;
+                    queues_nlp_ns[tor][srv][b] = alloc_queue(queueLogger, _downlink_speeds[TOR_TIER], _queue_down[TOR_TIER], DOWNLINK, TOR_TIER, true, true);
+                    _alloc_ratio_override = 0;
+                } else
+                // ===== END ADDED (per-hop-degrade) =====
                 queues_nlp_ns[tor][srv][b] = alloc_queue(queueLogger, _queue_down[TOR_TIER], DOWNLINK, TOR_TIER, true);
                 queues_nlp_ns[tor][srv][b]->setName("LS" + ntoa(tor) + "->DST" +ntoa(srv) + "(" + ntoa(b) + ")");
                 //if (logfile) logfile->writeName(*(queues_nlp_ns[tor][srv]));
@@ -965,6 +976,13 @@ void FatTreeTopology::init_network(){
                     if (disable_links_count < disable_links_tot && false) {
                         disable_links_count++;
                     } else {
+                        // ===== ADDED (per-hop-degrade) =====
+                        if (_degrade_all_adown > 0) {
+                            _alloc_ratio_override = _degrade_all_adown;
+                            queues_nup_nlp[agg][tor][b] = alloc_queue(queueLogger, _downlink_speeds[AGG_TIER], _queue_down[AGG_TIER], DOWNLINK, AGG_TIER, false, true);
+                            _alloc_ratio_override = 0;
+                        } else
+                        // ===== END ADDED (per-hop-degrade) =====
                         queues_nup_nlp[agg][tor][b] = alloc_queue(queueLogger, _queue_down[AGG_TIER], DOWNLINK, AGG_TIER);
                     }
                 }

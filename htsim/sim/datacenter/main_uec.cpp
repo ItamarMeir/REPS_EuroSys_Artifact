@@ -583,6 +583,14 @@ int main(int argc, char **argv) {
             while (getline(dlf, dline)) {
                 if (dline.empty() || dline[0] == '#') continue;
                 istringstream dls(dline);
+                // ===== ADDED (per-hop-degrade) =====
+                { string dkey; double dv; istringstream dk(dline);
+                  if ((dk >> dkey >> dv) && (dkey == "all_adown" || dkey == "all_hdown")) {
+                      if (dv <= 0 || dv > 4) { cerr << "bad -degrade_links_file line: " << dline << endl; exit(1); }
+                      (dkey == "all_adown" ? FatTreeTopology::_degrade_all_adown : FatTreeTopology::_degrade_all_hdown) = dv;
+                      continue;
+                  } }
+                // ===== END ADDED (per-hop-degrade) =====
                 uint32_t dt, da; double dr;
                 // ===== ADDED (per-link-degrade-speedup): ratios in (1, 4] speed the uplink up (investigation controls, M4 investigate_k) =====
                 if (!(dls >> dt >> da >> dr) || dr <= 0 || dr > 4) {

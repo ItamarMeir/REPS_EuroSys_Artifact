@@ -209,6 +209,12 @@ public:
     static std::map<std::pair<uint32_t,uint32_t>, double> _degrade_links;
     static double _alloc_ratio_override;
     // ===== END ADDED (per-link-degrade) =====
+    // ===== ADDED (per-hop-degrade) =====
+    // -degrade_links_file lines "all_adown <r>" / "all_hdown <r>" (0 = off): scale EVERY agg->ToR link / EVERY ToR->host link
+    // to r x speed (queue size and ECN thresholds scale with it). Used by the M4 investigate_k per-hop interventions.
+    static double _degrade_all_adown;
+    static double _degrade_all_hdown;
+    // ===== END ADDED (per-hop-degrade) =====
 
     //uint32_t getK() const {return K;}
     uint32_t getNAGG() const {return NAGG;}
