@@ -6,10 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 sys.path.insert(0, "/work")
 from run_m4 import flags, DC, TRACE_SRCS
-CELLS = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398), ("deg", 200), ("deg", 198), ("allt", 200), ("allt", 198)]
+CELLS = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398), ("deg", 200), ("deg", 198), ("allt", 200), ("allt", 198), ("alltq", 200), ("alltqe", 200)]
 def run(c, out):
     fab, R = c; n = f"{fab}_R{R}_s42"
     f = flags("over", "healthy", 8, 42); f[f.index("-rate_const_gbps") + 1] = str(R); f[f.index("-end") + 1] = "500"
+    if fab == "alltqe":  # allt with BOTH queue and ECN thresholds doubled (-q 202 -ecn 50 152): degraded uplinks then hold 101 packets and mark from 25 packets, as native 200G does
+        f += ["-degrade_links_file", "/work/degrade_alltor50.txt"]; f[f.index("-end") + 1] = "900"; f[f.index("-q") + 1] = "202"; i = f.index("-ecn"); f[i + 1] = "50"; f[i + 2] = "152"
+    if fab == "alltq":   # allt with 2x queue size: degraded uplinks get 101 packets and ECN 25/76 packets like native 200G; ratio-1 queues get 202 (idle at rho 0.5)
+        f += ["-degrade_links_file", "/work/degrade_alltor50.txt"]; f[f.index("-end") + 1] = "900"; f[f.index("-q") + 1] = "202"
     if fab == "allt":
         f += ["-degrade_links_file", "/work/degrade_alltor50.txt"]; f[f.index("-end") + 1] = "900"
     if fab == "deg": f += ["-degrade_links_file", "/work/degrade_uniform50.txt"]

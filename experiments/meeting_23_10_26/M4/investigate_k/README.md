@@ -177,31 +177,40 @@ concluded that the trend does not matter; the scripts producing that were remove
    2.5-2.8 but not to 2.2), ACK-window counts, receiver-downlink occupancy, the time-converted spread of queue
    lengths across the 32 sprayed uplinks (R=400: 6.6 packets x 83 ns = 0.55 us; matched/uniform50: 2.8 x 166 ns = 0.46 us).
 
-7. **All ToR uplinks degraded (`run_queue_ts.py`, cells `allt_R200/R198`, seed 42, window 100-330 us).** Every ToR uplink at 50% and R=200 puts
-   *every* uplink at rho = 1.0 (as in over/healthy) while host links and downlinks stay at rho = 0.5. The degrade file is generated with
-   `for t in 0..31, a in 0..31: "t a 0.5"` (`*.txt` is gitignored, so it is not committed).
+7. **Degraded-uplink controls** (`run_queue_ts.py`, seed 42, window 100-330 us; the `deg_*` cells ran with `-end 500`, so no flow finishes in them and only
+   their window numbers are valid). The all-ToR degrade file is `t a 0.5` for t, a in 0..31 (`*.txt` is gitignored, so it is not committed).
+   `allt` = every ToR uplink at 50% and R=200, which puts every uplink at rho = 1.0 as in over/healthy, with host links and downlinks at rho = 0.5.
+   `allt -q 202` doubles the queue size only; `allt -q 202 -ecn 50 152` doubles the queue size and the ECN thresholds, so the degraded uplinks hold
+   101 packets and mark from 25 packets, as the 200G uplinks of the native-200G fabric do (`per-link-degrade` scales both with the link ratio, and
+   the ECN thresholds are absolute, so `-q` alone does not move them).
 
-| cell | k mean (whole run) | k=2 % | window: k obs / dd_first / dd_win | slope of M | hf | uplink queue: fleet mean, slope (pkt/us) |
-|---|---|---|---|---|---|---|
-| all ToRs degraded R=200 | 3.44 | 16.9 | 3.40 / 3.27 / 3.24 | +0.082 | 1.44 | 11.0, +0.0020 |
-| all ToRs degraded R=198 | 4.46 | 6.7 | 4.76 / 4.41 / 4.17 | -0.002 | 1.34 | 7.2, -0.0041 |
-| matched/uniform50 R=200 (only ToR0) | 3.96 | 8.9 | 4.07 / 3.96 / 3.90 | +0.016 | 1.20 | ToR0 9.6, +0.0027 |
-| over/healthy R=400 (400G everywhere) | 2.21 | 55.6 | 2.31 / 1.35 / 1.34 | +0.033 | 0.57 | 18.2, +0.0198 |
+| cell | k mean (whole run) | k=2 % | window: k obs / dd_first | slope of M: in-flight + marks (pkts/us) | hf | uplink queue: fleet mean, slope (pkt/us) | ECN-marked ACKs (run) |
+|---|---|---|---|---|---|---|---|
+| allt R=200 | 3.44 | 16.9 | 3.40 / 3.27 | -0.0001 + 0.0821 | 1.44 | 11.0, +0.0020 | 133,693 |
+| allt R=200, -q 202 | 3.45 | 16.5 | 3.40 / 3.27 | same to 4 digits (the queue never exceeds 50 packets by 330 us) | 1.44 | 11.0, +0.0020 | 135,420 |
+| allt R=200, -q 202 -ecn 50 152 | 4.24 | 10.4 | 4.28 / 3.85 | +0.037 (total) | 1.69 | 15.7, **+0.0198** | 8,224 |
+| allt R=198 | 4.46 | 6.7 | 4.76 / 4.41 | -0.002 (total) | 1.34 | 7.2, -0.0041 | - |
+| matched/uniform50 R=200 (only ToR0) | 3.96 | 8.9 | 4.07 / 3.96 | +0.0025 + 0.0130 | 1.20 | ToR0 9.6, +0.0027 | 286 (whole run, 1024 flows) |
+| over/healthy R=400 | 2.21 | 55.6 | 2.31 / 1.35 | +0.020 + 0.013 (s42) | 0.57 | 18.2, +0.0198 | 8,588 |
 
-   So degrading only ToR0 is not the cause: with every uplink at rho = 1.0 the k stays wide, the local in-flight fluctuation stays about twice
-   that of the line-rate cells (1.3-1.4 vs 0.6), and the uplink queue creeps about 10x more slowly (+0.002 vs +0.020 pkt/us). The native 200G
-   fabric (hf 0.59, tight, creeping) differs from these cells only in that its host links and downlinks are also at line rate (rho = 1.0), so the
-   remaining candidate is the host-link / receiver-downlink hops being at rho = 1.0 (or the NIC egress being at the host link's line rate). That is
-   a two-cell inference from single runs, not a tested cause. Why the 200G uplinks creep slower (their queue size and ECN thresholds scale with the
-   link: 50 packets, marking from ~12 packets; the fleet-mean queue of 7-11 packets sits at the start of that ramp) is also untested.
+   - Degrading only ToR0 is not the cause: with every uplink at rho = 1.0 the k stays wide.
+   - The slow uplink-queue creep of the degraded cells comes from the scaled ECN thresholds: marking from ~12 packets makes the degraded queue stop
+     near 11 packets (16x more marks than over/healthy, the in-flight count flat), while with the thresholds doubled the uplink queue creeps at
+     +0.0198 pkt/us, the same as over/healthy's, and marks fall 16x. Queue capacity alone has no effect.
+   - **But k stays wide even when the queue creeps** (4.24, k=2 10%), because the local in-flight fluctuation of the degraded-uplink cells is 2.3-3x that of
+     over/healthy (hf 1.2-1.7 vs 0.57). A steep M rise does not tighten k when the fluctuation is that large (allt: slope +0.082 in M, mostly marks, but
+     hf 1.44: drawdown 3.3, and 4.75 for in-flight alone). The drawdown depends on the rise **relative to** the local fluctuation.
+   - Why the degraded 200G-uplink cells fluctuate more is not established. The native 200G fabric (200G uplinks at the same load, hf 0.59) differs
+     from them in that its host links and downlinks are also at rho = 1.0; that is the remaining candidate, from single runs and not tested.
 
 ## Status
-- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k holds in 3 seeds and is reproduced by a native
-  200G fabric. k is exactly the (capped) drawdown of the in-flight count from its running maximum. At R = line rate the in-flight count and the
-  ToR uplink queues keep rising, which keeps the maximum recent and k small; adding such a ramp to sub-line-rate cells moves their drawdown
-  into that range (consistent with, not a causal proof). Degraded-uplink cells (ToR0 only, or all ToRs) fluctuate about twice as much and creep
-  about 10x slower, so their k stays wide.
-- **Open.** Whether it is the host-link / downlink hops at rho = 1.0 (native 200G has them, the degraded 400G-host cells do not) that makes the
-  fluctuation smaller and the creep faster, and why 200G uplinks creep slower. Not run: an 800G-fabric / 400G-NIC topology (the topology parser
-  derives the uplink count from the speed ratio and rejects 32 x 800G uplinks), receiver-downlink degradation (`-degrade_links_file` supports
-  ToR uplinks only), per-hop departure logging, staggered flow starts, more seeds for the queue sampling (single seed 42 throughout).
+- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k holds in 3 seeds and is reproduced by a native 200G
+  fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its running maximum. Over/healthy's drawdown is small
+  because its in-flight count keeps rising (+0.004 to +0.020 pkts/us in-flight, +0.03 to +0.05 with marks) while its local fluctuation is small (hf 0.57); adding
+  such a ramp to sub-line-rate cells moves their drawdown into that range (consistent with, not a causal proof). The degraded-uplink cells (ToR0 only
+  or all ToRs) have 2-3x the local fluctuation, and their queue creeps slowly because the ECN thresholds scale with the link; fixing the creep
+  (doubled ECN thresholds) does not make k tight.
+- **Open.** Why the degraded 200G-uplink cells fluctuate more (host-link / downlink rho = 1.0 is the remaining candidate). Not run: an 800G-fabric /
+  400G-NIC topology (the topology parser derives the uplink count from the speed ratio and rejects 32 x 800G uplinks), receiver-downlink degradation
+  (`-degrade_links_file` supports ToR uplinks only), per-hop departure logging, staggered flow starts, more seeds (queue sampling and all
+  degraded controls are single seed 42).
