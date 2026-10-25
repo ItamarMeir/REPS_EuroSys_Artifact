@@ -584,6 +584,11 @@ int main(int argc, char **argv) {
                 if (dline.empty() || dline[0] == '#') continue;
                 istringstream dls(dline);
                 // ===== ADDED (per-hop-degrade) =====
+                { string dkey; uint32_t dtor; double dv2; istringstream dk2(dline);
+                  if ((dk2 >> dkey >> dtor >> dv2) && dkey == "hdown_tor") {
+                      if (dv2 <= 0 || dv2 > 4) { cerr << "bad -degrade_links_file line: " << dline << endl; exit(1); }
+                      FatTreeTopology::_degrade_hdown_tor[dtor] = dv2; continue;
+                  } }
                 { string dkey; double dv; istringstream dk(dline);
                   if ((dk >> dkey >> dv) && (dkey == "all_adown" || dkey == "all_hdown")) {
                       if (dv <= 0 || dv > 4) { cerr << "bad -degrade_links_file line: " << dline << endl; exit(1); }

@@ -10,6 +10,11 @@ CELLS_OLD = [("fab400", 400), ("fab400", 398), ("fab800", 400), ("fab800", 398),
 def run(c, out):
     fab, R = c[0], c[1]; seed = c[2] if len(c) > 2 else 42; n = f"{fab}_R{R}_s{seed}"
     f = flags("over", "healthy", 8, seed); f[f.index("-rate_const_gbps") + 1] = str(R); f[f.index("-end") + 1] = "500"
+    if fab.startswith("ph2_"):   # per-ToR last-hop: d16 = only ToR16's ToR->host links at 50% (the receivers of ToR0's flows), d0 = only ToR0's (where ToR0's ACKs and ToR16's data
+        # arrive), dqe = all ToR->host links at 50% with queue and ECN thresholds doubled (fewer marks/trims on the degraded uplinks)
+        o = fab[4:]; df = {"d16": "ph2_d16", "d0": "ph2_d0", "dqe": "ph_d"}[o]
+        f += ["-degrade_links_file", f"/work/degrade_{df}.txt"]; f[f.index("-end") + 1] = "900"
+        if o == "dqe": f[f.index("-q") + 1] = "202"; i = f.index("-ecn"); f[i + 1] = "50"; f[i + 2] = "152"
     if fab.startswith("ph_"):   # per-hop intervention on top of 'allt' (all ToR uplinks at 50%, R=200): h = host links at 200G (-linkspeed 200000),
         # a = all agg->ToR links at 50%, d = all ToR->host links at 50% (per-hop-degrade); 'none' = allt itself
         o = fab[3:]; df = {"none": "alltor50", "h": "alltor50", "a": "ph_a", "d": "ph_d", "ad": "ph_ad", "had": "ph_ad"}[o]

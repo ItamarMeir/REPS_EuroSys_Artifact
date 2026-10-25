@@ -222,9 +222,15 @@ concluded that the trend does not matter; the scripts producing that were remove
      It is the stage where the 32 sprayed paths reconverge into one FIFO, which agg->ToR (still a sprayed parallel stage) is not. The agg->ToR links do not. A rho = 1 uplink without it gives the large fluctuation (hf 1.4-1.5), and an uplink at rho = 0.5 (queue
      0.7 packets) is not needed. The host->ToR link could not be varied: `-linkspeed 200000` left the results identical to the digit (`ph_h` = `ph_none`,
      `ph_had` = `ph_ad`), so that arm is untested.
-   - **Loss is not the explanation:** in every cell above the ToR->host queues have 0 trims and 0 drops (peak 21-24 packets of 50 with them at 50%), the traced sources
-     have 0 RTX / NACK / RTS, and the whole-run RTS count is 0. The cells do trim some packets on the 200G uplinks (allt 227-484 trims, +ToR->host 1,187-2,752), and
-     the ECN-marked ACK count rises with them (allt 118-134k, +ToR->host 149-222k); these were not separated from the smoothing.
+   - **Loss, marks and trims are not the explanation.** In every cell above the ToR->host queues have 0 trims and 0 drops (peak 21-24 packets of 50 with them
+     at 50%), the traced sources have 0 RTX / NACK / RTS and the whole-run RTS count is 0. The cells with the ToR->host links at 50% do trim some packets on the
+     200G uplinks (1,187-2,752 trims, ECN-marked ACKs 149-222k, vs allt 227-484 and 118-134k), so I repeated the cell with queue size and ECN thresholds doubled
+     (`ph2_dqe`: 0 trims, 2-4k marked ACKs, 50x fewer): k stays tight (2.09 / 2.17, k=2 on 61 / 62%, hf 0.59 / 0.55). The tightening does not come from marks or trims.
+   - **Third seed (44):** allt is wide (k 3.64, k=2 13%, hf 1.20) and allt + ToR->host at 50% is tight (2.25, 52%, hf 0.55), so both cells now hold in 3 seeds.
+   - **Which side of the last hop** (`hdown_tor`: only some ToRs' ToR->host links at 50%; tornado sends from ToR0's hosts to ToR16's hosts, and the traced sources are on ToR0):
+     only ToR16's links (the *receivers* of the traced flows' data) already give a tight k (2.33 / 2.38, k=2 on 43 / 42%, hf 0.62 / 0.60, 2 seeds), while only ToR0's links
+     (where ToR0's ACKs and ToR16's data arrive) do not smooth (hf 1.67 / 1.35; k 2.24 in seed 42 only because M rises very steeply there, +0.42 pkts/us, and 3.43 in seed 43).
+     So it is the stage where the data packets of a flow reconverge before the receiver, not the ACK-return link, that evens the arrivals.
    - **The two factors act separately.** The no/no cell (matched/healthy) is wide because nothing rises (M flat), not because of large fluctuation
      (hf 0.73). The cells with a rho = 1 uplink but no rho = 1 ToR->host link are wide because of large fluctuation. Tight needs both: smoothing from the
      ToR->host link at rho = 1 and a rising in-flight count, which only a queue at exactly rho = 1 provides.
@@ -241,6 +247,6 @@ concluded that the trend does not matter; the scripts producing that were remove
   the agg->ToR links do not), and (b) a rising in-flight count, which needs a queue at exactly rho = 1 (the uplinks in over/healthy; downstream in the
   sped-up-uplink fabric). Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
   creep (scaled ECN thresholds) is a second-order difference: doubling the thresholds restores it without making k tight.
-- **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the smoothing mechanism is inferred from the interventions,
-  not logged per packet; the all-ToR / per-hop cells have 2 seeds, the queue-sampling controls and the ramp counterfactuals (consistent-with only) are
-  single seed 42; staggered flow starts untested.
+- **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the smoothing mechanism is inferred from the interventions
+  (receiver-side last hop alone suffices; marks and trims excluded), not logged per packet; allt and allt + ToR->host have 3 seeds, the per-ToR and per-hop cells 2,
+  the queue-sampling controls and the ramp counterfactuals (consistent-with only) are single seed 42; staggered flow starts untested.

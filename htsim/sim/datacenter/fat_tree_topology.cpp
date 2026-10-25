@@ -48,6 +48,7 @@ double FatTreeTopology::_alloc_ratio_override = 0;
 // ===== ADDED (per-hop-degrade) =====
 double FatTreeTopology::_degrade_all_adown = 0;
 double FatTreeTopology::_degrade_all_hdown = 0;
+std::map<uint32_t, double> FatTreeTopology::_degrade_hdown_tor;
 // ===== END ADDED (per-hop-degrade) =====
 // ===== END ADDED (per-link-degrade) =====
 
@@ -890,8 +891,10 @@ void FatTreeTopology::init_network(){
                 }
             
                 // ===== ADDED (per-hop-degrade) =====
-                if (_degrade_all_hdown > 0) {
-                    _alloc_ratio_override = _degrade_all_hdown;
+                double hd_ratio = _degrade_all_hdown;
+                { auto hit = _degrade_hdown_tor.find(tor); if (hit != _degrade_hdown_tor.end()) hd_ratio = hit->second; }
+                if (hd_ratio > 0) {
+                    _alloc_ratio_override = hd_ratio;
                     queues_nlp_ns[tor][srv][b] = alloc_queue(queueLogger, _downlink_speeds[TOR_TIER], _queue_down[TOR_TIER], DOWNLINK, TOR_TIER, true, true);
                     _alloc_ratio_override = 0;
                 } else

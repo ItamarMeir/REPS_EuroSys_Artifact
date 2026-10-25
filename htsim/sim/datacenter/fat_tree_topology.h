@@ -214,6 +214,7 @@ public:
     // to r x speed (queue size and ECN thresholds scale with it). Used by the M4 investigate_k per-hop interventions.
     static double _degrade_all_adown;
     static double _degrade_all_hdown;
+    static std::map<uint32_t, double> _degrade_hdown_tor; // "hdown_tor <tor> <r>": scale the ToR->host links of one ToR
     // ===== END ADDED (per-hop-degrade) =====
 
     //uint32_t getK() const {return K;}
