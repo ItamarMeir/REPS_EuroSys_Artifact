@@ -43,12 +43,9 @@ in-flight, 100-600 us), `trend.py` (slope of in-flight and RTT, per-100-us bins,
 3. **The ACK-window distribution does not explain k.** At R=390, 398 and native 198 the shares of 0 / 1 / 2 ACK windows
    (22-23 / 56-58 / 19-20) equal those of over/healthy (22 / 57 / 20), yet k is wide. The earlier reading that burstier ACKs make
    matched/uniform50's k wider (README finding 2, commit c12cd32) is therefore not supported and was removed.
-4. **At R = line rate the in-flight count creeps up, but only weakly and not in every seed.** In-flight slope over 100-600 us (pkts/us),
-   3 seeds: R=400 +0.020 / +0.013 / +0.004; R=398 +0.0005 / +0.0015 / +0.0026; native 200G R=200 +0.015 (R=198 +0.003). The k shape is
-   the robust signal: R=400 gives mean k 2.13-2.21 and 53-62% of draws at k=2 in all three seeds; R=398 gives 2.78-3.40 and 18-32%.
-   The earlier explanation (a queue creeping because the receiver downlink sits at rho = 1.0) is **not supported**: the receiver
-   ToR->host queues hold the same ~12 packets (max 14-15) at R=398 and R=400, so they do not distinguish the two. See the queue
-   section below.
+4. **At R = line rate the in-flight count keeps rising**; the mechanism section below quantifies it on a window that excludes the flow-end
+   drain (the slopes quoted in an earlier version of this item used 100-600 us and were corrupted by it). It rises by +0.004 to +0.020
+   pkts/us per source at R=400 (3 seeds), and the ToR uplink queues, not the receiver downlinks, grow with it.
 5. **Why matched/uniform50 is wider than matched/healthy**: unsaturated cells have k = C - in-flight (corr(k, in-flight) = -0.85
    to -0.97), so k inherits the in-flight fluctuation. Matched/uniform50 has in-flight std 1.16 vs 0.70 for matched/healthy and k
    std 1.24 vs 0.76: the 200G uplinks at rho ~ 0.985 add queue fluctuation. For the line-rate cells the correlation is -0.07 and
@@ -148,14 +145,27 @@ concluded that the trend does not matter; the scripts producing that were remove
 | **matched/uniform50 R=200** | **4.07** | **3.96** | **3.90** | **4.78** | **+0.016** | **1.20** |
 | uniform50 R=198 | 4.73 | 5.84 | 3.90 | 3.81 | -0.001 | 1.31 |
 
-   (k observed is windowed too, so it differs slightly from the whole-run means elsewhere. The slope of M includes the marked ACKs.)
-3. **Why over/healthy is tight: its in-flight count keeps rising.** At R = line rate M grows by +0.03 to +0.05 packets per us per source, so
-   the running maximum is always recent and the drawdown is small (1.1-1.8). Counterfactuals (`ramp_win.py`, same window): removing the fitted
-   trend raises over/healthy's drawdown from 1.3 / 1.8 to 2.3 / 3.6 and native 200G's from 1.1 to 2.4, i.e. to the values of the sub-line-rate
-   stationary cells (2.1-2.6); adding a ramp of +0.035 pkts/us to those stationary cells lowers them to 1.4-1.85 (R=398 2.5 -> 1.6, native
-   198 2.6 -> 1.7, R=300 2.5 -> 1.85, matched/healthy 2.1 -> 1.5), the range of over/healthy. So the creeping in-flight count alone reproduces
-   the tight k in healthy fabrics. The in-flight creep is the ToR uplink queue growing at rho = 1.0 (fleet-mean uplink queue
-   +0.010-0.020 pkt/us at R=400, plateau at R=398; "Queue occupancy" below); a queue at rho = 1 has no stationary level.
+   (k observed is windowed too, so it differs slightly from the whole-run means elsewhere. The slope of M includes the marked ACKs. The B=8 cap binds in the degraded cells, so there k observed is not dd_first + 1: matched/uniform50 4.07 vs 3.96, uniform50 R=198 4.73 vs 5.84; in the healthy cells k is dd_first + about 1.)
+3. **Why over/healthy is tight: its in-flight count keeps rising, and ECN marks add to it.** The drawdown of the in-flight count alone (marks
+   excluded, running max from the first ACK, window 100-330 us) falls monotonically with its slope:
+
+| cell | in-flight slope (pkts/us) | marked-ACK slope (pkts/us) | drawdown of in-flight alone | k observed | k with marks treated as clean |
+|---|---|---|---|---|---|
+| over/healthy R=400 s42 | +0.0199 | +0.0127 | 1.37 | 2.31 | 2.33 |
+| over/healthy R=400 s43 | +0.0146 | +0.0246 | 1.53 | 2.19 | 2.33 |
+| over/healthy R=400 s44 | +0.0039 | +0.0384 | 2.05 | 2.29 | 2.50 |
+| healthy R=398 s44 | +0.0033 | +0.0180 | 2.25 | 2.96 | 3.18 |
+| healthy R=398 s42 / s43 | +0.001 / +0.004 | ~0 / ~0.002 | 2.68 / 2.73 (M, from first ACK) | 3.66 / 3.71 | - |
+| matched/uniform50 R=200 | +0.0025 | +0.0130 | 4.51 | 4.07 | 4.43 |
+
+   The replay with marks treated as clean agrees with the in-flight-only drawdown (k = drawdown + 0 to 1, the pre-draw convention), so the two
+   tools are consistent. Marks are a secondary contributor (they lower k by 0.0-0.2 at R=400, 0.2 at R=398 s44, 0.4 at matched/uniform50);
+   seed 44 has the weakest in-flight rise of the three and is the least tight. Counterfactuals on M = in-flight + marks (`ramp_win.py`, same
+   window; these keep the in-flight series fixed while changing the buffer, and path choice does depend on the buffer, so read them as
+   *consistent with*, not a causal proof): removing the fitted trend raises over/healthy's drawdown from 1.3 / 1.8 to 2.3 / 3.6 and native
+   200G's from 1.1 to 2.4, the values of the sub-line-rate stationary cells (2.1-2.6); adding a +0.035 pkts/us ramp to those cells lowers them to
+   1.4-1.85 (R=398 2.5 -> 1.6, native 198 2.6 -> 1.7, R=300 2.5 -> 1.85, matched/healthy 2.1 -> 1.5), the range of over/healthy. A simulation
+   that changes the queue growth itself is the causal test (point 7).
 4. **Why matched/uniform50 is wide: its in-flight count fluctuates about twice as much and does not creep as much.** hf is 1.2 (R=198: 1.3)
    against 0.57-0.84 in the healthy cells, and even with the start-up forgotten its drawdown is 3.9 against 1.3-2.6. A +0.035 ramp lowers it
    only to 3.1, so the larger fluctuation, not only the missing trend, keeps it high. The 400G fabric at the same R=200 (matched/healthy) has
@@ -163,8 +173,8 @@ concluded that the trend does not matter; the scripts producing that were remove
    over/healthy's (ToR0 mean queue slope +0.0027 vs +0.0198 pkt/us at rho = 1.0 on both; R=198: -0.0006).
 5. **Start-up memory** matters in the intermediate cells: restarting the running max at 100 us lowers R=350 from 4.6 to 2.4, R=390 from 3.7 to
    3.1 and R=198 (degraded) from 5.8 to 3.9, so part of their wide k is the in-flight peak of the first ~30 us, which a stationary queue never exceeds again.
-6. **Not the cause** (each tested): ECN marks (removing their effect changes over/healthy's k by +0.0 to +0.2; the extra-EV-loss counterfactual
-   moves R=398 from 3.4 to 2.5-2.8 but not to 2.2), ACK-window counts, receiver-downlink occupancy, the time-converted spread of queue
+6. **Not the main cause** (each tested): ECN marks alone (secondary, point 3; the extra-EV-loss counterfactual moves R=398 from 3.4 to
+   2.5-2.8 but not to 2.2), ACK-window counts, receiver-downlink occupancy, the time-converted spread of queue
    lengths across the 32 sprayed uplinks (R=400: 6.6 packets x 83 ns = 0.55 us; matched/uniform50: 2.8 x 166 ns = 0.46 us).
 
 ## Status
