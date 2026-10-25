@@ -23,6 +23,12 @@ kd = df.groupby(["rate_gbps", "rate", "fail", "B"])["_ks"].apply(lambda s: np.me
 for i in range(33):
     kd[f"kdist_{i}"] = kd["_ks"].apply(lambda a, i=i: a[i])
 summ = summ.merge(kd.drop(columns="_ks"), on=["rate_gbps", "rate", "fail", "B"])
+# ACKs per SEND-to-SEND window (C1 definition): share of windows with i ACKs, i = 0..7, 8 = 8 or more
+df["_aw"] = df.aw_hist.apply(kshare)
+ad = df.groupby(["rate_gbps", "rate", "fail", "B"])["_aw"].apply(lambda s: np.mean(np.vstack(list(s)), axis=0)).reset_index()
+for i in range(9):
+    ad[f"awdist_{i}"] = ad["_aw"].apply(lambda a, i=i: a[i])
+summ = summ.merge(ad.drop(columns="_aw"), on=["rate_gbps", "rate", "fail", "B"])
 summ.to_csv(H / "data/m4_summary.csv", index=False)
 RATES = ["under", "matched", "over"]; FAILS = ["healthy", "uniform50", "nonuniform"]
 COL = {"under": "tab:blue", "matched": "tab:green", "over": "tab:red"}

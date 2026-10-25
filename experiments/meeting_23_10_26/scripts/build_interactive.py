@@ -175,7 +175,7 @@ leaves per host. Columns = failure model: healthy; uniform 50% (all 32 ToR0 upli
 <b>k</b>: valid EVs in the buffer immediately before each draw (the previous trace row's post-event count), after the source's first ACK
 (same definition as the C1 page), ToR0 sources 0-7 event traces; draws = SEND/RTX/RTS. The split uses the same post-warmup draws. <b>FCT</b>: p50/p99/max over all 1024 flows and mean over the
 32 ToR0 flows. <b>Overwrite</b>: a clean (unmarked) ACK writes its EV at the buffer head; if the buffer is full that slot still holds a valid EV, which is lost (counted from the traces: clean ACK arriving with fresh == B before it; ToR0 sources 0-7, summed per run, only clean ACKs before the source's last send, since after it the buffer just fills in the flow tail; the line is the share of clean ACKs that did this). Loss: retransmits and ECN-marked ACKs per run (RTOs are 0 everywhere).
-The acks-per-window panel from the C1 page is not reproduced here.</div>
+<br><b>ACKs per window</b> (as in C1): the number of ACKs of a source between two consecutive draws, over the same post-warmup draws as k (it ties out 1:1 to the draw count). k is a running sum of (ACKs in the window - 1), so the spread of this distribution, not its mean (about 1 by conservation), sets how far k wanders.</div>
 __SECTIONS__
 <script>
 const DATA = __PAYLOAD__;
@@ -206,6 +206,17 @@ function kPlot(r, f, id) {
   const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
   plotWithHeadline(id, traces, {title: {text: "Valid EVs in buffer just before a send (k) -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
     xaxis: {type: "category"}, yaxis: {title: "% of sends", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
+    margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
+}
+function ackWinPlot(r, f, id) {
+  if (!document.getElementById(id)) return;
+  const rs = rows(r, f);
+  const sum = (x, lo, hi) => { let s = 0; for (let i = lo; i <= hi; i++) s += x["awdist_" + i] || 0; return s; };
+  const parts = [["0 ACKs", x => sum(x, 0, 0), "#1b7837"], ["1 ACK", x => sum(x, 1, 1), "#a6d96a"],
+    ["2 ACKs", x => sum(x, 2, 2), "#fee08b"], ["3 ACKs", x => sum(x, 3, 3), "#fdae61"], ["4+ ACKs", x => sum(x, 4, 8), "#a50026"]];
+  const traces = parts.map(([n, fn, c]) => ({x: BCAT, y: rs.map(fn), type: "bar", name: n, marker: {color: c}}));
+  plotWithHeadline(id, traces, {title: {text: "ACKs per SEND-to-SEND window -- " + r + " / " + f, font: {size: 12}}, barmode: "stack",
+    xaxis: {type: "category"}, yaxis: {title: "% of post-warmup windows", range: [0, 100]}, legend: {orientation: "h", y: -0.3},
     margin: {t: 36, b: 90, l: 50, r: 10}, height: 320}, {responsive: true});
 }
 function fctPlot(r, f, id) {
@@ -255,7 +266,7 @@ function verdict(r, id) {
 }
 RATES.forEach(([r]) => { verdict(r, "verdict_" + r);
   FAILS.forEach(([f]) => { splitPlot(r, f, "split_" + r + "_" + f); kPlot(r, f, "k_" + r + "_" + f);
-    fctPlot(r, f, "fct_" + r + "_" + f); overwritePlot(r, f, "overwrite_" + r + "_" + f); lossPlot(r, f, "loss_" + r + "_" + f); }); });
+    ackWinPlot(r, f, "ackwin_" + r + "_" + f); fctPlot(r, f, "fct_" + r + "_" + f); overwritePlot(r, f, "overwrite_" + r + "_" + f); lossPlot(r, f, "loss_" + r + "_" + f); }); });
 </script>
 </body></html>
 """
@@ -283,14 +294,18 @@ M4_METRICS = ["pct_random", "pct_random_incl_warmup", "k_ge1", "k_ge2", "k_ge3",
 def build_m4():
     s = pd.read_csv(ROOT / "M4" / "data" / "m4_summary.csv")
     keep = (["rate", "fail", "B", "n_seeds"] + [f"{k}_{t}" for k in M4_METRICS for t in ("mean", "ci95")]
-            + [f"kdist_{i}" for i in range(33)])
+            + [f"kdist_{i}" for i in range(33)] + [f"awdist_{i}" for i in range(9)])
     keep = [c for c in keep if c in s.columns]
     has_ow = "ev_overwrites_mean" in s.columns
+    has_aw = "awdist_0" in s.columns
     rows = [{k: clean(v) for k, v in r.items()} for r in s[keep].to_dict("records")]
     sections = ""
     for r, title in M4_RATES:
         sections += f'<h2>{title}</h2>\n<div id="verdict_{r}"></div>\n'
-        kinds = [("split", "valid vs random EV"), ("k", "k distribution"), ("fct", "FCT statistics")]
+        kinds = [("split", "valid vs random EV"), ("k", "k distribution")]
+        if has_aw:
+            kinds.append(("ackwin", "ACKs per SEND-to-SEND window"))
+        kinds.append(("fct", "FCT statistics"))
         if has_ow:
             kinds.append(("overwrite", "valid EVs overwritten by a clean ACK (buffer full)"))
         for kind, label in kinds + [("loss", "retransmits and ECN marks")]:

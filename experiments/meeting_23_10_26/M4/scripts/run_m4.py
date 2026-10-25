@@ -44,6 +44,21 @@ def overwrite_stats(df, B):
                 pct_overwrite=float(100 * (over & pre).sum() / max(int(pre.sum()), 1)),
                 add_mismatch=int((ack.fresh != exp).sum()))
 
+def ack_window_stats(df):
+    """ACKs per SEND-to-SEND window, same definition and population as meeting_06_10_26/C1/scripts/acks_per_window.py:
+    for every post-warmup draw (SEND/RTX/RTS after the source's first ACK) the number of ACK rows of that source since
+    the source's previous draw. aw_hist[i] = count of windows with i ACKs, last bin = 8 or more."""
+    import numpy as np
+    ack = (df.event == "ACK").astype(int)
+    cum = ack.groupby(df.src_id).cumsum()
+    seen = cum > 0
+    dm = df.event.isin(["SEND", "RTX", "RTS"])
+    c = cum[dm]
+    a = c.groupby(df.src_id[dm]).diff().fillna(c)          # first draw of a source: window since trace start
+    a = a[seen[dm]].astype(int).to_numpy()
+    return dict(aw_hist=[int(v) for v in np.bincount(np.minimum(a, 8), minlength=9)], aw_mean=float(a.mean()),
+                aw_n=int(len(a)))
+
 def analyze(trace, stdout, B):
     import numpy as np, pandas as pd
     fcts, rtos, frz, ecn, t0f = [], 0, 0, 0, []
@@ -83,6 +98,7 @@ def analyze(trace, stdout, B):
     # still valid (buffer full, fresh == B, not frozen) a valid EV is lost. Detected from the previous row's post-event
     # fresh. add_mismatch checks the reconstruction: a clean ACK must leave fresh == min(prev_fresh + 1, B).
     r.update(overwrite_stats(df, B))
+    r.update(ack_window_stats(df))
     r["ack_total"] = int((df.event == "ACK").sum())
     # spray width: distinct EVs in each consecutive window of 32 sends, averaged
     w = []
