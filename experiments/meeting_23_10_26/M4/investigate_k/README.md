@@ -125,47 +125,54 @@ adds no EV to the buffer, so each mark lowers k by one until a random draw re-an
 sufficient on its own: matched/uniform50 R=200 has the same mark and random-draw rates as over/healthy seed 42 yet a wide k.
 
 ## Mechanism: k is the drawdown of the in-flight count from its running maximum
-(`replay_k.py`, `drawdown.py`, `structfn.py`, `ramp_cf.py`; srcs 0-7, draws 100-600 us, B=8 unless stated)
+(`replay_k.py`, `window_dd.py`, `ramp_win.py`; srcs 0-7, B=8 unless stated. An earlier version of this section used a 100-600 us window,
+which for line-rate cells includes the flow-end drain (in-flight collapses after ~356 us), corrupted the fitted trends and wrongly
+concluded that the trend does not matter; the scripts producing that were removed and the numbers below replace it.)
 
 1. **Identity.** The constant-rate sender's timing does not depend on k, so k can be replayed from the event stream alone: clean ACK
-   +1 (cap B), ECN-marked ACK +0, draw -1 (floor 0). The replay reproduces the traced `fresh` on every row (0 mismatches in all cells
-   tried). Hence k is a reflected walk driven by in-flight changes; without the cap (B = infinity) it is exactly the drawdown of
-   M(t) = in-flight + marked ACKs from its running maximum since the source's first ACK.
-2. **The B = infinity drawdown orders the cells like the observed k**:
+   +1 (cap B), ECN-marked ACK +0, draw -1 (floor 0). The replay reproduces the traced `fresh` on every row (0 mismatches). So k is a
+   reflected walk driven by in-flight changes; without the cap it is exactly the drawdown of M(t) = in-flight + marked ACKs from its
+   running maximum since the source's first ACK.
+2. **Same-window comparison** (100-330 us, inside every cell's flow; `window_dd.py`). `dd_first` = B=inf drawdown with the running max
+   from the first ACK; `dd_win` = running max restarted at 100 us (forgets the start-up); `dd_win_dt` = `dd_win` after removing the linear
+   trend of M fitted inside the window; hf = std of M with its 10 us moving average removed.
 
-| cell | mean drawdown (pkts) | observed k (B=8) | local in-flight fluctuation (10 us moving average removed, pkts) | fluctuation over 1 us |
-|---|---|---|---|---|
-| native 200G R=200 | 1.2 | 2.14 | 0.41 | 0.58 |
-| over/healthy R=400, s42 / s43 / s44 | 1.4 / 1.4 / 1.9 | 2.21 / 2.13 / 2.20 | 0.43 / - / 0.54 | 0.60 / - / 0.77 |
-| healthy R=398, s42 / s43 / s44 | 2.7 / 2.8 / 2.1 | 3.40 / 3.38 / 2.78 | 0.57 / - / 0.54 | 0.71 / - / 0.71 |
-| native 200G R=198 | 2.8 | 3.67 | - | - |
-| matched/healthy (R=200) | 2.4 | 3.28 | 0.59 | 0.85 |
-| matched/uniform50 (R=200) | 4.1 | 3.96 | 1.04 | 1.49 |
-| healthy R=350 | 4.6 | 5.29 | 0.68 | 0.96 |
-| uniform50 R=198 | 5.9 | 4.51 | - | - |
+| cell | k observed | dd_first | dd_win | dd_win detrended | slope of M (pkts/us) | hf |
+|---|---|---|---|---|---|---|
+| over/healthy R=400 s42 / s43 / s44 | 2.31 / 2.19 / 2.29 | 1.35 / 1.40 / 1.83 | 1.34 / 1.39 / 1.82 | 2.28 / 2.44 / 3.62 | +0.033 / +0.039 / +0.042 | 0.57 / 0.58 / 0.72 |
+| native 200G R=200 | 2.07 | 1.10 | 1.08 | 2.42 | +0.046 | 0.59 |
+| healthy R=398 s42 / s43 / s44 | 3.66 / 3.71 / 2.96 | 2.68 / 2.73 / 2.02 | 2.50 / 2.48 / 2.01 | 2.55 / 2.63 / 2.79 | +0.001 / +0.004 / +0.021 | 0.67 / 0.66 / 0.67 |
+| native 200G R=198 | 3.51 | 2.60 | 2.58 | 2.58 | -0.000 | 0.84 |
+| healthy R=390 / 350 / 300 / 250 | 4.57 / 5.42 / 3.71 / 3.52 | 3.69 / 4.59 / 2.77 / 2.62 | 3.12 / 2.37 / 2.48 / 2.44 | 3.28 / 2.36 / 2.48 / 2.45 | +0.003 / -0.001 / -0.000 / +0.000 | 0.88 / 0.78 / 0.84 / 1.05 |
+| matched/healthy R=200, under/healthy R=100 | 3.19, 3.17 | 2.23, 2.17 | 2.09, 1.94 | 2.09, 1.93 | -0.000, -0.000 | 0.73, 0.66 |
+| **matched/uniform50 R=200** | **4.07** | **3.96** | **3.90** | **4.78** | **+0.016** | **1.20** |
+| uniform50 R=198 | 4.73 | 5.84 | 3.90 | 3.81 | -0.001 | 1.31 |
 
-3. **Over/healthy's drawdown is small because its in-flight count fluctuates least around its own level.** Removing the fitted linear
-   trend of M leaves over/healthy's drawdown at 1.4 / 1.5 / 2.0 (s42/s43/s44; actual 1.4 / 1.4 / 1.9), so the creeping queue is *not*
-   what keeps it small there. For the native-200G twin the trend does matter (1.16 -> 2.87 detrended). Adding a ramp of +0.02 pkts/us
-   to R=398 cells lowers their drawdown from 2.7 to 1.95 but not to 1.4; the extra-EV-loss counterfactual (`replay_k.py`: lose 0.25-0.5%
-   of clean ACKs) moves R=398 seed 42 from k=3.40 to 2.5-2.8 and matched/uniform50 from 3.96 to 3.4-3.6, and removing the
-   ECN-mark effect from over/healthy changes its k by only +0.0 to +0.2. So neither marks nor drift is the main cause.
-4. **Matched/uniform50's drawdown is large because its in-flight count fluctuates about 2x more**, at every time scale from 0.2 us up
-   (hf amplitude 1.04 vs 0.43-0.54), and no ramp closes the gap (detrended it is 5.1; +0.04 pkts/us only gets it to 2.9). It is the
-   degraded uplinks, not the sending rate, that adds this: matched/healthy at the same R=200 has 0.59. The ACK stream of matched/uniform50
-   is also the clumpiest (ACK-spacing CV 0.95, vs 0.66-0.68 at line rate).
-5. **What is not the cause**: the spread of queue length across the 32 sprayed uplinks, converted to time, is about the same (R=400:
-   6.6 packets x 83 ns = 0.55 us; matched/uniform50: 2.8 packets x 166 ns = 0.46 us; per-packet RTT std 0.57 vs 0.49 us). Receiver-downlink
-   occupancy, ECN marks and ACK-window counts were each tested and do not separate the cells (sections above).
+   (k observed is windowed too, so it differs slightly from the whole-run means elsewhere. The slope of M includes the marked ACKs.)
+3. **Why over/healthy is tight: its in-flight count keeps rising.** At R = line rate M grows by +0.03 to +0.05 packets per us per source, so
+   the running maximum is always recent and the drawdown is small (1.1-1.8). Counterfactuals (`ramp_win.py`, same window): removing the fitted
+   trend raises over/healthy's drawdown from 1.3 / 1.8 to 2.3 / 3.6 and native 200G's from 1.1 to 2.4, i.e. to the values of the sub-line-rate
+   stationary cells (2.1-2.6); adding a ramp of +0.035 pkts/us to those stationary cells lowers them to 1.4-1.85 (R=398 2.5 -> 1.6, native
+   198 2.6 -> 1.7, R=300 2.5 -> 1.85, matched/healthy 2.1 -> 1.5), the range of over/healthy. So the creeping in-flight count alone reproduces
+   the tight k in healthy fabrics. The in-flight creep is the ToR uplink queue growing at rho = 1.0 (fleet-mean uplink queue
+   +0.010-0.020 pkt/us at R=400, plateau at R=398; "Queue occupancy" below); a queue at rho = 1 has no stationary level.
+4. **Why matched/uniform50 is wide: its in-flight count fluctuates about twice as much and does not creep as much.** hf is 1.2 (R=198: 1.3)
+   against 0.57-0.84 in the healthy cells, and even with the start-up forgotten its drawdown is 3.9 against 1.3-2.6. A +0.035 ramp lowers it
+   only to 3.1, so the larger fluctuation, not only the missing trend, keeps it high. The 400G fabric at the same R=200 (matched/healthy) has
+   hf 0.73, so the extra fluctuation comes with the degraded 200G ToR0 uplinks. Its uplink queue also creeps about 7x slower than
+   over/healthy's (ToR0 mean queue slope +0.0027 vs +0.0198 pkt/us at rho = 1.0 on both; R=198: -0.0006).
+5. **Start-up memory** matters in the intermediate cells: restarting the running max at 100 us lowers R=350 from 4.6 to 2.4, R=390 from 3.7 to
+   3.1 and R=198 (degraded) from 5.8 to 3.9, so part of their wide k is the in-flight peak of the first ~30 us, which a stationary queue never exceeds again.
+6. **Not the cause** (each tested): ECN marks (removing their effect changes over/healthy's k by +0.0 to +0.2; the extra-EV-loss counterfactual
+   moves R=398 from 3.4 to 2.5-2.8 but not to 2.2), ACK-window counts, receiver-downlink occupancy, the time-converted spread of queue
+   lengths across the 32 sprayed uplinks (R=400: 6.6 packets x 83 ns = 0.55 us; matched/uniform50: 2.8 x 166 ns = 0.46 us).
 
 ## Status
-- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k is robust over 3 seeds and is
-  reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count from its running maximum, and the
-  drawdown tracks how much the in-flight count fluctuates locally: smallest at line rate (0.4-0.5 packets), about 2x larger with
-  degraded uplinks (1.0), in between elsewhere. At R=400 the ToR uplink queue also keeps growing (+0.010-0.020 pkt/us, vs a plateau at R=398),
-  which adds to the effect only in some cells.
-- **Open.** The microscopic reason why in-flight fluctuates less at R = line rate and about twice as much with degraded 200G uplinks.
-  A busy-period explanation (links that never idle emit evenly spaced departures, so the ACK stream is regular) fits the line-rate side
-  but not the intermediate cells monotonically (matched/healthy 0.59 < R=350's 0.68). Not run: an 800G-fabric / 400G-NIC topology
-  (the topology parser derives the uplink count from the speed ratio and rejects 32 x 800G uplinks), receiver-downlink degradation
-  (`-degrade_links_file` supports ToR uplinks only), per-hop departure/arrival logging.
+- **Established.** The implementation passes the single-flow and pair checks. Over/healthy's tight k holds in 3 seeds and is reproduced by
+  a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count from its running maximum. At R = line rate the ToR
+  uplink queues (rho = 1.0) keep growing, which keeps the maximum recent and k small; removing that trend or adding it elsewhere moves the
+  drawdowns accordingly. Matched/uniform50 additionally has about twice the local in-flight fluctuation and a much weaker creep.
+- **Open.** Why the degraded ToR0 uplinks (200G, rho = 1.0, queue scaled with the link) fluctuate more and creep 7x slower than the 400G
+  uplinks at rho = 1.0. Not run: an 800G-fabric / 400G-NIC topology (the topology parser derives the uplink count from the speed ratio
+  and rejects 32 x 800G uplinks), receiver-downlink degradation (`-degrade_links_file` supports ToR uplinks only), per-hop departure
+  logging, staggered flow starts (the synchronized start of 1024 flows sets the start-up peak of point 5).
