@@ -263,6 +263,26 @@ Full recipe in `experiments/RUNNING_EXPERIMENTS.md`. Short version:
 
 ---
 
+## Validating a mechanism, and sanity-checking every run
+
+Mechanism running w/o error can still measure wrong thing. meeting_23_10_26: constant-rate sender paced data only, ACKs overloaded degraded uplinks (~1.5%, rho ~ 1.015), "matched" cells gave 49% random EV draws not ~1%; found only via small known-answer runs. Details: `experiments/RATE_CONST_ARCHITECTURE.md`, `experiments/meeting_23_10_26/M4/investigate_k/README.md`.
+
+### Before trusting new mechanism
+1. **Define quantity physically; list every consumer.** "Rate R" = all NIC wire bytes (data, rtx, ACK, control), not data only.
+2. **Regression + identity checks.** Flag absent: finish lines byte-identical to previous binary. New path must reduce to stock path where it should (shaper at line rate vs stock constant-cwnd): byte-identical.
+3. **Smallest closed-form case first**: one flow, one path, same topology, healthy, rate just feasible. Queue must not grow, FCT = size*8/R incl. ACK/header share, measured wire rate matches. Repeat degraded at matched rate.
+4. **Probe boundary.** Sweep below/at/above theoretical threshold (R = 190/195/197/200 gave 0.24/0.45/1.1/49% random). Cliff exactly at nominal capacity = accounting bug, not physics.
+
+### After every run: make sense?
+1. **Write predictions before looking** (plan/README). Missed prediction: report + investigate, no explaining away (M5: over/healthy predicted tie, was not).
+2. **Check theoretical twins.** Cells theory says equivalent must look alike (matched/degraded vs over/healthy; native 200G vs time-scaled twin). Differ: stop, find cause before building on result.
+3. **Prove config from output, not command line**: queue speeds in `-log_queue_stats`, LB line, no `enable on tor downlink 1`, flow count. Derive commands from previous experiment's `flags()`; never retype.
+4. **Isolate cause**: single-variable controls, ≥ 3 seeds, measured in same run as metric; exact identities where possible (k replays from event stream, 0 mismatches); explicit exclusion controls (doubled ECN/queue thresholds ruled out marks + trims). Say "consistent with" unless intervention shows causation.
+5. **Suspect analysis too**: windows with start/drain transients, flow-tail effects (overwrites after last draw), before/after-event off-by-one (k), symmetric CI whiskers below 0 for counts.
+6. **Explanation disproved: remove from every README, page, plot note** (e.g. "ACK burstiness explains k" withdrawn).
+
+---
+
 ## Common pitfalls
 
 | Pitfall | Symptom | Fix |
@@ -276,6 +296,8 @@ Full recipe in `experiments/RUNNING_EXPERIMENTS.md`. Short version:
 | Committed raw `runs/` dir | Repo bloat (200+ files, 45 MB) | Compress to `runs.tar.gz` first |
 | Modifying `artifact_scripts/` or `artifact_results/` | Corrupts paper's original artifact | Leave those directories alone |
 | Looking for published interactive plots here | `experiments/**/*.html` gitignored, not on this remote | Live in thesis repo (see "Companion repo: thesis results"); sync only on user request |
+| Budget/rate counts only data packets | Matched cells overloaded ~1.5%, random draws jump | List every packet type using resource; smoke-test one flow first |
+| Plot disagrees with theory, moved on | Stale conclusions in READMEs/pages | Stop, find cause, update/retract dependent claims |
 
 ---
 
