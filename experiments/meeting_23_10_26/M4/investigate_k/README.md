@@ -347,7 +347,7 @@ Question: matched/degraded sometimes has 4-6 ACKs reaching the sender between tw
 | over/healthy | 0.9 / 0 | 0 / 0 | 0.8 / 0 |
 | native 200G | 0.8 / 0 | 0 / 0 | 0.8 / 0 |
 
-- Forward variation alone gives at most 3 ACKs per window (the 83 ns floor) and mostly 2 (27.6% of matched windows, vs 0.1% over/healthy and 0.5% native).
+- Forward variation alone gives 0 / 1 / 2 / 3 ACKs in 27.9 / 44.3 / 27.6 / 0.2% of matched windows (over/healthy: 99.6% exactly 1, native 98.6%). The 83.0 ns floor on the data gap allows 2 per window; a third fits only when the window is longer than 166.0 ns (the 200G shaper also paces the sender's own ACKs, window = 166.0 + 2.56 n ns) and the first of three back-to-back arrivals lands within W - 166.0 ns of the window start. Checked on all 59 such matched windows (3 seeds): W = 168.6 / 171.1 / 173.7 ns, arrival gaps 83.0-86.8 ns, first-arrival offset <= W - 166.0 in every one.
 - Return variation alone gives pairs and a few 3s. Matched's is rougher than over/healthy's and native's (3-ACK windows 2.1% vs 0.8%).
 - 4+ appears in neither alone, only in the real combination.
 
@@ -367,7 +367,7 @@ Question: matched/degraded sometimes has 4-6 ACKs reaching the sender between tw
 - Reading: with matched's arrivals, even native's or over/healthy's gentler return delays give 4+ windows (0.2-0.7%), so the forward side is a large part. Permuting r inside a flow removes about 40% of the real 4+ windows, so return delays that are correlated with the forward clumps (ACKs of a clump meet the same return queues) matter beyond independent jitter.
 - Unexpected: over/healthy arrivals with matched r also give 4+ (0.57%, window 84 ns), so matched's return delays alone can stack ACKs even on perfectly even arrivals. The forward side is therefore not the only discriminator.
 
-**Answer to the question.** The 83 ns spacing is a floor on the data gap: at most 3 data arrivals per 168 ns window, and 4-6 ACKs in a window need ACKs of data that arrived over several hundred ns to be squeezed together on the return path. Both sides contribute: matched has forward trains of back-to-back arrivals (over/healthy and native, with a backlogged last link, do not) and a rougher return path. Neither alone produces 4+ in the replay; the split is a statement about the replay, because return delay is correlated with the forward clump.
+**Answer to the question.** The 83 ns spacing is a floor on the data gap: at most 2 data arrivals per 166-169 ns send window (3 only with a few ns of alignment slack, 0.2% of windows), so the data side supplies at most 2 and 4-6 ACKs in a window need ACKs of data that arrived over several hundred ns to be squeezed together on the return path. Both sides contribute: matched has forward trains of back-to-back arrivals (over/healthy and native, with a backlogged last link, do not) and a rougher return path. Neither alone produces 4+ in the replay; the split is a statement about the replay, because return delay is correlated with the forward clump.
 
 **Not shown.**
 - Per-hop queue delay. The logs give only total forward and return delay per packet, not which hop held a packet. The 83-95 ns clump spacing suggests ACKs are gated by data packets on a 400G link, but the link is not identified (candidates: last hop to the sender, the agg->ToR0 downlinks, the receiver's NIC shaper). Isolating it needs per-hop timestamps, which is new logging in `htsim/sim/` (add-mechanism + validate-mechanism).

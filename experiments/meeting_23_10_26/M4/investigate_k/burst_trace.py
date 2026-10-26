@@ -9,6 +9,7 @@ Predictions written BEFORE running (from the user's floor argument and ack_gaps.
   P1 Forward side alone cannot fill a window: data leaves ToR->host at >= 83 ns spacing, so a window of W ns holds at most
      floor(W/83)+1 arrivals (3 at R=200, 2 at R=400). A window with >= 4 ACKs therefore needs ACKs whose data reached the receiver
      in different windows, i.e. return-side compression (ack spread << arrival spread).
+  [result note] P1's bound counts both end points: in practice 2 per window at R=200 (3 only with alignment slack, 0.2%), 1 at R=400.
   P2 Windows with >= 4 ACKs are much more frequent in matched (deg_R200) than in over/healthy (fab400_R400).
   P3 Native 200G (same shaper, similar return jitter) has fewer >= 4 windows than matched: return jitter needs forward clumping to stack on.
   P4 Inside bursts, ACK-ACK gaps are 1.28 ns (400G) or 2.56 ns (200G) where ACKs were serialised back to back.
