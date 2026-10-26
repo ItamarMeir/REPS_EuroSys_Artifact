@@ -1,12 +1,12 @@
 # Modifications inventory — full detail
 
 Split out of the root `CLAUDE.md` to keep the loaded `CLAUDE.md` context small. This file is
-the **source of truth for the original-vs-added boundary** in `htsim/sim/`. `CLAUDE.md` keeps
-only a one-line-per-entry index pointing here.
+the **source of truth for the original-vs-added boundary** in `htsim/sim/`. The nested `htsim/sim/CLAUDE.md` links here instead of keeping a duplicate index;
+list mechanisms with `grep -n '^### `\[' experiments/MODIFICATIONS.md`.
 
 Every addition to `htsim/sim/` is tagged `[ADDED: <name>]` in code comments and below.
 **Rule for future additions:** every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====`
-banner at every modification site, (ii) a row in this file, (iii) an ARCHITECTURE doc under
+banner at every modification site, (ii) a section in this file, (iii) an ARCHITECTURE doc under
 `experiments/`.
 
 ### `[ORIGINAL]` — paper artifact, untouched

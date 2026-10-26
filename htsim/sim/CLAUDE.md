@@ -4,7 +4,7 @@ Loaded only when working on files under `htsim/sim/`. Repo-wide rules (Docker-on
 
 ## Rule for every new mechanism
 
-Every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====` banner at every modification site, (ii) a row in `experiments/MODIFICATIONS.md` and in the inventory below, (iii) an ARCHITECTURE doc under `experiments/`.
+Every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====` banner at every modification site, (ii) a section in `experiments/MODIFICATIONS.md` (see "When to read and edit" at the bottom), (iii) an ARCHITECTURE doc under `experiments/`.
 
 What has NOT been changed:
 - No original lines deleted from `htsim/sim/`. Every modification is an addition or a wrap.
@@ -18,7 +18,7 @@ All gated behind CLI flags:
 3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
 4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
 
-Later mechanisms (Swift CCs, Ofan, constant-rate sender, per-link degrade, ...) are in the inventory at the bottom.
+Later mechanisms (Swift CCs, Ofan, constant-rate sender, per-link degrade, ...) are listed in `experiments/MODIFICATIONS.md` (index command at the bottom of this file).
 
 ## The state-aware NSCC + REPS extension
 
@@ -80,58 +80,19 @@ The `_network_is_asymmetric` flag is set organically when the LB enters frozen m
 
 ## Modifications inventory
 
-**Repo-wide original-vs-ours map**: [`PROVENANCE.md`](../../PROVENANCE.md) — which top-level
-directories/files are the paper's original artifact vs our additions, verified against the
-first commit (`e19b8d0`). Use that file for anything outside `htsim/sim/`.
+Source of truth for the original-vs-added boundary in `htsim/sim/`: [`experiments/MODIFICATIONS.md`](../../experiments/MODIFICATIONS.md). One section per mechanism (`### [ADDED: <name>]` or `### [FIX: <name>]`) with the files touched, the gate flag and design notes. Outside `htsim/sim/`: [`PROVENANCE.md`](../../PROVENANCE.md).
 
-Full detail for `htsim/sim/` itself moved to [`experiments/MODIFICATIONS.md`](../../experiments/MODIFICATIONS.md)
-— source of truth for original-vs-added boundary in `htsim/sim/`. Index below; consult that
-file for exact lines, rationale, and per-entry results.
-**Rule for future additions:** every new mechanism MUST have (i) an `// ===== ADDED (<name>) =====`
-banner at every modification site, (ii) a row in MODIFICATIONS.md, (iii) an ARCHITECTURE doc under
-`experiments/`.
+Index of mechanisms and their gates (run from repo root):
+```bash
+grep -n '^### `\[' experiments/MODIFICATIONS.md
+```
 
-`[ORIGINAL]` — all of `htsim/sim/` except rows below; `artifact_scripts/`/`artifact_results/` untouched.
+### When to read and edit MODIFICATIONS.md
 
-| Name | Gate | One-line |
-|---|---|---|
-| `state-aware` | `-state_aware_ecn` | CC ECN-mask gate + link-failure machinery |
-| `smart-filter` | `-smart_filter_mode` | Continuous NSCC MD dampening from REPS buffer saturation |
-| `wtd-in-nscc` | `-wtd_in_nscc` | Gate MD on `_exp_avg_ecn < 0.25` (SMaRTT-REPS §3.6.1) |
-| `ev-health-counter` | `-smart_filter_counter evhealth` | Per-EV ECN-state tracker, replaces broken `fresh_inv` |
-| `swift-cc` | `-sender_cc_algo swift\|lswift\|mswift\|mnscc` | New CCA implementations (arXiv:2509.07907v2 repro) |
-| `min-rto-flag` | `-min_rto <us>` | CLI override for RTO floor |
-| `swift-md-counter` | always compiled | Diagnostic `_swift_md_fires` counter, no behavior change |
-| `per-host-lb` | `-host_lb_overrides` | Per-host LB algorithm override |
-| `target-qdelay-respect-cli` (FIX) | n/a, applied 2026-05-30 | Removed post-CLI reset that silently discarded `-target_q_delay` |
-| `median-buf-paper-faithful` (FIX) | n/a, applied 2026-06-01 | `DelayMedianBuffer` H-cap 32→128 + no-flush-on-shrink, paper Eq (8-9) fidelity |
-| `reps-metrics-per-host-key` (FIX) | n/a, applied during dual-window review | `g_reps_metrics`/`RM()` was keyed by `_node_num` (assigned once per `UecSrc` object, i.e. per flow) despite the "per-host" framing everywhere else (`-log_reps_window`, exp29 docs, the `node` CSV column). Rekeyed to `_srcaddr` (the physical host id) so multi-flow-per-host workloads (this repo's standard permutation/incast matrices) collapse into one row per host instead of one per flow, and the map is bounded by host count instead of growing unboundedly with flow count. |
-| `timed-failure-guards` (FIX) | n/a, applied during dual-window review | `-timed_window`/`-timed_fail_tor_uplinks`/`-timed_fail_tor_downlinks` had no mutual-exclusion check against the older `-fail_link_time`/`-fail_link_target` (both could fire simultaneously with indistinguishable log output) and no topology-tier check (the mechanism is documented/designed for the 2-tier fabric only, but ran silently on 3-tier, failing ToR<->Agg links while logging them as "uplink tor", implying spine/core). Both now hard-error at startup instead of silently misbehaving. |
-| `swift-sack-hole-md` | `_sender_cc_algo==SWIFT`, always compiled | Swift MDs on SACK holes from OOO (paper 2 §IV.B correction) |
-| `path-rr` | `-load_balancing_algo path_rr` | True RR over distinct physical paths via full source routing |
-| `path-rr-npaths` | `-path_rr_npaths_override` | Per-host cap on number of PATH_RR paths |
-| `path-rr-startslot` | `-path_rr_start_mode src_mod2` | 5th RR start-slot mode |
-| `path-random` | `-load_balancing_algo path_random` | Per-packet uniform-random path selection |
-| `path-static` | `-load_balancing_algo path_static` | Flow pinned to 1 path (greedy edge-load) + reverse-path routing fix |
-| `srv6` | `-use_srv6` | SRv6 source-routing substrate, orthogonal to LB algo |
-| `freezing-pxr` | `-load_balancing_algo freezing_pxr` | Path-eXcluding REPS: exclude RTO-triggering EV instead of full freeze |
-| `reps-event-trace` | `-log_reps_events` | Unified send+ACK+freeze event trace plus an interactive HTML buffer viewer (`experiments/tools/`) |
-| `metrics-counters` | always compiled | Per-source diagnostic counters appended to the flow-finish line (`rtos`, `freeze_entries`, `freeze_us`, `ev_explore`, `ev_random`); file-static side table, no `UecSrc` layout change, no behavior change. exp28. |
-| `timed-failure` | `-timed_window` + `-timed_fail_tor_uplinks`/`-timed_fail_tor_downlinks` + `-log_reps_window` | Schedule a transient failure of the first F spine uplinks (or downlinks) of one ToR on the 2-tier fabric (reuses the `LinkFailureEvent` class, new 2-tier pipe resolution); periodic per-host CSV of `g_reps_metrics` deltas (`UecWindowLogger`). Adds `ecn_acks` + `fast_loss_entries` to the side table (`fast_loss` also on the finish line). No behavior change when flags absent. exp29. |
-| `fail-src-paths` | `-fail_src_paths <src> <count>` | For one source host only, physical SRv6 path indices `[0,count)` are dead: a packet drawn onto them is `free()`d at emit (== first-hop failed Pipe), sender still arms the RTO. Scoped to one src by construction (no shared fabric pipe is per-path AND per-source). Static, whole-sim. No behavior change when flag absent. exp30 Part B. |
-| `dual-window-reps-mprdma` | `-sender_cc_algo dual_mprdma_reps` (requires `-load_balancing_algo freezing`) | Two independent MPRDMA-AIMD windows per flow: `_win_safe` gates/updates from REPS-buffer EVs verified valid at pop time, `_win_random` from unverified EVs (random draws, explore bursts, stale frozen pops). EV selection unchanged (still `nextEntropy_freezing`); only cwnd admission/update is split and re-attributed by trust tier. Each window gets its own independent `_maxwnd` ceiling (combined in-flight can run up to ~2x a single-window MPRDMA ceiling — see the `-cap` v2 row below). See `experiments/MODIFICATIONS.md` for full design notes. |
-| `dual-window-cwnd-cap` | `-sender_cc_algo dual_mprdma_reps_cap` (requires `-load_balancing_algo freezing`) | v2 of `dual-window-reps-mprdma`: same window/EV plumbing (reused via widened dispatch conditions, not duplicated), but enforces `_win_safe.cwnd + _win_random.cwnd <= _maxwnd` (a combined budget) instead of each window getting its own full ceiling — fixes that mechanism's confirmed cause of running far higher ECN/RTO than plain MPRDMA at the same B. Implemented as new, parallel functions by explicit user request; every original `dual-window-reps-mprdma` function is untouched (verified byte-identical output). See `experiments/MODIFICATIONS.md` for full design notes. |
-| `dual-cwnd-log` | `-log_dual_cwnd <file> [-log_dual_cwnd_src <id>]` | Per-window cwnd time series for `dual-window-reps-mprdma`/`-cwnd-cap` — no prior logger captured `_win_safe`/`_win_random` separately (`-log_cwnd` only logs the combined `_cwnd`). Hooked into `syncDualCwnd()`, the single choke point every cwnd mutation (AI, NACK/MD, RTO decrease, idle reset, unfreeze reset, init) already calls through, so it captures all of them, not just per-ACK state. Raw bytes (not packets, to avoid truncating sub-packet AI increments), filtered on `_srcaddr` (physical src id, not `_node_num`). Schema in `experiments/tools/README.md`. |
-| `reps-soft-replay` | `-reps_soft_replay` | Continuous randomize<->safety knob for `nextEntropy_freezing()`'s non-frozen fallback (buffer empty / no fresh entropies). With probability `_exp_avg_ecn` (original per-flow ECN EWMA), replays a recently-seen EV from the ring (`containsEntropy()`, matches stale slots too) instead of a pure random draw, skipping candidates this feature's own new per-EV ECN scoreboard (`_soft_replay_ev_ecn`) last saw marked. Depends only on original `UecSrc`/`CircularBufferREPS` members — no other addition's flag required. Frozen mode untouched (v1 scope). No behavior change when flag absent. |
-| `per-host-cwnd` | `-host_cwnd_overrides` | Per-host cwnd override (mirrors `per-host-lb`'s map pattern), for isolating a CONSTANT-CC cwnd sweep to a host subset without perturbing the rest of the run. meeting 2026-10-06 C1 SoL. |
-| `upstream-sync-2026-03` | none (always compiled, inert) | Ports Broadcom/csg-htsim commits `0639f63`, `20b2297`, `841d9e7`: `EthPausePacket` paused class, `.cm` `addon` token (`connection::addOnTriggerSignal`), `BarrierTrigger::activate(bool re_arm)`; one upstream assert disabled. No consumer in this repo; output byte-identical. |
-| `rate-const-sender` | `-sender_cc_algo constant` + `-rate_const_gbps <R>` | Constant-rate sender, no CC (cwnd forced 1e6). R caps total NIC egress (data + rtx + ACK/control) via `UecNIC` egress shaper; requires 1 port. `-rate_const_data_only` = old per-source data-only pacer. Fixed-rate sweeps meeting 2026-10-23 M2/M4. See `experiments/RATE_CONST_ARCHITECTURE.md`. |
-| `per-link-degrade` | `-degrade_links_file <file>` | Per-ToR-uplink degradation (`tor agg ratio` lines); queue size and ECN thresholds scale with ratio. Non-uniform failure model, meeting 2026-10-23 M3. Ratio up to 4; `all_adown`/`all_hdown <r>` lines scale all agg->ToR / ToR->host links (M4 investigate_k). |
-| `ofan` | `-strat ofan` (+ `-ofan_ack_mode`, `-ofan_identity_order`, `-log_ofan_counts`) | Switch-side per-destination round-robin LB (arXiv 2610.07230); use with `-load_balancing_algo ecmp`; exp32. Docs: `experiments/OFAN_ARCHITECTURE.md` |
-| `queue-stats` | `-log_queue_stats <file>` | Per-queue max occupancy/bytes/trims/drops per fat-tree layer (counters in `CompositeQueue`, no behaviour change) |
-| `routing-convergence` | `-routing_convergence_us G` (+ `-routing_check`, `-routing_check_random`) | Failure-knowledge model: all switches learn of a pipe failure G us after it happens, then prune unreachable ports (Ofan, ECMP, AR, RR alike). Nothing is known before t_fail+G. G=0 only means 'converged' for failures present at t=0. Docs: `experiments/OFAN_ARCHITECTURE.md` |
-| `ofan-weighted` | `-strat ofan_weighted` (needs `-routing_convergence_us`) | Extension (not in the paper): Ofan with the schedule weighted by live-path count per ToR uplink; falls back to plain Ofan when weights are equal. Branch `ofan-weighted`; `experiments/exp32_ofan/W1_weighted_ofan.md` |
-| `ofan-trace` | `-log_ofan_trace <tsv>` (needs `-strat ofan`) | Per-decision Ofan trace; `experiments/exp32_ofan/scripts/ofan_reference.py` replays it against the paper's equations |
-| `switch-baselines` | `-strat ecmp_rr_fixed\|ecmp_random\|ecmp_p2c`, `-ar_method exact` | Simple RR (no reshuffle), RSQ, P2C and exact-queue JSQ switch baselines for the Ofan paper comparison |
-| `drb` | `-path_rr_start_mode random`, `-path_rr_order agg_fast` | Faithful DRB stand-in on top of `path_rr` (random per-flow phase, Agg-fastest path order); reproduces paper Figs 3/17 |
-| `dctcp-debug-gate` | none | UEC DCTCP per-ACK debug print now behind `_debug` (no behaviour change) |
+- **Before changing an existing mechanism:** read its section first (use the index above), including its stated "no behavior change when flag absent" guarantees.
+- **Add a new `### [ADDED: <name>]` section when** you add a CLI flag, a new algorithm/CC/LB, or any always-compiled addition (counters, logging). Copy the shape of a recent section (e.g. `[ADDED: rate-const-sender]` or `[ADDED: per-link-degrade]`): title with gate flag, then a table of file / what / gate, plus design notes and the ARCHITECTURE doc link.
+- **Add a `### [FIX: <name>]` section when** you change original or previously added behavior without a new flag (record date applied, the banner `// ===== FIX (<name>) =====`, and why).
+- **Update the existing section when** you extend a mechanism (new sub-flag, new file touched).
+- No entry needed for pure experiment scripts, docs, or analysis code outside `htsim/sim/`.
+- Also required for a new mechanism: banner at every edit site and an ARCHITECTURE doc under `experiments/` (rule at top of this file).
+- Verify "no behavior change when flag absent": finish lines byte-identical to the previous binary, and say so in the entry.
