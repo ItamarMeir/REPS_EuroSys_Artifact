@@ -287,9 +287,11 @@ th { background: #f3f4f6; }
 """
 
 K_WHY = """<div class="note" style="max-width:none; font-size:16px; line-height:1.55; color:#111"><b>Why over/healthy's k is tight and matched/degraded's isn't?</b>
+<p>A send window is the time between two consecutive send events at the sender. Each packet sent gets one ACK, so every cell averages 1 ACK per window. k is the running sum of (clean ACKs &minus; 1) per window, so a steady 1 keeps it flat, while uneven counts (2, 0, 2, 0 &hellip;) make it wander.</p>
 <ul>
-<li>Over/healthy runs at line rate, so the receivers' last link (ToR&rarr;host) is backlogged. A backlogged link releases packets back-to-back, so data arrives evenly (spacing CV 0.03&ndash;0.07). The ACKs come back evenly, in-flight barely moves, and k stays near 2. A queue at exactly &rho;=1 also keeps in-flight rising, which holds k near its floor.</li>
-<li>Matched/degraded has backlogged degraded uplinks. A &rho;=1 queue is a random walk, and the 32 sprayed paths get different delays, which creates jitter. The healthy links run at &rho;=0.5 and are mostly empty, so they pass packets straight through and don't remove it. Data arrives clumped (CV about 0.73), in-flight fluctuates 2&ndash;3&times; more, and k spreads over 2&ndash;6.</li>
+<li><b>Over/healthy and native 200G:</b> the receiver's last link takes exactly one send window to carry one packet (83 ns at 400G, 166 ns at 200G). Arrivals come one per window, so k stays tight.</li>
+<li><b>Matched:</b> the sender runs at 200G (window 166 ns), but the receiver's last link is 400G (83 ns per packet) and half idle. Packets that took paths with different queueing can land 83 ns apart, so 2 arrive in the same window (28% of windows), with empty windows between.</li>
+<li><b>Return path:</b> ACKs wait behind data packets and leave together, which sometimes pulls ACKs from neighbouring windows into one window (4&ndash;6 ACKs in 1.4% of windows).</li>
 </ul></div>
 """
 
