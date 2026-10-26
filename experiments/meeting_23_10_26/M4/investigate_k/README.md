@@ -319,6 +319,46 @@ ACK side (`return_delay.py`, `ack_gaps.py`; seed 42, hosts 0-7, 100-330 us):
 Open: seed 42 only for the ACK-side measurements; replay is open-loop (EV feedback ignored); the hop that compresses ACKs is not isolated; R=398's wide k is explained
 only in part.
 
+## Anatomy of a 4-to-6-ACK send window (`burst_trace.py`, 3 seeds, hosts 0-7, 100-330 us)
+
+Question: matched/degraded sometimes has 4-6 ACKs reaching the sender between two consecutive sends, over/healthy never more than 3. The ToR->host link caps the data arrival rate at one packet per 83 ns, so how? Predictions P1-P6 are in the script docstring (written before running). Per-packet records: send time, EV, sink arrival, ACK time at the sender, ECN bit. Queueing = delay minus the cell minimum (min forward delay is the same to within about 0.1-0.8 us across `path_id`, so the minimum is a usable base but only as a rough one).
+
+**How often.** ACKs per send window, real timing:
+
+| cell | 0 | 1 | 2 | 3 | 4 | 5+ |
+|---|---|---|---|---|---|---|
+| matched (deg_R200) | 36.2 | 36.7 | 19.7 | 6.0 | 1.2 | 0.2 |
+| over/healthy (fab400_R400) | 21.1 | 58.9 | 19.1 | 0.9 | 0 | 0 |
+| native 200G | 21.1 | 59.1 | 19.1 | 0.8 | 0 | 0 |
+
+468 of 32,760 matched windows (1.4%) have >= 4 ACKs; over/healthy and native 200G have none (P2, P3 hold).
+
+**What a >= 4 window looks like** (468 windows, means):
+- The ACKs belong to packets sent over about 1,140 ns, i.e. several send windows, not one. Only 7% of these windows return their ACKs in send order.
+- Those packets reached the sink within 323 ns (arrival gaps down to exactly 83.0 ns, so the receiver's last link was draining back to back), and their ACKs reached the sender within 56 ns. Forward delay falls with send time at slope -0.90 in every one of these windows (later packets queued less and caught up with earlier ones), so the data arrive as a catch-up train. Then the return path squeezes the train further: arrival spread / ACK spread has median 4.9.
+- Return queueing is larger for the early ACKs of the burst (mean 310 ns for the first, 133 ns for the last): early ACKs were held and released together.
+- ACK-ACK gaps inside bursts: 48% under 2 ns (1.28 ns = one 64 B ACK at 400G, back to back), 14% about 2.56 ns, 22% 5-60 ns, 17% 60-110 ns. 83% of the 60-110 ns gaps lie in 83-95 ns, one 4150 B data packet at 400G plus a few ACKs: the ACKs come out in clumps separated by data packets. Other ACKs (other flows) interleave in the 5-60 ns gaps. Example (seed 43, host 5): ACKs at 80.9, 82.2, 83.4, 84.7 ns, then 95.0, 97.5 ns, data arrived at the sink over 480 ns (-4379 to -3943 ns).
+
+**Which side makes it** (same windows, each delay component replaced by its per-flow median):
+
+| cell | real 3 / 4+ | forward only (r const) 3 / 4+ | return only (f const) 3 / 4+ |
+|---|---|---|---|
+| matched | 6.0 / 1.4 | 0.2 / 0 | 2.1 / 0 |
+| all ToR uplinks 50% | 5.4 / 1.1 | 0.2 / 0 | 1.8 / 0 |
+| over/healthy | 0.9 / 0 | 0 / 0 | 0.8 / 0 |
+| native 200G | 0.8 / 0 | 0 / 0 | 0.8 / 0 |
+
+- Forward variation alone produces up to 3 ACKs per window (the 83 ns floor: at most floor(168/83)+1 = 3), and mostly 2 (27.6% of matched windows, vs 0.1% over/healthy and 0.5% native).
+- Return variation alone produces pairs and the occasional 3, in every cell, similar in over/healthy, native and matched.
+- 4+ appears only when both are present: matched's forward variation puts 2-3 packets into one 168 ns stretch and into neighbouring stretches, and the return path then pulls ACKs of those neighbouring stretches together. Native 200G and over/healthy have the same kind of return jitter but one arrival per window, so nothing to stack on (consistent with P3 and P6; not shown causally).
+
+**Answer to the question.** The 83 ns spacing is a floor on the data gap, so one window can hold at most 3 data arrivals (2 in over/healthy, where the 83 ns window holds one). A 6-ACK window is not 6 data arrivals in a window: its data arrived over about 480 ns, on the forward side as a catch-up train of back-to-back packets whose delays fell as their send times rose, and the return side squeezed it. Over/healthy and native 200G have no catch-up trains (the backlogged last link keeps one packet per period), so there is nothing for the return jitter to stack on.
+
+**Not shown.**
+- Per-hop queue delay. The logs give only total forward and return delay per packet, not which hop held a packet. The 83-95 ns clump spacing suggests ACKs are gated by data packets on a 400G link, but the link is not identified (candidates: last hop to the sender, the agg->ToR0 downlinks, the receiver's NIC shaper). Isolating it needs per-hop timestamps, which is new logging in `htsim/sim/` (add-mechanism + validate-mechanism).
+- Why the forward delays fall with send time (queues on the 32 paths draining together) is read from the slope, not traced to a queue.
+- This explains the 4+ tail (1.4% of windows). The wide k comes from the whole distribution (replay table above): the 2- and 3-ACK windows matter more.
+
 ## Status
 - **Established.** The implementation passes the single-flow and pair checks and the byte-identity check after both sim extensions. Over/healthy's tight k
   holds in 3 seeds and is reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its
