@@ -12,4 +12,4 @@ Full recipe: `experiments/RUNNING_EXPERIMENTS.md` (layout in §1, final checklis
 5. Compress runs: `tar -czf expNN/runs.tar.gz -C expNN/runs . && rm -rf expNN/runs/`.
 6. Write `README.md` with required sections and relative image paths (`plots/foo.png`, never `/tmp/`). Write predictions before looking at results.
 7. Add a row to the `experiments/README.md` lineage table.
-8. Run the checklist in `RUNNING_EXPERIMENTS.md` §11, and the validation / sanity-check rules in the root `CLAUDE.md`. Log `-log_reps_events` in the same run as the stats run, not a rerun.
+8. Run the checklist in `RUNNING_EXPERIMENTS.md` §11, and the validation / sanity-check rules in the root `CLAUDE.md`. If the experiment introduces or changes a mechanism in `htsim/sim/`, use skill `add-mechanism` (it calls `validate-mechanism`). Log `-log_reps_events` in the same run as the stats run, not a rerun.

@@ -87,12 +87,8 @@ Index of mechanisms and their gates (run from repo root):
 grep -n '^### `\[' experiments/MODIFICATIONS.md
 ```
 
-### When to read and edit MODIFICATIONS.md
+### Rule: any change under `htsim/sim/`
 
-- **Before changing an existing mechanism:** read its section first (use the index above), including its stated "no behavior change when flag absent" guarantees.
-- **Add a new `### [ADDED: <name>]` section when** you add a CLI flag, a new algorithm/CC/LB, or any always-compiled addition (counters, logging). Copy the shape of a recent section (e.g. `[ADDED: rate-const-sender]` or `[ADDED: per-link-degrade]`): title with gate flag, then a table of file / what / gate, plus design notes and the ARCHITECTURE doc link.
-- **Add a `### [FIX: <name>]` section when** you change original or previously added behavior without a new flag (record date applied, the banner `// ===== FIX (<name>) =====`, and why).
-- **Update the existing section when** you extend a mechanism (new sub-flag, new file touched).
-- No entry needed for pure experiment scripts, docs, or analysis code outside `htsim/sim/`.
-- Also required for a new mechanism: banner at every edit site and an ARCHITECTURE doc under `experiments/` (rule at top of this file).
-- Verify "no behavior change when flag absent": finish lines byte-identical to the previous binary, and say so in the entry.
+- New mechanism, algorithm, CC/LB or logging: follow skill `add-mechanism` (it includes the mandatory `validate-mechanism` gate and the MODIFICATIONS / ARCHITECTURE doc steps).
+- Fix or extension of an existing mechanism: read its section in `MODIFICATIONS.md` first, then run `validate-mechanism` and update that section (`[FIX: <name>]` if behavior changes without a new flag).
+- Do not report the work as done before the Verification subsection exists in the MODIFICATIONS entry.

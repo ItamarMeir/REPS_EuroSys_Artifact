@@ -139,6 +139,10 @@ python reps_event_viewer.py events.csv --verify
 python reps_event_viewer.py events.csv -o trace.html
 ```
 
+## `regress.sh` — old vs new binary regression
+
+`regress.sh <old_binary> <new_binary> -- <htsim_uec args...>`, run inside the Docker container. Runs the cell with both binaries (private scratch cwd), compares the `finished at` flow-finish lines and reruns the new binary to check determinism. Exit 0 = identical and deterministic, 1 = finish lines differ, 2 = nondeterministic, 3 = usage error or no flow finished. Used by skill `validate-mechanism` (Tier 1); you choose the cell.
+
 ## Tests
 
 ```bash

@@ -65,3 +65,4 @@ experiments/**/temp/
 experiments/**/*.stdout
 experiments/**/*.log
 experiments/meeting_23_10_26/M5/traces/
+.baseline/

@@ -85,10 +85,7 @@ Other always-on defaults: use `-load_balancing_algo freezing` (= paper-REPS, 8-s
 A mechanism that runs without error can still measure the wrong thing. On meeting_23_10_26 the constant-rate sender paced only data packets, so ACKs overloaded the degraded uplinks (~1.5%, rho ~ 1.015) and "matched" cells showed 49% random EV draws instead of ~1%; it was found only because we ran small cases with known answers. Details: `experiments/RATE_CONST_ARCHITECTURE.md`, `experiments/meeting_23_10_26/M4/investigate_k/README.md`.
 
 ### Before trusting a new mechanism
-1. **Define the quantity physically, then list everything that consumes it.** "Rate R" = everything the NIC puts on the wire (data, retransmissions, ACKs, control), not just data.
-2. **Regression and identity checks.** Flag absent: finish lines byte-identical to the previous binary. Where the new path must reduce to the stock path (shaper at line rate vs stock constant-cwnd), require byte-identical output.
-3. **Run the smallest case with a closed-form answer first**: one flow, one path, same topology, healthy fabric, at the rate that should be just feasible. The queue must not grow, FCT must equal size*8/R including the ACK/header share, and the measured wire rate must match. Repeat on the degraded fabric at the matched rate.
-4. **Probe the boundary.** Sweep just below, at and above the theoretical threshold (R = 190/195/197/200 gave 0.24/0.45/1.1/49% random). A cliff exactly at nominal capacity means an accounting bug, not physics.
+Implementing or changing anything under `htsim/sim/` goes through skill `add-mechanism`, which calls skill `validate-mechanism` (baseline binary, regression, theory-derived known-answer checks, negative controls). Mandatory, not optional.
 
 ### After every run: does this make sense?
 1. **Write predictions before looking** (plan or README). A missed prediction is reported and investigated, not explained away (M5: over/healthy was predicted to tie and did not).
