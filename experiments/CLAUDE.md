@@ -17,6 +17,7 @@ Loaded only when working on files under `experiments/`. Repo-wide rules are in t
 - Scripts resolve paths from `__file__` / `${BASH_SOURCE[0]}`; drivers are idempotent and always pass `-disable_tor_ecn`.
 - Tidy CSV columns: `workload`, `mode`, `sev`, `seed`, `flow_id`, `fct_us`, `size`, `flow_class`. Plots use 95% CI (t-distribution), >= 3-5 seeds.
 - Compress raw runs to `runs.tar.gz` before committing.
+- Logging and retention: log traces (`-log_reps_events` for one representative host, `-log_queue_stats`, ...) in the same run as the stats run, plot immediately, then `gzip -9` and keep them on disk, never delete, never commit. Details in skill `new-experiment`.
 - `experiments/**/*.html` is gitignored; interactive pages are published in the thesis repo (see `thesis-sync` skill, only on user request).
 - No test suite for `htsim/sim/` or `experiments/`: validate by running and inspecting output (root `CLAUDE.md` validation checklist).
 

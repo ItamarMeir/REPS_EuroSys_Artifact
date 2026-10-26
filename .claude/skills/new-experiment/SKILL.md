@@ -12,4 +12,12 @@ Full recipe: `experiments/RUNNING_EXPERIMENTS.md` (layout in §1, final checklis
 5. Compress runs: `tar -czf expNN/runs.tar.gz -C expNN/runs . && rm -rf expNN/runs/`.
 6. Write `README.md` with required sections and relative image paths (`plots/foo.png`, never `/tmp/`). Write predictions before looking at results.
 7. Add a row to the `experiments/README.md` lineage table.
-8. Run the checklist in `RUNNING_EXPERIMENTS.md` §11, and the validation / sanity-check rules in the root `CLAUDE.md`. If the experiment introduces or changes a mechanism in `htsim/sim/`, use skill `add-mechanism` (it calls `validate-mechanism`). Log `-log_reps_events` in the same run as the stats run, not a rerun.
+8. Run the checklist in `RUNNING_EXPERIMENTS.md` §11, and the validation / sanity-check rules in the root `CLAUDE.md`. If the experiment introduces or changes a mechanism in `htsim/sim/`, use skill `add-mechanism` (it calls `validate-mechanism`).
+
+## Logging and retention (every cell, from the first version of the runner)
+
+- Log everything in the **same run** as the stats run; never a separate unlogged "official" run plus a logged rerun. Always pass `-log_reps_events <path>` and `-log_queue_stats <path>`; add `-log_reps_state` and similar if the diagnostic might be wanted later, even if the current analysis does not use it.
+- Log **one representative source host** per cell, not all: `-log_reps_events_src <id>` (repeat only if the analysis needs more). Prefer a host under the degraded or failed element (e.g. a host under the degraded ToR0 links). Record the choice and why in the README, since a trace from the wrong host is useless later without a rerun.
+- Build plots and stats immediately from that one run. Build buffer-view pages only on demand (expensive), from the saved trace.
+- After plotting, **compress, never delete**: `gzip -9` each trace/log (`.csv.gz`, `.tsv.gz`) and `tar -czf runs.tar.gz` the raw `.out` files. Keep them on disk (gitignored, never committed).
+- README table: file / cell / logged host / what it holds, so a later session can find the right trace.
