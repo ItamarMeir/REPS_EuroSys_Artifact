@@ -14,6 +14,10 @@ Predictions written BEFORE running (from the user's floor argument and ack_gaps.
   P4 Inside bursts, ACK-ACK gaps are 1.28 ns (400G) or 2.56 ns (200G) where ACKs were serialised back to back.
   P5 Open-loop sends are periodic, so a burst's packets were sent over about n send gaps; the squeeze happens after the send.
   P6 Each of forward-only (constant r) and return-only (constant f) replays caps at 3 ACKs per window; >= 4 needs both (stacking).
+  P7 (swap control, added after review; written before running) arrival times from matched + return delays r resampled from native 200G gives 4+ windows
+     (about 0.5-1.4%); native arrivals + r resampled from matched gives ~0 (<0.1%); matched arrivals + r permuted within flow stays near the real 1.4%.
+     If instead matched arrivals + native r gives ~0, the matched return side matters; the split is a statement about the replay, not a causal proof.
+usage: python burst_trace.py swap   -> the P7 recombinations
 usage: python burst_trace.py MINACK prefix ... [; python burst_trace.py decomp prefix ...  -> ACKs per window with f and/or r replaced by the per-flow median]
        python burst_trace.py MINACK prefix ...   e.g. python burst_trace.py 4 deg_R200 fab400_R400 nat_R200
        env SHOW=6 prints the per-packet table for windows with >= SHOW ACKs (default 6, at most 3 per cell/seed); SEEDS=42,43,44"""
@@ -105,8 +109,31 @@ def decomp(prefix):
     print(f"== {prefix}  ACKs per send window (%)")
     for k, v in res.items(): print(f"  {k:24s}", hist(v))
 
+def swap():
+    """ACKs per send window with arrival times of one cell and return delays r of another (resampled with replacement, pooled over hosts/seeds)"""
+    rng = np.random.default_rng(7)
+    D = {}
+    for prefix in ["deg_R200", "nat_R200", "fab400_R400"]:
+        D[prefix] = [(seed, s, *packets(*load(prefix, seed), s)) for seed in SEEDS for s in range(8)]
+    pooled = {k: np.concatenate([p.r.to_numpy() for _, _, p, _ in v]) for k, v in D.items()}
+    def cnt(arr_cell, r_fn, label):
+        out = []
+        for seed, s, p, dr in D[arr_cell]:
+            ta = np.sort((p.arr.to_numpy() + r_fn(p)))
+            out += [np.searchsorted(ta, d1) - np.searchsorted(ta, d0) for d0, d1 in zip(dr[:-1], dr[1:]) if T0 <= d0 < T1]
+        o = np.array(out); print(f"  {label:58s} {hist(out)}   4+ windows: {100 * np.mean(o >= 4):.2f}%")
+    print("== swap control: ACKs per send window (%), ack = arrival + r")
+    cnt("deg_R200", lambda p: p.r.to_numpy(), "matched arrivals + matched r (real)")
+    cnt("deg_R200", lambda p: rng.permutation(p.r.to_numpy()), "matched arrivals + matched r permuted within flow")
+    cnt("deg_R200", lambda p: rng.choice(pooled["nat_R200"], len(p)), "matched arrivals + native-200G r")
+    cnt("deg_R200", lambda p: rng.choice(pooled["fab400_R400"], len(p)), "matched arrivals + over/healthy r")
+    cnt("nat_R200", lambda p: p.r.to_numpy(), "native arrivals + native r (real)")
+    cnt("nat_R200", lambda p: rng.choice(pooled["deg_R200"], len(p)), "native arrivals + matched r")
+    cnt("fab400_R400", lambda p: rng.choice(pooled["deg_R200"], len(p)), "over/healthy arrivals + matched r")
+
 if __name__ == "__main__":
-    if sys.argv[1] == "decomp":
+    if sys.argv[1] == "swap": swap()
+    elif sys.argv[1] == "decomp":
         for pf in sys.argv[2:]: decomp(pf)
     else:
         minack = int(sys.argv[1])

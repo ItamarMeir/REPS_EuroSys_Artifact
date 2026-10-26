@@ -333,11 +333,10 @@ Question: matched/degraded sometimes has 4-6 ACKs reaching the sender between tw
 
 468 of 32,760 matched windows (1.4%) have >= 4 ACKs; over/healthy and native 200G have none (P2, P3 hold).
 
-**What a >= 4 window looks like** (468 windows, means):
-- The ACKs belong to packets sent over about 1,140 ns, i.e. several send windows, not one. Only 7% of these windows return their ACKs in send order.
-- Those packets reached the sink within 323 ns (arrival gaps down to exactly 83.0 ns, so the receiver's last link was draining back to back), and their ACKs reached the sender within 56 ns. Forward delay falls with send time at slope -0.90 in every one of these windows (later packets queued less and caught up with earlier ones), so the data arrive as a catch-up train. Then the return path squeezes the train further: arrival spread / ACK spread has median 4.9.
-- Return queueing is larger for the early ACKs of the burst (mean 310 ns for the first, 133 ns for the last): early ACKs were held and released together.
-- ACK-ACK gaps inside bursts: 48% under 2 ns (1.28 ns = one 64 B ACK at 400G, back to back), 14% about 2.56 ns, 22% 5-60 ns, 17% 60-110 ns. 83% of the 60-110 ns gaps lie in 83-95 ns, one 4150 B data packet at 400G plus a few ACKs: the ACKs come out in clumps separated by data packets. Other ACKs (other flows) interleave in the 5-60 ns gaps. Example (seed 43, host 5): ACKs at 80.9, 82.2, 83.4, 84.7 ns, then 95.0, 97.5 ns, data arrived at the sink over 480 ns (-4379 to -3943 ns).
+**What a >= 4 window looks like** (468 windows, means). Selection warning: these windows were chosen because their ACKs land within about 56 ns although the packets were sent over about 1,140 ns, so "send spread >> arrival spread >> ACK spread" and a falling delay along the burst are built in and are not evidence of a mechanism. What the selection cannot produce:
+- The data reached the sink with gaps down to exactly 83.0 ns (median minimum gap), i.e. the receiver's last link was draining back to back for part of the burst.
+- ACK-ACK gaps inside bursts: 48% under 2 ns (1.28 ns = one 64 B ACK at 400G, back to back), 14% about 2.56 ns, 22% 5-60 ns, 17% 60-110 ns. 83% of the 60-110 ns gaps lie in 83-95 ns, one 4150 B data packet at 400G plus a few ACKs: the ACKs come out in clumps separated by data packets. Other flows' ACKs interleave in the 5-60 ns gaps.
+- Example (seed 43, host 5, 6 ACKs): data arrived at the sink at -4379, -4295, -4109, -4212, -4026, -3943 ns (gaps 83-146 ns); ACKs reached the sender at 80.9, 82.2, 83.4, 84.7 then 95.0, 97.5 ns (1.28 ns apart in the first clump).
 
 **Which side makes it** (same windows, each delay component replaced by its per-flow median):
 
@@ -348,15 +347,31 @@ Question: matched/degraded sometimes has 4-6 ACKs reaching the sender between tw
 | over/healthy | 0.9 / 0 | 0 / 0 | 0.8 / 0 |
 | native 200G | 0.8 / 0 | 0 / 0 | 0.8 / 0 |
 
-- Forward variation alone produces up to 3 ACKs per window (the 83 ns floor: at most floor(168/83)+1 = 3), and mostly 2 (27.6% of matched windows, vs 0.1% over/healthy and 0.5% native).
-- Return variation alone produces pairs and the occasional 3, in every cell, similar in over/healthy, native and matched.
-- 4+ appears only when both are present: matched's forward variation puts 2-3 packets into one 168 ns stretch and into neighbouring stretches, and the return path then pulls ACKs of those neighbouring stretches together. Native 200G and over/healthy have the same kind of return jitter but one arrival per window, so nothing to stack on (consistent with P3 and P6; not shown causally).
+- Forward variation alone gives at most 3 ACKs per window (the 83 ns floor) and mostly 2 (27.6% of matched windows, vs 0.1% over/healthy and 0.5% native).
+- Return variation alone gives pairs and a few 3s. Matched's is rougher than over/healthy's and native's (3-ACK windows 2.1% vs 0.8%).
+- 4+ appears in neither alone, only in the real combination.
 
-**Answer to the question.** The 83 ns spacing is a floor on the data gap, so one window can hold at most 3 data arrivals (2 in over/healthy, where the 83 ns window holds one). A 6-ACK window is not 6 data arrivals in a window: its data arrived over about 480 ns, on the forward side as a catch-up train of back-to-back packets whose delays fell as their send times rose, and the return side squeezed it. Over/healthy and native 200G have no catch-up trains (the backlogged last link keeps one packet per period), so there is nothing for the return jitter to stack on.
+**Swap control** (P7, written before running; `burst_trace.py swap`; ack = arrival + r, r resampled with replacement from another cell's pooled r; 4+ share of windows):
+
+| arrivals | return delays | 4+ |
+|---|---|---|
+| matched | matched (real) | 1.43% |
+| matched | matched, permuted within flow | 0.82% |
+| matched | native 200G | 0.68% |
+| matched | over/healthy | 0.22% |
+| native 200G | native (real) | 0.00% |
+| native 200G | matched | 0.02% |
+| over/healthy | matched | 0.57% |
+
+- Predictions: matched arrivals + native r in 0.5-1.4% (hit, 0.68%); native arrivals + matched r about 0 (hit, 0.02%); matched arrivals + permuted r near the real 1.4% (missed, 0.82%).
+- Reading: with matched's arrivals, even native's or over/healthy's gentler return delays give 4+ windows (0.2-0.7%), so the forward side is a large part. Permuting r inside a flow removes about 40% of the real 4+ windows, so return delays that are correlated with the forward clumps (ACKs of a clump meet the same return queues) matter beyond independent jitter.
+- Unexpected: over/healthy arrivals with matched r also give 4+ (0.57%, window 84 ns), so matched's return delays alone can stack ACKs even on perfectly even arrivals. The forward side is therefore not the only discriminator.
+
+**Answer to the question.** The 83 ns spacing is a floor on the data gap: at most 3 data arrivals per 168 ns window, and 4-6 ACKs in a window need ACKs of data that arrived over several hundred ns to be squeezed together on the return path. Both sides contribute: matched has forward trains of back-to-back arrivals (over/healthy and native, with a backlogged last link, do not) and a rougher return path. Neither alone produces 4+ in the replay; the split is a statement about the replay, because return delay is correlated with the forward clump.
 
 **Not shown.**
 - Per-hop queue delay. The logs give only total forward and return delay per packet, not which hop held a packet. The 83-95 ns clump spacing suggests ACKs are gated by data packets on a 400G link, but the link is not identified (candidates: last hop to the sender, the agg->ToR0 downlinks, the receiver's NIC shaper). Isolating it needs per-hop timestamps, which is new logging in `htsim/sim/` (add-mechanism + validate-mechanism).
-- Why the forward delays fall with send time (queues on the 32 paths draining together) is read from the slope, not traced to a queue.
+- Why matched's return delays are rougher than over/healthy's and native's (ACKs share the reverse-data path; return delay std 100 vs 45 and 92 ns) is not traced.
 - This explains the 4+ tail (1.4% of windows). The wide k comes from the whole distribution (replay table above): the 2- and 3-ACK windows matter more.
 
 ## Status
