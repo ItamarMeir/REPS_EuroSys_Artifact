@@ -95,6 +95,10 @@ Implementing or changing anything under `htsim/sim/` goes through skill `add-mec
 5. **Suspect the analysis too**: windows containing start or drain transients, flow-tail effects (overwrites after the last draw), before/after-event off-by-one (k), symmetric CI whiskers dipping below 0 for counts.
 6. **When an explanation is disproved, remove it from every README, page and plot note** (e.g. "ACK burstiness explains k" was withdrawn).
 
+## Logs and traces: save them, compress after plotting, never delete
+
+Every sim run saves its logs in the same invocation, even those not needed yet: stdout, `-log_reps_events` (REPS buffer state), `-log_queue_stats`, and `-log_sink_arrivals` when relevant. A later question usually needs a log nobody planned for, and a rerun costs hours. Trace only a representative host, not all of them: `-log_reps_events_src <id>` for one host under the degraded links (e.g. host 0 under ToR0), a few only if the metric needs a population (M4 used ToR0 hosts 0-7). After the stats and plots are built, compress (`gzip -9` per trace, `tar -czf` per directory) and keep the files on disk (gitignored, `traces/` next to the experiment); never delete them. The runner writes the compressed trace itself (template: `experiments/meeting_23_10_26/M5/scripts/run_m5.py`) so no cell is ever rerun just to get a log. Render buffer-view pages only on demand from the saved trace.
+
 ## Common pitfalls
 
 | Pitfall | Symptom | Fix |
