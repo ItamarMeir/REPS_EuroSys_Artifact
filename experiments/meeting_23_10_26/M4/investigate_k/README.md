@@ -258,15 +258,74 @@ concluded that the trend does not matter; the scripts producing that were remove
      breaks the k pattern, "only ToR0" seed 42 (k 2.58 with hf 1.67), is the steep-rise case noted above (the drawdown is small because M rises very steeply); the
      other two seeds are wide. The R=398 cell has the smoothing (CV 0.07) but no rise, hence its larger drawdown, as in the R=198 test.
      (A "jitter about a straight line" statistic was also computed; it does not separate the cells because ~40% of packets are reordered in all of them, so it is not used.)
-   - Mechanism: a rho = 1 uplink queue is a random walk that adds per-path delay jitter; the busy ToR->host FIFO of the receiver releases packets
-     back-to-back, which evens the arrival spacing the receiver sees and therefore the ACK stream and the in-flight count.
+   - Mechanism (data side only): a rho = 1 uplink queue is a random walk that adds per-path delay jitter; the busy ToR->host FIFO of the receiver releases
+     data packets back-to-back (one per 83 ns), which pins the data arrival spacing the receiver sees. The ACK stream is a second, separate process (next section):
+     an earlier version of this sentence said the smoothing "therefore" evens the ACK stream, which the measurements below do not support.
+
+## Per-packet attribution: which delay component sets k (replay counterfactuals, 3 seeds)
+
+Why a replay is nearly causal here: the constant-rate sender is open-loop (send times do not depend on ACKs), so every ACK time is send time + forward delay f
+(sink arrival - send) + return delay r (ACK at sender - sink arrival). `replay_pkt_cf.py` matches each ACK to its data packet by `seqno` = `epsn`
+(`-log_sink_arrivals`, hosts 0-7), keeps send times and ECN bits fixed, rebuilds ACK times from modified delays and runs the buffer recursion
+(clean ACK: k = min(k+1, B); draw: k = max(k-1, 0)); k is sampled before each draw from the first ACK on, inside 100-330 us. The only feedback left out is
+k -> EV -> path -> delay, which is weak (R^2 of return delay on `path_id` is 0.03). Gate: the unmodified replay reproduces the traced k exactly in all 8 cells x 3 seeds.
+
+Counterfactuals: `constR` sets r to its per-flow median (no ACK jitter); `lpF` replaces f by its 10 us moving average (keeps slow wander, removes fast
+variation); `detF` removes the fitted linear trend of f in the window; `addF` adds over/healthy's trend (+0.0016 ns/ns, about +0.02 packets/us) to f.
+Mean k (3 seeds, mean +- sd); the second number is the k = 2 share in %:
+
+| cell | traced = replay | constR | lpF | lpF + constR | detF | addF | lpF + addF |
+|---|---|---|---|---|---|---|---|
+| over/healthy R=400 | 2.26 +- 0.05 / 56 | 1.00 / 0 | 2.28 / 55 | 1.11 / 12 | 2.51 +- 0.23 / 45 | 2.18 / 59 | 2.18 / 58 |
+| native 200G R=200 | 2.19 +- 0.09 / 55 | 1.04 / 4 | 2.29 / 47 | 1.47 / 47 | 2.92 +- 0.25 / 29 | 2.13 / 58 | 2.21 / 52 |
+| allt + every ToR->host at 50% | 2.16 +- 0.05 / 63 | 1.00 / 0 | 2.15 / 65 | 1.05 / 5 | 2.18 / 62 | 2.11 / 64 | 2.15 / 63 |
+| allt + receivers' ToR->host at 50% | 2.34 +- 0.06 / 45 | 1.08 / 8 | 2.29 / 46 | 1.48 / 48 | 2.36 / 44 | 2.16 / 58 | 2.13 / 59 |
+| healthy R=398 | 3.44 +- 0.34 / 18 | 2.32 +- 0.35 / 39 | 3.30 / 21 | 2.19 / 41 | 3.44 / 18 | 2.98 / 26 | 2.84 / 31 |
+| matched/uniform50 R=200 | 3.73 +- 0.31 / 13 | 3.46 / 17 | **2.36 +- 0.17 / 44** | 1.29 / 29 | 3.85 / 12 | 3.68 / 14 | **2.22 / 50** |
+| allt (all uplinks at 50%) | 3.44 +- 0.30 / 17 | 3.22 / 20 | 2.15 / 49 | 1.23 / 24 | 3.48 / 17 | 3.38 / 18 | 2.11 / 50 |
+| allt + only ToR0's ToR->host at 50% | 3.42 +- 0.63 / 16 | 3.21 / 19 | 2.15 / 44 | 1.29 / 32 | 3.39 / 17 | 3.31 / 17 | 2.10 / 47 |
+
+Findings (each from the table; predictions were written in the script header before the run, misses are listed):
+1. **In the wide cells (matched/uniform50, allt, allt + only ToR0's downlinks: the receiver's last hop is idle) the fast part of the forward delay sets k.**
+   Removing variation faster than about 10 us while keeping the slow wander brings k from 3.4-3.7 down to 2.15-2.36, the over/healthy level (2.26). The slow trend
+   does not: adding over/healthy's rise to matched leaves k at 3.68 (was 3.73). Width sensitivity (seed 42, matched): 5 / 10 / 20 / 50 us give 2.71 / 2.57 / 2.43 / 2.41,
+   but widths of 2 us and below give 3.3-4.1 in both over/healthy and matched, so the filter itself disturbs the per-packet structure there; only the >= 5 us result is used.
+2. **The tight cells' k = 2 is produced by return-path jitter, not by a smooth ACK stream.** With a constant return delay k falls to 1.00-1.08 in over/healthy,
+   native 200G and the two downlink-at-50% cells: one ACK per send window, exactly one valid EV. The ACK pairs measured at the sender (below) are what lifts the
+   floor from 1 to 2. This contradicts prediction P2 (a change of < 0.3); the change is about 1.2.
+3. **The rise matters only when the fluctuation is already small.** Removing over/healthy's trend lifts k by 0.25 (0.7 for native 200G, 2.19 -> 2.92); adding it to healthy
+   R=398 lowers k from 3.44 to 2.98. That is less than predicted in both directions (P3 expected 3.4-3.7 for detrended over/healthy), so "a rising in-flight count is
+   needed" in the Status section below is weakened to "lowers k by up to about 0.7 when fluctuation is small". R=398 is not explained by a missing rise alone: its
+   forward delay has no fast variation to remove (lpF changes nothing: 3.30) and a constant return delay brings it to 2.32, so the return jitter, accumulating with no
+   rise to renew the maximum, is the larger lever there.
+4. Predictions: P1 (replay = trace) held. P2 missed (above). P3 missed (2.51, not 3.4-3.7). P4 held (matched + trend stays wide: 3.68). P5 held for lpF + addF (2.22 <= 2.6)
+   and missed for lpF alone (2.36, below the predicted 2.5-3.5).
+
+ACK side (`return_delay.py`, `ack_gaps.py`; seed 42, hosts 0-7, 100-330 us):
+- A send window is the gap between two consecutive sends of one host: (data + the 64 B ACKs the host puts on its own NIC) / R. Measured gaps are 83 + n x 1.28 ns
+  at R=400 and 166 + n x 2.56 ns at R=200 (median 84.3 and 168.6 ns). The data cap is floor(window / 83 ns) + 1: 2 packets per window at R=400, 3 at R=200.
+- ACKs reach the sender in pairs about one ACK time apart: 22.4% of ACK-to-ACK gaps in over/healthy are 1.28 ns (64 B at 400G; 2.56 ns at native 200G), 95% of the trains are
+  pairs. In matched, 78% pairs and 19% triples. The data arrivals at the receiver are never closer than 83 ns, and the gap of an ACK pair is uncorrelated with the data gap in the busy-link
+  cells (r = 0.05-0.10) but correlated in matched (r = 0.67).
+- Pairs need reverse data: with a single flow 0% of ACK gaps are under 5 ns; with the reverse flow added 14.2% (R=400), 16.2% (R=398), 8.8% (uniform50, R=200, spacing 2.56 ns).
+  The 2.56 ns spacing cannot come from a 400G switch port; in the full tornado run 1.28 ns pairs dominate (1404) with some 2.56 ns (350). So ACKs are compressed at at least two
+  places (a switch port or last hop, and the receiver's rate-limited NIC); which hop makes how many is not traced.
+- Windows with 3 or more ACKs: about 1% in busy-link cells, 5.4-7.5% in matched/allt/sendonly. Shuffling the return delays within each flow (independent jitter) reproduces 6.3 of
+  matched's 7.4%, and over/healthy's real ACK stream is more regular than independent jitter (3+ share 1.1% vs 2.3%). The last-hop ACK capacity (about 66 / 132 ACKs per window
+  at 1.28 ns each) is far above the observed maximum (3 / 6), so it is not binding: supply, not link capacity, limits ACKs per window.
+- Reverse path: ACKs carry the data packet's EV and the switches ECMP-hash on (flow, EV, salt), so the reverse path is a hash of the EV, not the mirror of the srv6 data route (code
+  reading, not traced). Return delay barely depends on the EV (R^2 0.03).
+
+Open: seed 42 only for the ACK-side measurements; replay is open-loop (EV feedback ignored); the hop that compresses ACKs is not isolated; R=398's wide k is explained
+only in part.
 
 ## Status
 - **Established.** The implementation passes the single-flow and pair checks and the byte-identity check after both sim extensions. Over/healthy's tight k
   holds in 3 seeds and is reproduced by a native 200G fabric. k is exactly the (capped) drawdown of the in-flight count (plus marked ACKs) from its
   running maximum. A tight k needs (a) small local in-flight fluctuation, which the busy last-hop ToR->host links provide (intervention, 2 seeds;
-  the agg->ToR links do not), and (b) a rising in-flight count, which needs a queue at exactly rho = 1 (the uplinks in over/healthy; downstream in the
-  sped-up-uplink fabric). Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
+  the agg->ToR links do not). In the per-packet replay (3 seeds) removing the fast forward-delay variation alone brings every wide cell to over/healthy's k (2.15-2.36),
+  while (b) a rising in-flight count (a queue at exactly rho = 1) lowers k by only up to about 0.7 once the fluctuation is small; earlier wording that k "needs both" is
+  weakened accordingly. The tight k = 2 itself comes from ACK pairs (return-path jitter): with a constant return delay k is 1. Degraded cells fail (a): a rho = 1 uplink with the downlinks at rho = 0.5 gives 2-3x the fluctuation. Their slower uplink-queue
   creep (scaled ECN thresholds) is a second-order difference: doubling the thresholds restores it without making k tight.
 - **Open / caveats.** The host->ToR link arm (cannot be varied with the current flags); the receiver-side smoothing is measured per packet in the same runs as k (3 seeds); all cells in the arrival table have 3 seeds, the other per-hop cells 2,
   the queue-sampling controls and the ramp counterfactuals (consistent-with only) are single seed 42; staggered flow starts untested.
