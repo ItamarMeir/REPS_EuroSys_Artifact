@@ -270,12 +270,30 @@ def main():
                                send_k=send_k, fct=fct_rows, cc=cc_label,
                                acks_window=acks_window, acks_window_gaps=acks_window_gaps,
                                exp30_fct_note=exp30_fct_note, sol_fct=sol_fct))
-    html = TEMPLATE.replace("__PAYLOAD__", payload).replace("__CC__", cc_label)
+    cc_note = NSCC_NOTE if args.cc == "nscc" else ""
+    html = (TEMPLATE.replace("__PAYLOAD__", payload).replace("__CC__", cc_label)
+            .replace("__CC_NOTE__", cc_note))
     (plots_dir / "interactive.html").write_text(html, encoding="utf-8")
     print(f"cc={cc_label}  split cells: {len(summary)}  occupancy cells: {len(occ)}  "
           f"send_k rows: {len(send_k)}  fct cells: {len(fct_rows)}  sol rows: {len(sol_fct)}")
     print("wrote", plots_dir / "interactive.html")
 
+
+NSCC_NOTE = """<details class="wide expl">
+    <summary>Why healthy and 32 ToR0 uplinks at 50% differ (NSCC)</summary>
+    <p>NSCC's target delay is 1.5 &times; base RTT, so the queue sits about half full, between the ECN
+    thresholds, where marking probability is about 50%. This is deliberate. It gives REPS time to
+    reroute before NSCC cuts the window much (SMaRTT-REPS &sect;3.5).</p>
+    <ul>
+      <li><b>Healthy:</b> no standing queue, 0.1% marked, window at the cap. Nearly every ACK is clean
+      and refills the buffer, so k is 2&ndash;3.</li>
+      <li><b>Degraded:</b> 56% marked, close to the ~50% design point. Only the other 44% of ACKs refill
+      the buffer, so k is 0&ndash;1 (58% k=0, 38% k=1).</li>
+    </ul>
+    <p>So the healthy and degraded plots differ because NSCC runs the two cases at different operating
+    points.</p>
+  </details>
+"""
 
 TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8">
@@ -293,6 +311,8 @@ h1 { font-size: 18px; margin: 0 0 4px; }
   background: #fff; border: 1px solid #bbb; border-radius: 4px; color: #333; }
 .panel:hover .copy-btn { opacity: 1; }
 .copy-btn.copied { background: #dcfce7; border-color: #16a34a; color: #166534; }
+.expl { border: 1px solid #ddd; border-radius: 6px; padding: 6px 12px; font-size: 14px; max-width: 980px; }
+.expl summary { cursor: pointer; font-weight: 600; }
 </style></head>
 <body>
 <h1>C1: EV source split, buffer occupancy, FCT -- 16 MiB, __CC__</h1>
@@ -317,6 +337,7 @@ B's FCT is shown normalized against SoL's own FCT (FCT / SoL FCT; 1.0 = speed-of
   <div class="panel"><button class="copy-btn" onclick="copyTitle('bars_degraded', this)">copy</button><div id="bars_degraded"></div></div>
   <div class="panel"><button class="copy-btn" onclick="copyTitle('sendk_healthy', this)">copy</button><div id="sendk_healthy"></div></div>
   <div class="panel"><button class="copy-btn" onclick="copyTitle('sendk_degraded', this)">copy</button><div id="sendk_degraded"></div></div>
+  __CC_NOTE__
   <div class="panel"><button class="copy-btn" onclick="copyTitle('fct_healthy', this)">copy</button><div id="fct_healthy"></div></div>
   <div class="panel"><button class="copy-btn" onclick="copyTitle('fct_degraded', this)">copy</button><div id="fct_degraded"></div></div>
   <div class="note wide" id="solNote" style="display:none;"></div>
