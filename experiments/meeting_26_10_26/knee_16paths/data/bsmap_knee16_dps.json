@@ -1,0 +1,23 @@
+{
+ "h512_p16_msgNhDcap_lat250": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat500": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat1000": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat2000": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat4000": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat8000": [
+  8
+ ],
+ "h512_p16_msgNhDcap_lat16000": [
+  8
+ ]
+}

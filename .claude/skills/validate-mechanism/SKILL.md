@@ -32,6 +32,10 @@ Use `experiments/tools/regress.sh <old> <new> -- <htsim_uec args>` (old vs new f
 6. Check theoretical twins: cells that theory says are equivalent must look alike.
 7. A missed prediction is reported and investigated, not explained away.
 
+## Tier 2b — smoke tests with obvious answers (always, one per flag / mode)
+
+Run the smallest sim whose result is obvious from the definition (one flow, one message, 2-8 EVs, healthy or fully degraded fabric) and measure the quantity the mechanism changes (distribution of draws or paths, per-link packet counts from `-log_queue_stats`, a trim/ECN rate, a closed-form FCT). Write the expected value and its tolerance (binomial CI, chi-square) BEFORE running; the extreme settings (all weight on one class, none on it, inverted) must give the extreme answer. Also run cheap sanity checks on every full cell (flow count, 0 RTOs, queue speeds, `SRv6 source routing enabled` line, trace identities). Results go into the Verification subsection.
+
 ## Tier 3 — additional techniques (as applicable)
 
 Look at `experiments/tools/README.md` and the nearest `experiments/MODIFICATIONS.md` entries for existing tools before writing new ones. Techniques with precedent in this repo: self-check invariants or counters printed by the sim; event-trace verification (`experiments/tools/reps_event_viewer.py --verify`); an independent reference implementation that replays a trace and checks each decision; exact-identity replays computed from the event stream; identity reductions to a stock path.

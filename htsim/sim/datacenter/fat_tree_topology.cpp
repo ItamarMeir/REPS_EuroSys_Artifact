@@ -49,6 +49,12 @@ double FatTreeTopology::_alloc_ratio_override = 0;
 double FatTreeTopology::_degrade_all_adown = 0;
 double FatTreeTopology::_degrade_all_hdown = 0;
 std::map<uint32_t, double> FatTreeTopology::_degrade_hdown_tor;
+// ===== ADDED (per-link-degrade-agg-core) =====
+std::map<std::pair<uint32_t,uint32_t>, double> FatTreeTopology::_degrade_agg_core;
+// ===== ADDED (per-link-extra-latency) =====
+std::map<std::pair<uint32_t,uint32_t>, double> FatTreeTopology::_extra_lat_tor_agg;
+// ===== END ADDED (per-link-extra-latency) =====
+// ===== END ADDED (per-link-degrade-agg-core) =====
 // ===== END ADDED (per-hop-degrade) =====
 // ===== END ADDED (per-link-degrade) =====
 
@@ -1052,7 +1058,16 @@ void FatTreeTopology::init_network(){
                     new LosslessInputQueue(*_eventlist, queues_nup_nlp[agg][tor][b],switches_lp[tor], hop_latency);
                 }
         
-                pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency, *_eventlist);
+                // ===== ADDED (per-link-extra-latency) =====
+                simtime_picosec extra_lat_ps = 0;
+                { auto el_it = _extra_lat_tor_agg.find(std::make_pair(tor, agg));
+                  if (el_it != _extra_lat_tor_agg.end()) {
+                      extra_lat_ps = (simtime_picosec)(el_it->second * 1000.0);
+                      cout << "Failure: LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ") extra latency set to " << el_it->second << " ns" << endl;
+                  } }
+                // ===== END ADDED (per-link-extra-latency) =====
+                // original line: pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency, *_eventlist);  (identical when no latency_tor_agg line)
+                pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency + extra_lat_ps, *_eventlist);
                 pipes_nlp_nup[tor][agg][b]->setName("Pipe-LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
                 pipes_nlp_nup[tor][agg][b]->full_name = ("Pipe-LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
                 //if (logfile) logfile->writeName(*(pipes_nlp_nup[tor][agg]));
@@ -1089,6 +1104,15 @@ void FatTreeTopology::init_network(){
                         queueLogger = NULL;
                     }
                     assert(queues_nup_nc[agg][core][b] == NULL);
+                    // ===== ADDED (per-link-degrade-agg-core) =====
+                    auto ac_it = _degrade_agg_core.find(std::make_pair(agg, core));
+                    if (ac_it != _degrade_agg_core.end()) {
+                        _alloc_ratio_override = ac_it->second;
+                        queues_nup_nc[agg][core][b] = alloc_queue(queueLogger, _downlink_speeds[CORE_TIER], _queue_up[AGG_TIER], UPLINK, AGG_TIER, false, true);
+                        _alloc_ratio_override = 0;
+                        cout << "Failure: US" + ntoa(agg) + "->CS" + ntoa(core) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_downlink_speeds[CORE_TIER] * ac_it->second) << endl;
+                    } else
+                    // ===== END ADDED (per-link-degrade-agg-core) =====
                     queues_nup_nc[agg][core][b] = alloc_queue(queueLogger, _queue_up[AGG_TIER], UPLINK, AGG_TIER);
                     queues_nup_nc[agg][core][b]->setName("US" + ntoa(agg) + "->CS" + ntoa(core) + "(" + ntoa(b) + ")");
                     //cout << queues_nup_nc[agg][core][b]->str() << endl;
@@ -1146,6 +1170,19 @@ void FatTreeTopology::init_network(){
         }
     }
 
+    // ===== ADDED (per-link-degrade-agg-core) =====
+    // every agg_core key must name a connected (agg, core) pair of a 3-tier fabric: no silent no-op
+    for (auto& kv : _degrade_agg_core) {
+        uint32_t ka = kv.first.first, kc = kv.first.second;
+        bool ok = _tiers == 3 && ka < NAGG && kc < NCORE && queues_nup_nc[ka][kc][0] != NULL;
+        if (!ok) { cerr << "bad -degrade_links_file agg_core line: agg " << ka << " core " << kc << " is not a connected agg->core link" << endl; exit(1); }
+    }
+    // ===== END ADDED (per-link-degrade-agg-core) =====
+    // ===== ADDED (per-link-extra-latency) =====
+    for (auto& kv : _extra_lat_tor_agg) {
+        if (kv.first.first >= NTOR || kv.first.second >= NAGG) { cerr << "bad -degrade_links_file latency_tor_agg line: tor " << kv.first.first << " agg " << kv.first.second << " is not a ToR->agg link" << endl; exit(1); }
+    }
+    // ===== END ADDED (per-link-extra-latency) =====
     /*    for (uint32_t i = 0;i<NK;i++){
           for (uint32_t j = 0;j<NC;j++){
           printf("%p/%p ",queues_nup_nc[i][agg], queues_nc_nup[agg][i]);

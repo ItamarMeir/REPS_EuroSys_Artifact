@@ -16,6 +16,7 @@ On top of the paper artifact we built independent extensions, all gated behind C
 | Experiment conventions, early findings | `experiments/CLAUDE.md`; lineage table in `experiments/README.md` |
 | Creating a new experiment | skill `new-experiment`, recipe in `experiments/RUNNING_EXPERIMENTS.md` |
 | Docker gotchas, compose, plain build | skill `build-htsim` |
+| Building an interactive plot page (which plots, order, theme, copy buttons) | skill `interactive-plotter` (builder `experiments/tools/plot_common.py`) |
 | Publishing plots to the thesis repo | skill `thesis-sync` (user-invoked only) |
 | Original-vs-ours map outside `htsim/sim/` | `PROVENANCE.md` |
 | Original-vs-ours inside `htsim/sim/` | `experiments/MODIFICATIONS.md` |

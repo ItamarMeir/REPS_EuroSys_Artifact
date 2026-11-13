@@ -1,6 +1,7 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 //#include "config.h"
 #include <sstream>
+#include <fstream> // ===== ADDED (dps) =====
 #include <string.h>
 
 #include <math.h>
@@ -80,6 +81,34 @@ private:
     simtime_picosec _t_fail, _t_recover;
     int _state;
 };
+
+// ===== ADDED (link-swap) =====
+// -swap_tor_uplinks <tor> <period_us> <until_us>: every period the service rates of the ToR uplink queue pairs (agg 2k, agg 2k+1) of one ToR are
+// exchanged (the degraded and the healthy half of a -degrade_links_file pattern swap places), until until_us. Capacity per pair is conserved.
+class LinkSwapEvent : public EventSource {
+public:
+    LinkSwapEvent(EventList& el, std::vector<std::pair<BaseQueue*, BaseQueue*>> pairs, simtime_picosec period, simtime_picosec until)
+        : EventSource(el, "link_swap"), _pairs(pairs), _period(period), _until(until), _n(0) {
+        eventlist().sourceIsPending(*this, _period);
+    }
+    void doNextEvent() override {
+        for (auto& pr : _pairs) {
+            linkspeed_bps a = pr.first->_bitrate, b = pr.second->_bitrate;
+            pr.first->update_bit_rate(b);
+            pr.second->update_bit_rate(a);
+        }
+        _n++;
+        if (_n <= 3 || _n % 100 == 0)
+            cout << "[link_swap] swap #" << _n << " at " << timeAsUs(eventlist().now()) << " us, first pair now "
+                 << speedAsGbps(_pairs[0].first->_bitrate) << "/" << speedAsGbps(_pairs[0].second->_bitrate) << " Gbps" << endl;
+        if (eventlist().now() + _period <= _until) eventlist().sourceIsPending(*this, eventlist().now() + _period);
+    }
+private:
+    std::vector<std::pair<BaseQueue*, BaseQueue*>> _pairs;
+    simtime_picosec _period, _until;
+    int _n;
+};
+// ===== END ADDED (link-swap) =====
 
 // ===== ADDED (sol-avoid-timed-failure) =====
 // Oracle SoL arm for a transient ToR-uplink kill (-timed_window +
@@ -338,6 +367,8 @@ int main(int argc, char **argv) {
     linkspeed_bps linkspeed = speedFromMbps((double)HOST_NIC);
     int packet_size = 4150;
     uint32_t path_entropy_size = 64;
+    bool reps_draw_aux = false; // ===== ADDED (reps-draw-weights) =====
+    bool dps_perm_given = false; // ===== ADDED (dps) =====
     string ofan_counts_file;  // ===== ADDED (ofan) =====
     string log_queue_stats_file;  // ===== ADDED (queue-stats) =====
     uint32_t no_of_conns = 0, cwnd = 0, no_of_nodes = 0;
@@ -428,6 +459,9 @@ int main(int argc, char **argv) {
     double timed_fail_start_us   = 0.0;   // <= 0 -> no timed failure scheduled
     double timed_fail_recover_us = 0.0;   // <= start -> permanent onset
     int    timed_fail_ul_tor = -1, timed_fail_ul_count = 0;  // -timed_fail_tor_uplinks
+    // ===== ADDED (link-swap) =====
+    int    swap_tor = -1; double swap_period_us = 0, swap_until_us = 0;   // -swap_tor_uplinks
+    // ===== END ADDED (link-swap) =====
     int    timed_fail_dl_tor = -1, timed_fail_dl_count = 0;  // -timed_fail_tor_downlinks
     string reps_window_path = "";      // -log_reps_window <file> <interval_us> <t0_us> <t1_us>
     double reps_window_interval_us = 0.0, reps_window_t0_us = 0.0, reps_window_t1_us = 0.0;
@@ -583,6 +617,13 @@ int main(int argc, char **argv) {
             while (getline(dlf, dline)) {
                 if (dline.empty() || dline[0] == '#') continue;
                 istringstream dls(dline);
+                // ===== ADDED (per-link-extra-latency) =====
+                { string lkey; uint32_t ltor, lagg; double lns; istringstream lk(dline);
+                  if ((lk >> lkey) && lkey == "latency_tor_agg") {
+                      if (!(lk >> ltor >> lagg >> lns) || lns < 0 || lns > 1e6) { cerr << "bad -degrade_links_file line: " << dline << endl; exit(1); }
+                      FatTreeTopology::_extra_lat_tor_agg[std::make_pair(ltor, lagg)] = lns; continue;
+                  } }
+                // ===== END ADDED (per-link-extra-latency) =====
                 // ===== ADDED (per-hop-degrade) =====
                 { string dkey; uint32_t dtor; double dv2; istringstream dk2(dline);
                   if ((dk2 >> dkey >> dtor >> dv2) && dkey == "hdown_tor") {
@@ -596,6 +637,13 @@ int main(int argc, char **argv) {
                       continue;
                   } }
                 // ===== END ADDED (per-hop-degrade) =====
+                // ===== ADDED (per-link-degrade-agg-core) =====
+                { string dkey; uint32_t dag, dco; double dv3; istringstream dk3(dline);
+                  if ((dk3 >> dkey) && dkey == "agg_core") {
+                      if (!(dk3 >> dag >> dco >> dv3) || dv3 <= 0 || dv3 > 4) { cerr << "bad -degrade_links_file line: " << dline << endl; exit(1); }
+                      FatTreeTopology::_degrade_agg_core[make_pair(dag, dco)] = dv3; continue;
+                  } }
+                // ===== END ADDED (per-link-degrade-agg-core) =====
                 uint32_t dt, da; double dr;
                 // ===== ADDED (per-link-degrade-speedup): ratios in (1, 4] speed the uplink up (investigation controls, M4 investigate_k) =====
                 if (!(dls >> dt >> da >> dr) || dr <= 0 || dr > 4) {
@@ -729,6 +777,88 @@ int main(int argc, char **argv) {
             UecSrc::_use_srv6 = true;
             cout << "SRv6 source routing enabled: EV -> _paths[ev % N] (bypasses ECMP)" << endl;
         // ===== END ADDED (srv6) =====
+        // ===== ADDED (reps-draw-weights) =====
+        } else if (!strcmp(argv[i], "-reps_draw_weights")) {
+            std::string spec(argv[++i]);
+            if (spec == "capacity") {
+                UecSrc::_reps_draw_weights = UecSrc::DRAW_CAPACITY;
+            } else {
+                UecSrc::_reps_draw_weights = UecSrc::DRAW_LIST;
+                UecSrc::_reps_draw_list.clear();
+                std::istringstream ss(spec);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) {
+                    if (tok.empty() || tok.find_first_not_of("0123456789") != std::string::npos) {
+                        cerr << "-reps_draw_weights: expected 'capacity' or a comma list of non-negative integers, got '" << spec << "'" << endl;
+                        exit(1);
+                    }
+                    UecSrc::_reps_draw_list.push_back((uint32_t)std::stoul(tok));
+                }
+            }
+            cout << "reps_draw_weights: " << spec << endl;
+        } else if (!strcmp(argv[i], "-reps_draw_hosts")) {
+            reps_draw_aux = true;
+            std::string spec(argv[++i]);
+            UecSrc::_reps_draw_hosts.clear();
+            if (spec != "all") {
+                std::istringstream ss(spec);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) {
+                    auto dash = tok.find('-');
+                    uint32_t lo = (uint32_t)std::stoul(tok.substr(0, dash));
+                    uint32_t hi = dash == std::string::npos ? lo : (uint32_t)std::stoul(tok.substr(dash + 1));
+                    if (hi < lo) { cerr << "-reps_draw_hosts: bad range '" << tok << "'" << endl; exit(1); }
+                    for (uint32_t h = lo; h <= hi; h++) UecSrc::_reps_draw_hosts.insert(h);
+                }
+            }
+            cout << "reps_draw_hosts: " << spec << endl;
+        } else if (!strcmp(argv[i], "-reps_draw_scope")) {
+            reps_draw_aux = true;
+            std::string spec(argv[++i]);
+            if (spec == "fallback") UecSrc::_reps_draw_scope = UecSrc::DRAWSCOPE_FALLBACK;
+            else if (spec == "explore") UecSrc::_reps_draw_scope = UecSrc::DRAWSCOPE_EXPLORE;
+            else if (spec == "both") UecSrc::_reps_draw_scope = UecSrc::DRAWSCOPE_BOTH;
+            else { cerr << "-reps_draw_scope: expected fallback|explore|both, got '" << spec << "'" << endl; exit(1); }
+            cout << "reps_draw_scope: " << spec << endl;
+        } else if (!strcmp(argv[i], "-reps_draw_invert")) {
+            reps_draw_aux = true;
+            UecSrc::_reps_draw_invert = true;
+            cout << "reps_draw_invert: weights inverted (negative control)" << endl;
+        // ===== END ADDED (reps-draw-weights) =====
+        // ===== ADDED (dps) =====
+        // -dps_dist <name> [args]: uniform | capacity | list w0,w1,.. | file <path> | normal mu sigma | poisson lambda
+        //                          | binomial n p | geometric p | zipf s   (see htsim/sim/dps_dist.h)
+        } else if (!strcmp(argv[i], "-dps_dist")) {
+            UecSrc::_dps_name = argv[++i];
+            UecSrc::_dps_args.clear();
+            int ac = dps::arg_count(UecSrc::_dps_name);
+            if (ac < 0) { cerr << "-dps_dist: unknown distribution '" << UecSrc::_dps_name << "' (uniform|capacity|list|file|normal|poisson|binomial|geometric|zipf)" << endl; exit(1); }
+            if (i + ac >= argc) { cerr << "-dps_dist " << UecSrc::_dps_name << " needs " << ac << " argument(s)" << endl; exit(1); }
+            auto parse_num = [&](const std::string& t) {
+                char* end = nullptr;
+                double v = strtod(t.c_str(), &end);
+                if (t.empty() || *end != 0) { cerr << "-dps_dist: '" << t << "' is not a number (missing argument?)" << endl; exit(1); }
+                UecSrc::_dps_args.push_back(v);
+            };
+            if (UecSrc::_dps_name == "list") {
+                std::istringstream ss(argv[++i]);
+                std::string tok;
+                while (std::getline(ss, tok, ',')) parse_num(tok);
+            } else if (UecSrc::_dps_name == "file") {
+                std::ifstream f(argv[++i]);
+                if (!f) { cerr << "-dps_dist file: cannot open '" << argv[i] << "'" << endl; exit(1); }
+                std::string tok;
+                while (f >> tok) parse_num(tok);
+            } else {
+                for (int a = 0; a < ac; a++) parse_num(argv[++i]);
+            }
+            cout << "dps_dist: " << UecSrc::_dps_name << " (" << UecSrc::_dps_args.size() << " numeric argument(s))" << endl;
+        } else if (!strcmp(argv[i], "-dps_perm")) {
+            UecSrc::_dps_perm_on = true;
+            dps_perm_given = true;
+            UecSrc::_dps_perm_seed = strtoull(argv[++i], nullptr, 10);
+            cout << "dps_perm: EV labels permuted with seed " << UecSrc::_dps_perm_seed << endl;
+        // ===== END ADDED (dps) =====
         // ===== ADDED (fail-src-paths) =====
         } else if (!strcmp(argv[i], "-fail_src_paths")) {
             int src = atoi(argv[++i]);
@@ -911,6 +1041,11 @@ int main(int argc, char **argv) {
             } else if (!strcmp(argv[i+1], "path_static")) {
                 UecSrc::_load_balancing_algo = UecSrc::PATH_STATIC;
             // ===== END ADDED (path-static) =====
+            // ===== ADDED (dps) =====
+            // DPS: per-packet independent EV draw from -dps_dist (no buffer, no feedback).
+            } else if (!strcmp(argv[i+1], "dps")) {
+                UecSrc::_load_balancing_algo = UecSrc::DPS;
+            // ===== END ADDED (dps) =====
             // ===== ADDED (freezing-pxr) =====
             // FREEZING_PXR: REPS-like LB with persistent excluded-EV set on RTO.
             } else if (!strcmp(argv[i+1], "freezing_pxr")) {
@@ -1156,6 +1291,30 @@ int main(int argc, char **argv) {
             cout << "REPS soft-replay: ECN-skip filter DISABLED (validation ablation)" << endl;
         // ===== END ADDED (reps-soft-replay) ======================================
 
+        // ===== ADDED (reps-bank): off by default. =====
+        } else if (!strcmp(argv[i],"-reps_bank")){
+            UecSrc::_reps_bank = true;
+        } else if (!strcmp(argv[i],"-log_reps_bank")){
+            UecSrc::_reps_bank_log = fopen(argv[i+1], "w");
+            if (!UecSrc::_reps_bank_log) { cerr << "ERROR: cannot open " << argv[i+1] << endl; exit(1); }
+            fprintf(UecSrc::_reps_bank_log, "kind,t_ps,flow,srcaddr,ev,raw_rtt_ps,target_ps,ev_t_ps,conn\n");
+            i++;
+        } else if (!strcmp(argv[i],"-reps_bank_size")){
+            UecSrc::_reps_bank_size = atoi(argv[i+1]);
+            i++;
+        } else if (!strcmp(argv[i],"-reps_bank_timer_us")){
+            double t_us = atof(argv[i+1]);
+            if (t_us < 0) { cerr << "ERROR: -reps_bank_timer_us must be >= 0" << endl; exit(1); }
+            UecSrc::_reps_bank_timer = (simtime_picosec)(t_us * 1e6 + 0.5);
+            i++;
+        } else if (!strcmp(argv[i],"-reps_bank_target_rtt_us")){
+            double t_us = atof(argv[i+1]);
+            if (t_us < 0) { cerr << "ERROR: -reps_bank_target_rtt_us must be >= 0 (0 admits nothing = plain REPS; omit the flag for auto)" << endl; exit(1); }
+            UecSrc::_reps_bank_target_rtt = (simtime_picosec)(t_us * 1e6 + 0.5);
+            i++;
+        // ===== END ADDED (reps-bank) ======================================
+
+
         } else if (!strcmp(argv[i],"-reps_buffer_size")){
             // Set the FREEZING circular-buffer capacity (default 8).
             // Must be parsed before UecSrc objects are constructed.
@@ -1278,6 +1437,13 @@ int main(int argc, char **argv) {
             i++;
         // ===== END ADDED (fail-pipes-file) =====
         // ===== ADDED (timed-failure) =====
+        // ===== ADDED (link-swap) =====
+        } else if (!strcmp(argv[i],"-swap_tor_uplinks")){
+            swap_tor = atoi(argv[i+1]); swap_period_us = atof(argv[i+2]); swap_until_us = atof(argv[i+3]);
+            if (swap_tor < 0 || swap_period_us <= 0 || swap_until_us < swap_period_us) { cerr << "-swap_tor_uplinks <tor>=0.. <period_us> > 0 <until_us> >= period_us" << endl; exit(1); }
+            cout << "Link swap: ToR " << swap_tor << " uplink pairs exchange rates every " << swap_period_us << " us until " << swap_until_us << " us" << endl;
+            i += 3;
+        // ===== END ADDED (link-swap) =====
         } else if (!strcmp(argv[i],"-timed_window")){
             timed_fail_start_us   = atof(argv[i+1]);
             timed_fail_recover_us = atof(argv[i+2]);
@@ -1545,6 +1711,45 @@ int main(int argc, char **argv) {
     }
     // ===== END ADDED (smart-filter + wtd-in-nscc) ========================
 
+    // ===== ADDED (reps-bank): validity checks + resolved-config line ======
+    // The bank hooks nextEntropy_freezing()'s non-frozen fallback, so it needs
+    // -load_balancing_algo freezing and shares that hook with soft-replay.
+    // Per-bank-flag use without -reps_bank is an error (silently ignored knobs
+    // would let a run look configured when it is not).
+    {
+        bool bank_knobs = false;
+        for (int a = 1; a < argc; a++)
+            if (!strcmp(argv[a], "-reps_bank_size") || !strcmp(argv[a], "-reps_bank_timer_us") ||
+                !strcmp(argv[a], "-reps_bank_target_rtt_us") || !strcmp(argv[a], "-log_reps_bank")) bank_knobs = true;
+        if (bank_knobs && !UecSrc::_reps_bank) {
+            cerr << "ERROR: -reps_bank_size/-reps_bank_timer_us/-reps_bank_target_rtt_us/-log_reps_bank require -reps_bank" << endl;
+            exit(1);
+        }
+        if (UecSrc::_reps_bank) {
+            if (UecSrc::_load_balancing_algo != UecSrc::FREEZING) {
+                cerr << "ERROR: -reps_bank requires -load_balancing_algo freezing" << endl;
+                exit(1);
+            }
+            if (UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS || UecSrc::_sender_cc_algo == UecSrc::DUAL_MPRDMA_REPS_CAP) {
+                cerr << "ERROR: -reps_bank is incompatible with the dual-window sender CCs (their window predictor "
+                     << "mirrors nextEntropy_freezing and does not know bank pops)" << endl;
+                exit(1);
+            }
+            if (UecSrc::_reps_soft_replay) {
+                cerr << "ERROR: -reps_bank and -reps_soft_replay hook the same fallback branch; pick one" << endl;
+                exit(1);
+            }
+            cout << "REPS-Bank enabled: size=" << UecSrc::_reps_bank_size
+                 << (UecSrc::_reps_bank_size <= 0 ? " (DISABLED: size<=0)" : "")
+                 << " timer_us=" << (double)UecSrc::_reps_bank_timer / 1e6
+                 << " target_rtt="
+                 << (UecSrc::_reps_bank_target_rtt == (simtime_picosec)-1 ? string("auto(base_rtt+target_qdelay)")
+                                                         : to_string((double)UecSrc::_reps_bank_target_rtt / 1e6) + "us")
+                 << endl;
+        }
+    }
+    // ===== END ADDED (reps-bank) ==========================================
+
     // ===== ADDED (dual-window-reps-mprdma) ================================
     // DUAL_MPRDMA_REPS's window attribution depends entirely on REPS/FREEZING's
     // EvSource distinctions (fresh/frozen pop vs random/explore) - it composes
@@ -1643,6 +1848,54 @@ int main(int argc, char **argv) {
         cerr << "-routing_check requires -routing_convergence_us" << endl;
         exit(1);
     }
+    // ===== ADDED (reps-draw-weights) =====
+    if (UecSrc::_reps_draw_weights == UecSrc::DRAW_OFF && reps_draw_aux) {
+        cerr << "-reps_draw_hosts / -reps_draw_scope / -reps_draw_invert need -reps_draw_weights" << endl;
+        exit(1);
+    }
+    if (UecSrc::_reps_draw_weights != UecSrc::DRAW_OFF) {
+        if (UecSrc::_load_balancing_algo != UecSrc::FREEZING) {
+            cerr << "-reps_draw_weights needs -load_balancing_algo freezing (it changes the random draw of nextEntropy_freezing)" << endl;
+            exit(1);
+        }
+        if (UecSrc::_reps_draw_weights == UecSrc::DRAW_CAPACITY && !UecSrc::_use_srv6) {
+            cerr << "-reps_draw_weights capacity needs -use_srv6 (the weights are the bottleneck speeds of the route of each EV)" << endl;
+            exit(1);
+        }
+        if (UecSrc::_reps_draw_weights == UecSrc::DRAW_LIST) {
+            uint64_t sum = 0;
+            for (auto w : UecSrc::_reps_draw_list) sum += w;
+            if (UecSrc::_reps_draw_list.size() != path_entropy_size || sum == 0) {
+                cerr << "-reps_draw_weights list needs exactly -paths (" << path_entropy_size << ") weights with a positive sum, got "
+                     << UecSrc::_reps_draw_list.size() << endl;
+                exit(1);
+            }
+        }
+    }
+    // ===== END ADDED (reps-draw-weights) =====
+    // ===== ADDED (dps) =====
+    {
+        bool dps_used = UecSrc::_load_balancing_algo == UecSrc::DPS;
+        for (const auto& kv : UecSrc::_per_host_lb_override) if (kv.second == UecSrc::DPS) dps_used = true;
+        if (!dps_used && (!UecSrc::_dps_name.empty() || dps_perm_given)) {
+            cerr << "-dps_dist / -dps_perm need -load_balancing_algo dps (or a dps entry in -host_lb_overrides)" << endl;
+            exit(1);
+        }
+        if (dps_used) {
+            if (UecSrc::_dps_name.empty()) { cerr << "-load_balancing_algo dps needs -dps_dist <name> [args]" << endl; exit(1); }
+            if (UecSrc::_dps_name == "capacity" && !UecSrc::_use_srv6) {
+                cerr << "-dps_dist capacity needs -use_srv6 (the weights are the bottleneck speeds of the route of each EV)" << endl;
+                exit(1);
+            }
+            try {   // dry run: validates the spec against the EV space (-paths) before any flow is built
+                dps::raw_weights(UecSrc::_dps_name, UecSrc::_dps_args, path_entropy_size, [](size_t) { return 1.0; });
+            } catch (const std::exception& ex) {
+                cerr << "-dps_dist: " << ex.what() << " (EV space = -paths " << path_entropy_size << ")" << endl;
+                exit(1);
+            }
+        }
+    }
+    // ===== END ADDED (dps) =====
     if (RoutingConvergence::rand_trials > 0 && !RoutingConvergence::check) {
         cerr << "-routing_check_random requires -routing_check (and -routing_convergence_us)" << endl;
         exit(1);
@@ -2509,6 +2762,22 @@ int main(int argc, char **argv) {
         cout << "[fail_pipes_file] " << nfail << " links failed from 0.01 us (static)" << endl;
     }
     // ===== END ADDED (fail-pipes-file) =====
+
+    // ===== ADDED (link-swap) =====
+    if (swap_tor >= 0) {
+        if (FatTreeTopology::get_tiers() != 2) { cerr << "ERROR: -swap_tor_uplinks needs the 2-tier fabric" << endl; exit(1); }
+        FatTreeTopology* t0 = topo[0];
+        if (swap_tor >= (int)t0->queues_nlp_nup.size()) { cerr << "ERROR: -swap_tor_uplinks: ToR out of range" << endl; exit(1); }
+        std::vector<std::pair<BaseQueue*, BaseQueue*>> pairs;
+        auto& arr = t0->queues_nlp_nup[swap_tor];
+        for (size_t a = 0; a + 1 < arr.size(); a += 2)
+            for (size_t b = 0; b < arr[a].size() && b < arr[a + 1].size(); b++)
+                if (arr[a][b] && arr[a + 1][b]) pairs.push_back(std::make_pair(arr[a][b], arr[a + 1][b]));
+        if (pairs.empty()) { cerr << "ERROR: -swap_tor_uplinks: no uplink queue pairs found" << endl; exit(1); }
+        new LinkSwapEvent(eventlist, pairs, timeFromUs(swap_period_us), timeFromUs(swap_until_us));
+        cout << "Link swap armed on " << pairs.size() << " uplink pairs" << endl;
+    }
+    // ===== END ADDED (link-swap) =====
 
     // ===== ADDED (timed-failure) =====
     // exp29: transient failure of the first F spine uplinks (and/or downlinks) of

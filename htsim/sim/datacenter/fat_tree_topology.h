@@ -216,6 +216,16 @@ public:
     static double _degrade_all_hdown;
     static std::map<uint32_t, double> _degrade_hdown_tor; // "hdown_tor <tor> <r>": scale the ToR->host links of one ToR
     // ===== END ADDED (per-hop-degrade) =====
+    // ===== ADDED (per-link-degrade-agg-core) =====
+    // -degrade_links_file lines "agg_core <agg> <core> <r>": scale the agg->core uplink of that (agg, core) pair to r x speed
+    // (3-tier only; queue size and ECN thresholds scale with it). Keys not connected in the topology are a startup error.
+    static std::map<std::pair<uint32_t,uint32_t>, double> _degrade_agg_core;
+    // ===== END ADDED (per-link-degrade-agg-core) =====
+    // ===== ADDED (per-link-extra-latency) =====
+    // -degrade_links_file lines "latency_tor_agg <tor> <agg> <extra_ns>": add extra_ns of one-way propagation delay to the ToR->agg pipe of that
+    // (tor, agg) pair (data direction; ACKs of flows into that ToR cross the same pipe on their way back). Speed, queue and ECN are unchanged.
+    static std::map<std::pair<uint32_t,uint32_t>, double> _extra_lat_tor_agg;
+    // ===== END ADDED (per-link-extra-latency) =====
 
     //uint32_t getK() const {return K;}
     uint32_t getNAGG() const {return NAGG;}

@@ -239,6 +239,24 @@ double UecSrc::_wtd_threshold    = 0.25;   // paper value (§3.6.1)
 bool UecSrc::_reps_soft_replay = false;
 double UecSrc::_reps_soft_replay_fixed_p   = -1.0;  // default: use EWMA
 bool   UecSrc::_reps_soft_replay_no_filter = false; // default: filter on
+// ===== ADDED (reps-bank) =====
+bool UecSrc::_reps_bank = false;
+int  UecSrc::_reps_bank_size = 8;
+simtime_picosec UecSrc::_reps_bank_timer = 100000000ULL;   // 100 us in ps
+simtime_picosec UecSrc::_reps_bank_target_rtt = (simtime_picosec)-1;  // (simtime_picosec)-1 = auto; 0 = literal 0 (admits nothing => plain REPS)
+FILE* UecSrc::_reps_bank_log = nullptr;
+// One row per bank event. kind: ADD REJ_ECN REJ_RTT NOSAMPLE POP EXPIRE OVERWRITE.
+// ev_t = insert time of the slot concerned (POP/EXPIRE/OVERWRITE), else 0.
+// Last column `conn` = src_dst of the connection (the bank is per connection, shared by its successive flows
+// under -connections_mapping), e.g. "3_67".
+static inline void bankLog(const char* kind, simtime_picosec now, uint32_t flow, uint32_t src, const char* conn,
+                           int ev, simtime_picosec rtt, simtime_picosec target, simtime_picosec ev_t) {
+    if (!UecSrc::_reps_bank_log) return;
+    fprintf(UecSrc::_reps_bank_log, "%s,%llu,%u,%u,%d,%llu,%llu,%llu,%s\n", kind,
+            (unsigned long long)now, flow, src, ev, (unsigned long long)rtt,
+            (unsigned long long)target, (unsigned long long)ev_t, conn);
+}
+// ===== END ADDED (reps-bank) =====
 // ===== END ADDED (reps-soft-replay) ===================================
 
 // ===== ADDED (swift-cc) ===============================================
@@ -265,6 +283,118 @@ std::map<uint32_t, UecSrc::LoadBalancing_Algo> UecSrc::_per_host_lb_override;
 // corresponding Route* from _paths[] (source routing, bypasses ECMP).
 bool UecSrc::_use_srv6 = false;
 // ===== END ADDED (srv6) ================================================
+
+// ===== ADDED (reps-draw-weights) =======================================
+// Off by default; enabled by -reps_draw_weights (see uec.h and experiments/MODIFICATIONS.md).
+UecSrc::RepsDrawWeights UecSrc::_reps_draw_weights = UecSrc::DRAW_OFF;
+std::vector<uint32_t> UecSrc::_reps_draw_list;
+std::set<uint32_t> UecSrc::_reps_draw_hosts;
+UecSrc::RepsDrawScope UecSrc::_reps_draw_scope = UecSrc::DRAWSCOPE_FALLBACK;
+bool UecSrc::_reps_draw_invert = false;
+
+// Builds the prefix sums of this source's EV weights. Uses no RNG and does not touch the REPS buffer.
+void UecSrc::initDrawWeights() {
+    _draw_init = true;
+    _draw_active = false;
+    if (_reps_draw_weights == DRAW_OFF) return;
+    if (!_reps_draw_hosts.empty() && !_reps_draw_hosts.count(_srcaddr)) return;
+    std::vector<uint64_t> w(_no_of_paths, 0);
+    if (_reps_draw_weights == DRAW_LIST) {
+        for (uint32_t e = 0; e < _no_of_paths; e++) w[e] = _reps_draw_list[e];
+    } else {
+        if (_paths.empty()) return;                               // no routes: stay uniform
+        for (uint32_t e = 0; e < _no_of_paths; e++) {
+            const Route* r = _paths[e % _paths.size()];
+            uint64_t cap = 0;
+            for (size_t i = 0; i < r->size(); i++) {
+                BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(i));
+                if (q && (cap == 0 || (uint64_t)q->_bitrate < cap)) cap = (uint64_t)q->_bitrate;
+            }
+            w[e] = cap / 1000000;                                 // Mbit/s of the path bottleneck
+        }
+    }
+    uint64_t wmin = *std::min_element(w.begin(), w.end()), wmax = *std::max_element(w.begin(), w.end());
+    if (wmin == wmax) return;                                     // equal weights: the original uniform draw (byte-identical)
+    if (_reps_draw_invert) for (auto& x : w) x = wmax + wmin - x;
+    _draw_cum.assign(w.size(), 0);
+    uint64_t s = 0;
+    for (size_t e = 0; e < w.size(); e++) { s += w[e]; _draw_cum[e] = s; }
+    _draw_active = true;
+    printf("reps_draw_weights: src %u weights", (unsigned)_srcaddr);
+    for (size_t e = 0; e < w.size(); e++) printf(" %lu", (unsigned long)w[e]);
+    printf(" (scope %d%s)\n", (int)_reps_draw_scope, _reps_draw_invert ? ", inverted" : "");
+}
+
+// One weighted draw over the EVs; one rand() per call, like the uniform draw it replaces.
+uint16_t UecSrc::drawRandomEv() {
+    if (!_draw_init) initDrawWeights();
+    if (!_draw_active) return rand() % _no_of_paths;
+    uint64_t x = (uint64_t)rand() % _draw_cum.back();
+    return (uint16_t)(std::upper_bound(_draw_cum.begin(), _draw_cum.end(), x) - _draw_cum.begin());
+}
+// ===== END ADDED (reps-draw-weights) ===================================
+
+// ===== ADDED (dps) =====================================================
+// Distribution Packet Spraying: see uec.h and experiments/DPS_ARCHITECTURE.md.
+std::string UecSrc::_dps_name;
+std::vector<double> UecSrc::_dps_args;
+bool UecSrc::_dps_perm_on = false;
+uint64_t UecSrc::_dps_perm_seed = 0;
+
+// Builds this source's pmf/CDF at its first draw. Uses no RNG, so a source that does not draw leaves the rand()
+// stream untouched. An invalid spec fails loudly (exit 1); a capacity source with <= 1 route has nothing to weight and draws OPS.
+void UecSrc::initDps() {
+    _dps_init = true;
+    std::function<double(size_t)> capf;
+    if (_dps_name == "capacity") {
+        if (_paths.size() <= 1) {                                 // a source with 0 or 1 route (e.g. same-ToR pair) has no choice to weight: uniform draw
+            static bool noted = false;
+            if (!noted) { noted = true; printf("dps_dist capacity: src %u has %u route(s), nothing to weight: OPS draw (rand() %% N); further sources silent\n", (unsigned)_srcaddr, (unsigned)_paths.size()); }
+            _dps_uniform = true;
+            return;
+        }
+        capf = [this](size_t e) {                                 // Mbit/s of the bottleneck queue of route e % P (same rule as reps-draw-weights capacity)
+            const Route* r = _paths[e % _paths.size()];
+            uint64_t cap = 0;
+            for (size_t i = 0; i < r->size(); i++) {
+                BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(i));
+                if (q && (cap == 0 || (uint64_t)q->_bitrate < cap)) cap = (uint64_t)q->_bitrate;
+            }
+            return (double)(cap / 1000000);
+        };
+    }
+    std::vector<double> w;
+    try {
+        w = dps::raw_weights(_dps_name, _dps_args, _no_of_paths, capf);
+    } catch (const std::exception& ex) {
+        fprintf(stderr, "dps_dist: src %u: %s\n", (unsigned)_srcaddr, ex.what());
+        exit(1);
+    }
+    _dps_uniform = dps::is_uniform(w);
+    std::vector<double> p = dps::normalise(w);
+    if (_dps_perm_on) p = dps::permute(p, _dps_perm_seed);
+    if (!_dps_uniform) _dps_cdf.build(p);
+    // One line per distinct pmf (capacity differs between hosts), so the configuration is provable from stdout.
+    static std::set<std::string> printed;
+    std::string sig;
+    char one[32];
+    for (double x : p) { snprintf(one, sizeof one, " %.6g", x); sig += one; }
+    if (printed.insert(_dps_uniform ? std::string("uniform") : sig).second) {
+        printf("dps_dist: src %u %s%s pmf%s\n", (unsigned)_srcaddr, _dps_name.c_str(), _dps_perm_on ? "+perm" : "", sig.c_str());
+        if (_dps_uniform) printf("dps_dist: uniform pmf takes the OPS draw (rand() %% %u)\n", (unsigned)_no_of_paths);
+    }
+}
+
+// One rand() per packet, no feedback, no state: OPS with a non-uniform distribution. Equal weights ->
+// rand() % N, the draw of nextEntropy_oblivious.
+uint16_t UecSrc::nextEntropy_dps() {
+    if (!_dps_init) initDps();
+    _last_ev_source = EVSRC_DPS;
+    if (_dps_uniform) return rand() % _no_of_paths;
+    return _dps_cdf.sample(rand() / (RAND_MAX + 1.0));
+}
+void UecSrc::processEv_dps(uint16_t /*path_id*/, PathFeedback /*feedback*/) { return; }
+// ===== END ADDED (dps) =================================================
 
 // ===== ADDED (fail-src-paths) =========================================
 // exp30 Part B: <src node_num> -> <dead path count>. Empty by default.
@@ -296,6 +426,7 @@ UecSrc::LoadBalancing_Algo UecSrc::_parseLBName(const std::string& name) {
     // ===== END ADDED (path-rr) =====
     // ===== ADDED (path-random) =====
     if (name == "path_random") return PATH_RANDOM;
+    if (name == "dps")         return DPS; // ===== ADDED (dps) =====
     // ===== END ADDED (path-random) =====
     // ===== ADDED (path-static) =====
     if (name == "path_static") return PATH_STATIC;
@@ -411,6 +542,8 @@ static const char* evSourceStr(UecSrc::EvSource s) {
         // ===== END FIXED (reps-event-trace) =====
         case UecSrc::EVSRC_PXR_RANDOM:         return "pxr_random";
         case UecSrc::EVSRC_PXR_POP:            return "pxr_pop";
+        case UecSrc::EVSRC_DPS:                return "dps"; // ===== ADDED (dps) =====
+        case UecSrc::EVSRC_BANK_POP:           return "bank_pop"; // ===== ADDED (reps-bank) =====
         default:                               return "";
     }
 }
@@ -639,6 +772,13 @@ void UecSrc::_dispatchLB(LoadBalancing_Algo lb) {
         processEv   = &UecSrc::processEv_path_static;
     }
     // ===== END ADDED (path-static) =====
+    // ===== ADDED (dps) =====
+    else if (lb == DPS) {
+        nextEntropy = &UecSrc::nextEntropy_dps;
+        processEv   = &UecSrc::processEv_dps;
+        _crt_path = 0;
+    }
+    // ===== END ADDED (dps) =====
 }
 // ===== END ADDED (per-host-lb) =========================================
 
@@ -1628,6 +1768,20 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              << _flow_size << " done_sending " << _done_sending << endl;
 
     if ((((mem_b)cum_ack - _rts_packets_sent) * _mss) >= _flow_size) {
+        // ===== ADDED (reps-bank): separate stats line (finish line stays byte-identical) =====
+        if (_bank_buf) {
+            cout << "BANK_STATS flowId " << flowId() << " srcaddr " << _srcaddr
+                 << " acks " << _bank_acks_seen << " no_sample " << _bank_ack_no_sample
+                 << " rej_ecn " << _bank_rej_ecn << " rej_rtt " << _bank_rej_rtt
+                 << " inserted " << _bank_inserted
+                 << " overwritten " << (_bank_buf->n_overwritten - _bank_snap_overwritten)
+                 << " expired " << (_bank_buf->n_expired - _bank_snap_expired)
+                 << " popped " << (_bank_buf->n_popped - _bank_snap_popped)
+                 << " valid_at_start " << _bank_valid_at_start
+                 << " valid_at_end " << _bank_buf->count_valid()
+                 << " end_ps " << eventlist().now() << endl;   // ACKs arriving after this instant (no tx-bitmap sample) still log rows
+        }
+        // ===== END ADDED (reps-bank) =====
         cout << "Flow " << _name << " flowId " << flowId() << " " << _nodename << " finished at "
              << timeAsUs(eventlist().now()-_flow_start_time) << " flowSize " << _flow_size << " total packets " << cum_ack << " RTS "
              << _rts_packets_sent << " total bytes " << ((mem_b)cum_ack - _rts_packets_sent) * _mss
@@ -1746,13 +1900,20 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
         if (_connections_mapping) {
             CONNECTION_INFO_MAP[_src_dst].buffer = circular_buffer_reps;
             CONNECTION_INFO_MAP[_src_dst].cwnd = _cwnd;
+            CONNECTION_INFO_MAP[_src_dst].cwnd_wide = _cwnd;   // ===== FIX (connection-info-cwnd-overflow) =====
             CONNECTION_INFO_MAP[_src_dst].plb_entropy = plb_entropy;
             CONNECTION_INFO_MAP[_src_dst].flowlet_entropy = flowlet_entropy;
             CONNECTION_INFO_MAP[_src_dst].ev_skip_bitmap = _ev_skip_bitmap;
             CONNECTION_INFO_MAP[_src_dst].stop_time = eventlist().now();
             CONNECTION_INFO_MAP[_src_dst].working_path_ecmp_mp = working_path_ecmp_mp;
+            // ===== ADDED (reps-bank): hand the bank to the connection (map owns it from here) =====
+            if (_bank_buf) {
+                CONNECTION_INFO_MAP[_src_dst].bank = _bank_buf;
+                _owns_bank = false;
+            }
+            // ===== END ADDED (reps-bank) =====
         }
-        
+
 
         if (_end_trigger) {
             _end_trigger->activate();
@@ -1831,11 +1992,13 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     mem_b pkt_size;
     simtime_picosec delay;
     simtime_picosec send_time = 0;
+    bool bank_have_rtt = false;   // ===== ADDED (reps-bank): this ACK produced a fresh RTT sample =====
     if (i != _tx_bitmap.end()) {
         //auto seqno = i->first;
         send_time = i->second.send_time;
         pkt_size = i->second.pkt_size;
         _raw_rtt = eventlist().now() - send_time;
+        bank_have_rtt = true;     // ===== ADDED (reps-bank) =====
         if (_collect_data) {
             _list_rtt.push_back(std::make_tuple(eventlist().now() / 1000, _raw_rtt / 1000, 1, 1,
                                             _base_rtt / 1000, _target_Qdelay / 1000));
@@ -2128,6 +2291,35 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         //fflush(stdout);
     }
     
+    // ===== ADDED (reps-bank): admission to the bank buffer =================
+    // Only ACKs with a fresh RTT sample are considered (PSN found in the tx
+    // bitmap above; otherwise _raw_rtt is a stale value). Admit iff clean (no
+    // ECN) AND RTT <= target. Target: explicit absolute raw-RTT, or by default
+    // NSCC's own target = _base_rtt + _target_Qdelay.
+    if (_bank_buf) {
+        _bank_acks_seen++;
+        simtime_picosec bank_target = (_reps_bank_target_rtt != (simtime_picosec)-1)
+                                      ? _reps_bank_target_rtt
+                                      : _base_rtt + _target_Qdelay;
+        if (!bank_have_rtt) {
+            _bank_ack_no_sample++;
+            bankLog("NOSAMPLE", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), pkt.ev(), 0, bank_target, 0);
+        } else if (pkt.ecn_echo()) {
+            _bank_rej_ecn++;
+            bankLog("REJ_ECN", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), pkt.ev(), _raw_rtt, bank_target, 0);
+        } else if (_raw_rtt <= bank_target) {
+            std::pair<uint16_t, uint64_t> lost;
+            bool over = _bank_buf->add(pkt.ev(), eventlist().now(), &lost);
+            _bank_inserted++;
+            if (over) bankLog("OVERWRITE", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), lost.first, 0, 0, lost.second);
+            bankLog("ADD", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), pkt.ev(), _raw_rtt, bank_target, 0);
+        } else {
+            _bank_rej_rtt++;
+            bankLog("REJ_RTT", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), pkt.ev(), _raw_rtt, bank_target, 0);
+        }
+    }
+    // ===== END ADDED (reps-bank) ============================================
+
     (this->*processEv)(pkt.ev(), pkt.ecn_echo() ? PATH_ECN:PATH_GOOD);
 
     // ===== ADDED (cwnd-log): per-ACK cwnd logger, works with any LB algorithm =====
@@ -3381,6 +3573,28 @@ void UecSrc::startFlow() {
         delete circular_buffer_reps;
     }
     // ===== END ADDED (circular-buffer-reps-leak-fix) =====
+    // ===== ADDED (reps-bank): (re)create the per-flow bank =====
+    if (_reps_bank && _reps_bank_size > 0) {
+        // Same ownership rule as circular_buffer_reps below: borrow the connection's bank from
+        // CONNECTION_INFO_MAP under -connections_mapping (the map owns it), else allocate and own one.
+        auto bank_it = CONNECTION_INFO_MAP.find(_src_dst);
+        if (_connections_mapping && bank_it != CONNECTION_INFO_MAP.end() && bank_it->second.bank != nullptr) {
+            if (_owns_bank && _bank_buf != bank_it->second.bank) delete _bank_buf;
+            _bank_buf = bank_it->second.bank;
+            _owns_bank = false;
+        } else {
+            if (_owns_bank) delete _bank_buf;
+            _bank_buf = new BankBuffer(_reps_bank_size);
+            _owns_bank = true;
+        }
+        _bank_snap_added = _bank_buf->n_added;
+        _bank_snap_overwritten = _bank_buf->n_overwritten;
+        _bank_snap_expired = _bank_buf->n_expired;
+        _bank_snap_popped = _bank_buf->n_popped;
+        _bank_valid_at_start = _bank_buf->count_valid();
+        _bank_acks_seen = _bank_ack_no_sample = _bank_rej_ecn = _bank_rej_rtt = _bank_inserted = 0;
+    }
+    // ===== END ADDED (reps-bank) =====
 
     if (CONNECTION_INFO_MAP.find(_src_dst) == CONNECTION_INFO_MAP.end() || !_connections_mapping) {
         circular_buffer_reps = new CircularBufferREPS<int>(CircularBufferREPS<int>::repsBufferSize);
@@ -3389,6 +3603,7 @@ void UecSrc::startFlow() {
         circular_buffer_reps = CONNECTION_INFO_MAP[_src_dst].buffer;
         CONNECTION_INFO_MAP[_src_dst].buffer = circular_buffer_reps;
         _cwnd = CONNECTION_INFO_MAP[_src_dst].cwnd;
+        _cwnd = CONNECTION_INFO_MAP[_src_dst].cwnd_wide;   // ===== FIX (connection-info-cwnd-overflow): full-width restore =====
         plb_entropy = CONNECTION_INFO_MAP[_src_dst].plb_entropy;
         flowlet_entropy = CONNECTION_INFO_MAP[_src_dst].flowlet_entropy;
         _ev_skip_bitmap = CONNECTION_INFO_MAP[_src_dst].ev_skip_bitmap;
@@ -4108,6 +4323,7 @@ uint16_t UecSrc::nextEntropy_freezing(){
         circular_buffer_reps->explore_counter--;
         _last_ev_source = EVSRC_EXPLORE; // ===== ADDED (reps-event-trace) =====
         RM(_srcaddr).ev_explore++;      // ===== ADDED (metrics-counters) =====
+        if (drawBiasApplies(true)) return drawRandomEv(); // ===== ADDED (reps-draw-weights) =====
         return rand() % _no_of_paths;
     }
 
@@ -4115,6 +4331,7 @@ uint16_t UecSrc::nextEntropy_freezing(){
         if (circular_buffer_reps->isEmpty()) {
             _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
             RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
+            if (drawBiasApplies(false)) return drawRandomEv(); // ===== ADDED (reps-draw-weights) =====
             return rand() % _no_of_paths;
         } else {
             // ===== ADDED (c1-ev-source-split): count valid vs stale for every algo.
@@ -4163,8 +4380,26 @@ uint16_t UecSrc::nextEntropy_freezing(){
                 }
             }
             // ===== END ADDED (reps-soft-replay) =================================
+            // ===== ADDED (reps-bank): REPS buffer has no fresh EV -> oldest live
+            // bank slot; random only if the bank is empty too. =================
+            if (_bank_buf) {
+                uint16_t bank_ev;
+                std::vector<std::pair<uint16_t, uint64_t>> bank_expired;
+                bool bank_hit = _bank_buf->pop_oldest(bank_ev, eventlist().now(), _reps_bank_timer,
+                                                      _reps_bank_log ? &bank_expired : nullptr);
+                for (auto& x : bank_expired)
+                    bankLog("EXPIRE", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), x.first, 0, _reps_bank_timer, x.second);
+                if (bank_hit) {
+                    bankLog("POP", eventlist().now(), flowId(), _srcaddr, _src_dst.c_str(), bank_ev, 0, _reps_bank_timer,
+                            eventlist().now() - _bank_buf->last_pop_age);
+                    _last_ev_source = EVSRC_BANK_POP;
+                    return _crt_path = bank_ev;
+                }
+            }
+            // ===== END ADDED (reps-bank) ========================================
             _last_ev_source = EVSRC_RANDOM; // ===== ADDED (reps-event-trace) =====
             RM(_srcaddr).ev_random++;      // ===== ADDED (metrics-counters) =====
+            if (drawBiasApplies(false)) return _crt_path = drawRandomEv(); // ===== ADDED (reps-draw-weights) =====
             return _crt_path = rand() % _no_of_paths;
         } else {
             _last_ev_source = EVSRC_FRESH_POP; // ===== ADDED (reps-event-trace) =====

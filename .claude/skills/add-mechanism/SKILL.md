@@ -10,6 +10,7 @@ Use for any change under `htsim/sim/`. Steps run in order; step 4 is mandatory.
 2. **Code.** `// ===== ADDED (<name>) =====` banner at every modification site (`// ===== FIX (<name>) =====` for fixes). CLI parsing in `htsim/sim/datacenter/main_uec.cpp`. Mechanism code mostly in `htsim/sim/uec.cpp` / `uec.h`.
 3. **Build in Docker** (skill `build-htsim`; `make clean` first).
 4. **MANDATORY: invoke skill `validate-mechanism` and complete Tiers 1-5.** Do not skip, shorten, or defer it, and do not write the docs as "done" before it passes.
+   Each mechanism (and each separate flag or mode of it) gets its own verification, including **small sanity checks and small smoke tests with an obvious, predictable result**: a tiny sim (one flow, few packets, few EVs) whose outcome you can state before running (e.g. weights 100/0 put every draw on one class; uniform weights give 50/50 within the binomial CI; an inverted setting gives the opposite). Write the expected number first, measure the distribution, compare, and record both in the Verification subsection.
 5. **Docs.**
    - `experiments/MODIFICATIONS.md`: a new `### [ADDED: <name>]` section (gate flag, file / what / gate table, design notes, and the **Verification** subsection from step 4). Use `[FIX: <name>]` with date and banner when changing existing behavior without a new flag. Update the existing section when extending a mechanism. No entry for experiment scripts or analysis code outside `htsim/sim/`.
    - ARCHITECTURE doc under `experiments/` for a new mechanism, linked from the section.

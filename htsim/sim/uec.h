@@ -22,6 +22,8 @@
 #include "pciemodel.h"
 #include "oversubscribed_cc.h"
 #include "metric.h"
+#include "dps_dist.h" // ===== ADDED (dps) =====
+#include "bank_buffer.h" // ===== ADDED (reps-bank) =====
 
 #define timeInf 0
 // min RTO bound in us
@@ -42,10 +44,21 @@ public:
     simtime_picosec stop_time;
     CircularBufferREPS<int> *buffer;
     int cwnd;
+    // ===== FIX (connection-info-cwnd-overflow) =====
+    // `int cwnd` above wraps for the constant-rate sender (cwnd = 1000000 packets = 4.15e9 bytes > 2^31): a flow restored from
+    // CONNECTION_INFO_MAP (-connections_mapping) then started with a NEGATIVE cwnd and never sent. The full-width copy below is
+    // what startFlow() restores; the original int field is still written as before.
+    mem_b cwnd_wide = 0;
+    // ===== END FIX (connection-info-cwnd-overflow) =====
     int plb_entropy;
     int flowlet_entropy;
     std::vector<uint16_t> ev_skip_bitmap;
     int working_path_ecmp_mp;
+    // ===== ADDED (reps-bank) =====
+    // Bank buffer of this connection (src-dst pair), shared across successive flows exactly like `buffer`
+    // above (only with -connections_mapping). nullptr until a flow with -reps_bank finishes.
+    BankBuffer *bank = nullptr;
+    // ===== END ADDED (reps-bank) =====
 
 };
 
@@ -360,6 +373,22 @@ public:
     // ====================================================================
 
     // ====================================================================
+    // ADDED (reps-bank): second, independent "bank" buffer next to the REPS
+    // buffer. Gets EVs whose ACK was clean (no ECN) AND whose RTT sample is
+    // <= target. nextEntropy_freezing()'s non-frozen fallback pops the oldest
+    // live bank slot instead of a random draw (random only if bank is empty
+    // too). Off by default; flag absent => byte-identical to vanilla FREEZING.
+    // ====================================================================
+    static bool _reps_bank;                      // default false
+    static int  _reps_bank_size;                 // slots, default 8 (<=0 disables)
+    static simtime_picosec _reps_bank_timer;     // slot lifetime, default 100us
+    static simtime_picosec _reps_bank_target_rtt; // (simtime_picosec)-1 = auto (_base_rtt + _target_Qdelay); otherwise absolute raw-RTT threshold (0 admits nothing)
+    static FILE* _reps_bank_log;                 // -log_reps_bank <file>; nullptr = off. Own schema, independent of -log_reps_events
+    // ====================================================================
+    // END ADDED (reps-bank)
+    // ====================================================================
+
+    // ====================================================================
     // ADDED (swift-cc)
     // Static parameters shared by Swift/LSwift/MSwift (all use _target_Qdelay
     // as their queue-delay target, same as NSCC, matching the paper's setup).
@@ -442,8 +471,10 @@ public:
         // DUAL_MPRDMA_REPS; all other algos keep emitting plain EVSRC_FROZEN_POP,
         // so flag-off trace output (-log_reps_events) is byte-identical.
         EVSRC_FROZEN_POP_VALID, // remove_frozen(), is_valid_frozen() was true
-        EVSRC_FROZEN_POP_STALE  // remove_frozen(), is_valid_frozen() was false
+        EVSRC_FROZEN_POP_STALE, // remove_frozen(), is_valid_frozen() was false
         // ===== END ADDED (dual-window-reps-mprdma) =====
+        EVSRC_DPS,              // ===== ADDED (dps) ===== nextEntropy_dps(): independent draw from the DPS distribution
+        EVSRC_BANK_POP          // ===== ADDED (reps-bank) ===== REPS buffer had no fresh EV; popped oldest live bank slot
     };
     // ===== ADDED (dual-window-reps-mprdma) =====
     // Which of the two independent CC windows a packet/ACK/NACK is attributed
@@ -531,7 +562,7 @@ public:
     // routing (bypasses per-hop ECMP).  Each UecSrc gets a pre-computed buffer
     // of Route* objects via setPaths(); packets cycle through them in order.
     // ===== END ADDED (path-rr) =====
-    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB, PATH_RR, PATH_RANDOM, PATH_STATIC, FREEZING_PXR }; // ===== ADDED (path-random) (path-static) (freezing-pxr) =====
+    enum LoadBalancing_Algo { BITMAP, REPS, OBLIVIOUS, MIXED, FLOWLET, MPRDMA, INCREMENTAL, PLB, MP, ECMP, FREEZING, KLB, SKLB, HKLB, PATH_RR, PATH_RANDOM, PATH_STATIC, FREEZING_PXR, DPS }; // ===== ADDED (path-random) (path-static) (freezing-pxr) (dps) =====
 
     // ===== ADDED (srv6) =====
     // Master toggle for SRv6 source routing. When true, every sendNewPacket/
@@ -541,6 +572,38 @@ public:
     // algorithm: any existing algo can be paired with -use_srv6.
     static bool _use_srv6;
     // ===== END ADDED (srv6) =====
+
+    // ===== ADDED (reps-draw-weights) =====
+    // "God mode" for the REPS random draw: the uniform rand() % _no_of_paths of the empty-buffer /
+    // no-fresh-EV branch of nextEntropy_freezing (and optionally the explore branch) is replaced by
+    // one weighted draw. Off by default (no flag = byte-identical). See experiments/MODIFICATIONS.md.
+    //   DRAW_CAPACITY: weight of EV e = bottleneck link speed (Mbit/s, min over the queues of route
+    //                  _paths[e % _paths.size()]), needs -use_srv6 (routes come from the EV);
+    //   DRAW_LIST:     explicit integer weight per EV (length = -paths).
+    // If all weights of a source are equal the original uniform draw runs (byte-identical to vanilla).
+    enum RepsDrawWeights { DRAW_OFF, DRAW_CAPACITY, DRAW_LIST };
+    enum RepsDrawScope { DRAWSCOPE_FALLBACK, DRAWSCOPE_EXPLORE, DRAWSCOPE_BOTH };
+    static RepsDrawWeights _reps_draw_weights;
+    static std::vector<uint32_t> _reps_draw_list;
+    static std::set<uint32_t> _reps_draw_hosts;      // source host ids (_srcaddr) that use the weights; empty = all hosts
+    static RepsDrawScope _reps_draw_scope;
+    static bool _reps_draw_invert;                   // negative control: weight' = max + min - weight
+    // ===== END ADDED (reps-draw-weights) =====
+
+    // ===== ADDED (dps) =====
+    // Distribution Packet Spraying (-load_balancing_algo dps): every packet draws its EV independently from a
+    // fixed distribution over the EV space. No buffer, no feedback (processEv_dps is empty), like OBLIVIOUS (OPS).
+    // The distribution is a CLI spec (-dps_dist, -dps_perm); each source turns it into a CDF at its first draw
+    // (lazy, uses no RNG). Equal weights -> rand() % N, byte-identical to OBLIVIOUS.
+    static std::string _dps_name;                    // "" = not given
+    static std::vector<double> _dps_args;            // numeric arguments (for list/file: the weights)
+    static bool _dps_perm_on;
+    static uint64_t _dps_perm_seed;
+    bool _dps_init = false;
+    bool _dps_uniform = true;
+    dps::Cdf _dps_cdf;
+    void initDps();
+    // ===== END ADDED (dps) =====
 
     // ===== ADDED (fail-src-paths) =====
     // Targeted single-source path loss (exp30 Part B). Maps a source node_num to
@@ -620,6 +683,19 @@ public:
     uint32_t from = -1;
     uint32_t to = -2;
     vector<const Route *> _paths;
+
+    // ===== ADDED (reps-draw-weights) =====
+    // Per-source weighted random draw (lazy init at the first draw; uses no RNG).
+    bool _draw_init = false;
+    bool _draw_active = false;                // false: all weights equal or host not selected -> original uniform draw
+    std::vector<uint64_t> _draw_cum;          // prefix sums of the integer weights, one entry per EV
+    void initDrawWeights();
+    uint16_t drawRandomEv();                  // exactly one rand() per call, like the uniform draw
+    bool drawBiasApplies(bool explore) const {
+        return _reps_draw_weights != DRAW_OFF &&
+               (_reps_draw_scope == DRAWSCOPE_BOTH || _reps_draw_scope == (explore ? DRAWSCOPE_EXPLORE : DRAWSCOPE_FALLBACK));
+    }
+    // ===== END ADDED (reps-draw-weights) =====
 
     // status for debugging
     uint32_t _new_packets_sent;
@@ -856,6 +932,10 @@ private:
     // ===== ADDED (path-static) =====
     void processEv_path_static(uint16_t path_id, PathFeedback feedback);
     // ===== END ADDED (path-static) =====
+    // ===== ADDED (dps) =====
+    uint16_t nextEntropy_dps();
+    void processEv_dps(uint16_t path_id, PathFeedback feedback);
+    // ===== END ADDED (dps) =====
     // ===== ADDED (freezing-pxr) =====
     void processEv_freezing_pxr(uint16_t path_id, PathFeedback feedback);
     // ===== END ADDED (freezing-pxr) =====
@@ -1186,6 +1266,21 @@ private:
     // true only when this UecSrc allocated circular_buffer_reps itself (not borrowed
     // from CONNECTION_INFO_MAP under -connections_mapping) — see startFlow().
     bool _owns_circular_buffer_reps = false;
+    // ===== ADDED (reps-bank) =====
+    // Per-connection bank, handled exactly like circular_buffer_reps: with -connections_mapping a new flow of the
+    // same src-dst pair borrows the bank left in CONNECTION_INFO_MAP by the previous flow; otherwise the flow
+    // allocates its own. Set up in startFlow only when -reps_bank is on. The counters below are per flow (reset in
+    // startFlow); the bank's own counters are cumulative over the connection, so startFlow snapshots them.
+    BankBuffer* _bank_buf = nullptr;
+    bool _owns_bank = false;           // true only while this UecSrc must free _bank_buf (never when borrowed or handed to the map)
+    uint64_t _bank_snap_added = 0, _bank_snap_overwritten = 0, _bank_snap_expired = 0, _bank_snap_popped = 0;
+    int _bank_valid_at_start = 0;      // live slots inherited from the connection's previous flow
+    uint64_t _bank_acks_seen = 0;      // ACKs processed with the bank on
+    uint64_t _bank_ack_no_sample = 0;  // ACK had no RTT sample (PSN not in tx bitmap) -> not considered
+    uint64_t _bank_rej_ecn = 0;        // rejected: ECN-marked
+    uint64_t _bank_rej_rtt = 0;        // rejected: clean but RTT above target
+    uint64_t _bank_inserted = 0;       // accepted into the bank
+    // ===== END ADDED (reps-bank) =====
     // ===== END ADDED (circular-buffer-reps-leak-fix) =====
 
     simtime_picosec _last_eta_time = 0;

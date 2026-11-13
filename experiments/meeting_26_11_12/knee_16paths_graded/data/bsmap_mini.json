@@ -1,0 +1,1 @@
+{"h512_p16g_msgNh_lat250": [2, 16, 128], "h512_p16g_msgNhG_lat250": [2, 16, 128], "h512_p16g_sol_lat250": [512], "h512_p16g_sol1p_lat250": [512], "h512_p16g_msgNh_lat16000": [2, 64, 512], "h512_p16g_msgNhG_lat16000": [2, 64, 512], "h512_p16g_sol_lat16000": [512], "h512_p16g_sol1p_lat16000": [512], "h512_p16g_msgNhDcap_lat250": [8], "h512_p16g_msgNhDcap_lat16000": [8]}

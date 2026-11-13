@@ -18,6 +18,8 @@ All gated behind CLI flags:
 3. **WTD in NSCC** (`-wtd_in_nscc`) — paper's "Wait to Decrease" (SMaRTT-REPS §3.6.1), gates MD on `_exp_avg_ecn ≥ 0.25`. Mutually exclusive with state-aware and smart-filter. Experiments: exp07 (complete; null result — see exp07 README §Results).
 4. **PATH_RR** (`-load_balancing_algo path_rr`) — true round-robin over distinct physical paths using full source routing; bypasses per-hop ECMP. Clean baseline for comparing against entropy-spray algorithms.
 
+5. **REPS-Bank** (`-reps_bank`) - second "bank" buffer of clean, fast-RTT EVs used instead of a random draw when the REPS buffer is empty (non-frozen only). See `experiments/REPS_BANK_ARCHITECTURE.md`.
+
 Later mechanisms (Swift CCs, Ofan, constant-rate sender, per-link degrade, ...) are listed in `experiments/MODIFICATIONS.md` (index command at the bottom of this file).
 
 ## The state-aware NSCC + REPS extension

@@ -1,0 +1,44 @@
+{
+ "h512_p16_msgNhBkNauto_lat250": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat250": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat500": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat500": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat1000": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat1000": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat2000": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat2000": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat4000": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat4000": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat8000": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat8000": [
+  8
+ ],
+ "h512_p16_msgNhBkNauto_lat16000": [
+  8
+ ],
+ "h512_p16_msgNhBkNtight_lat16000": [
+  8
+ ]
+}

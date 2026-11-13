@@ -5,7 +5,7 @@ Loaded only when working on files under `experiments/`. Repo-wide rules are in t
 ## Where things are
 
 - `README.md` — lineage table of every experiment + takeaways. Start here; add a row for each new experiment.
-- `ARCHITECTURE.md` — state-aware design. Other mechanism docs: `PATH_RR_ARCHITECTURE.md`, `SWIFT_CC_ARCHITECTURE.md`, `RATE_CONST_ARCHITECTURE.md`, `OFAN_ARCHITECTURE.md`, `SRV6_VALIDATION_REPORT.md`.
+- `ARCHITECTURE.md` — state-aware design. Other mechanism docs: `PATH_RR_ARCHITECTURE.md`, `SWIFT_CC_ARCHITECTURE.md`, `RATE_CONST_ARCHITECTURE.md`, `REPS_DRAW_WEIGHTS_ARCHITECTURE.md`, `OFAN_ARCHITECTURE.md`, `SRV6_VALIDATION_REPORT.md`.
 - `MODIFICATIONS.md` — source of truth for original-vs-added code in `htsim/sim/`.
 - `RUNNING_EXPERIMENTS.md` — how to add an experiment.
 - `workloads/` — shared TM files + generators. `tools/` — trace viewers (`tools/README.md`).
@@ -18,6 +18,7 @@ Loaded only when working on files under `experiments/`. Repo-wide rules are in t
 - Tidy CSV columns: `workload`, `mode`, `sev`, `seed`, `flow_id`, `fct_us`, `size`, `flow_class`. Plots use 95% CI (t-distribution), >= 3-5 seeds.
 - Compress raw runs to `runs.tar.gz` before committing.
 - Logging and retention: log traces (`-log_reps_events` for one representative host, `-log_queue_stats`, ...) in the same run as the stats run, plot immediately, then `gzip -9` and keep them on disk, never delete, never commit. Details in skill `new-experiment`.
+- Interactive pages: use skill `interactive-plotter` (plan the claims and plot order first, build with `tools/plot_common.py`); do not copy an older page's CSS/JS.
 - `experiments/**/*.html` is gitignored; interactive pages are published in the thesis repo (see `thesis-sync` skill, only on user request).
 - No test suite for `htsim/sim/` or `experiments/`: validate by running and inspecting output (root `CLAUDE.md` validation checklist).
 
